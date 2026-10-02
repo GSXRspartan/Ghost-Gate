@@ -28,6 +28,16 @@ echo "[patch-test] staging patched tree -> $PATCHED_DST"
 mkdir -p "$PATCHED_DST"
 rsync -a --delete --exclude 'target/' --exclude '.git/' "$PATCHED_SRC/" "$PATCHED_DST/"
 
+# walletd's `default` features include `web_ui`, so `include_dir!` expands against `web_ui/dist` at
+# compile time. Upstream's build.rs creates that directory but deliberately leaves it empty in debug
+# mode (it only fills it in release, by running the npm build), which leaves the macro with nothing
+# to embed. Ghost Gate never serves the UI, so stage a placeholder asset rather than paying for a
+# node toolchain in WSL. This is a staging concern, not part of the MVP patch.
+WALLET_WEB_DIST="$PATCHED_DST/applications/tari_walletd/web_ui/dist"
+mkdir -p "$WALLET_WEB_DIST"
+[ -s "$WALLET_WEB_DIST/index.html" ] || \
+  printf '<!doctype html><title>Ghost Gate build placeholder</title>\n' > "$WALLET_WEB_DIST/index.html"
+
 # The build script for template_builtin compiles the builtin templates into its own crate tree, and
 # the nested cargo build inherits CARGO_TARGET_DIR — which would send the artifact somewhere the
 # script does not look. The wallet SDK does not need the builtins, but building anything in that
@@ -49,6 +59,17 @@ case "${1:-test}" in
   check|build)
     shift || true
     exec cargo check -p tari_ootle_wallet_sdk --all-targets "$@"
+    ;;
+  check-walletd)
+    # Type-check walletd's tests without linking. This is where the MVP request/handler tests live,
+    # and it is the only step that needs walletd's dependency graph (webrtc, wasm-opt's C++ build) —
+    # so it is kept separate from the SDK-only path above, which stays cheap enough to re-run often.
+    shift || true
+    exec cargo check -p tari_ootle_walletd --lib --tests "$@"
+    ;;
+  test-walletd)
+    shift || true
+    exec cargo test -p tari_ootle_walletd --lib "$@"
     ;;
   test)
     shift || true
