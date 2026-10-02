@@ -10,16 +10,17 @@ use ghost_gate_core::{
     Challenge, GateContext, GateError, GatePolicy, NETWORK_BYTE, ProofReceipt, find_qualifying_output, qualify,
 };
 use ootle_byte_type::ToByteType;
-use tari_crypto::ristretto::{RistrettoPublicKey, RistrettoSecretKey};
+use tari_crypto::{
+    keys::{PublicKey, SecretKey},
+    ristretto::{RistrettoPublicKey, RistrettoSecretKey},
+};
 use tari_ootle_wallet_crypto::{
     MaskAndValue, OutputWitness, StealthInputWitness, StealthOutputWitness, stealth,
 };
 use tari_template_lib::types::{
-    Amount, ComponentAddress, EncryptedData, Hash32, MaxBytes, ObjectKey, ResourceAddress,
+    AccessRule, Amount, ComponentAddress, EncryptedData, Hash32, MaxBytes, ObjectKey, ResourceAddress,
     crypto::{RistrettoPublicKeyBytes, UtxoTag},
-    stealth::{
-        RevealedOutput, SpendAuthorization, StealthInputsStatement, StealthTransferStatement, UnspentOutput,
-    },
+    stealth::{RevealedOutput, SpendAuthorization, StealthTransferStatement},
 };
 
 const RESOURCE: ResourceAddress = ResourceAddress::new(ObjectKey::from_array([7u8; ObjectKey::LENGTH]));
@@ -58,9 +59,12 @@ fn ctx() -> GateContext<'static> {
 }
 
 /// Builds one key-path stealth output worth `amount` promising at least `mvp`.
-fn output(amount: u64, mvp: u64) -> (StealthOutputWitness, RistrettoSecretKey) {
+///
+/// The output is authorised by the key derived from its own mask, so a test holding that mask can
+/// also hold the key that authorises spending it — the same relationship a wallet output has.
+fn output(amount: u64, mvp: u64) -> StealthOutputWitness {
     let mask = RistrettoSecretKey::random(&mut rand::rng());
-    let witness = StealthOutputWitness {
+    StealthOutputWitness {
         witness: OutputWitness {
             amount,
             mask: mask.clone(),
@@ -71,14 +75,13 @@ fn output(amount: u64, mvp: u64) -> (StealthOutputWitness, RistrettoSecretKey) {
         },
         auth: SpendAuthorization::Key(RistrettoPublicKey::from_secret_key(&mask).to_byte_type()),
         tag: UtxoTag::new(0),
-    };
-    (witness, mask)
+    }
 }
 
 /// A self-transfer: one input worth `input_value`, one output worth `input_value` with MVP `mvp`.
 fn self_transfer(input_value: u64, mvp: u64) -> (StealthTransferStatement, RistrettoSecretKey) {
     let input_mask = RistrettoSecretKey::random(&mut rand::rng());
-    let (out, _) = output(input_value, mvp);
+    let out = output(input_value, mvp);
     let statement = stealth::create_transfer_statement(
         [StealthInputWitness::new(MaskAndValue {
             mask: input_mask.clone(),
@@ -143,7 +146,7 @@ fn mutating_mvp_after_proof_breaks_validation() {
 /// MVP > value cannot even be constructed: the wallet refuses before any proof is made.
 #[test]
 fn mvp_above_value_is_refused_at_construction() {
-    let (out, _) = output(100, 101);
+    let out = output(100, 101);
     let err = stealth::create_outputs_statement([&out], None).unwrap_err();
     let text = err.to_string().to_lowercase();
     assert!(text.contains("minimum_value_promise"), "{text}");
@@ -165,7 +168,7 @@ fn fragmented_inputs_qualify_once() {
         .collect();
 
     let total: u64 = inputs.iter().sum();
-    let (out, _) = output(total, THRESHOLD);
+    let out = output(total, THRESHOLD);
     let statement = stealth::create_transfer_statement(input_witnesses, Amount::zero(), [&out], None).unwrap();
 
     let receipt = qualify(&policy(), &challenge(), &statement, &ctx(), false).expect("must qualify");
@@ -193,7 +196,7 @@ fn below_threshold_is_refused() {
 /// A statement spending nothing live proves nothing.
 #[test]
 fn statement_with_no_inputs_is_refused() {
-    let (out, _) = output(THRESHOLD, THRESHOLD);
+    let out = output(THRESHOLD, THRESHOLD);
     let statement = stealth::create_transfer_statement(
         std::iter::empty::<StealthInputWitness>(),
         Amount::zero(),
@@ -235,8 +238,8 @@ fn revealed_output_is_refused() {
 /// Two outputs means "which one was the proof" has two answers. Refuse rather than pick.
 #[test]
 fn ambiguous_multiple_outputs_are_refused() {
-    let (a, _) = output(6_000, 6_000);
-    let (b, _) = output(6_000, 6_000);
+    let a = output(6_000, 6_000);
+    let b = output(6_000, 6_000);
     let input_mask = RistrettoSecretKey::random(&mut rand::rng());
     let statement = stealth::create_transfer_statement(
         [StealthInputWitness::new(MaskAndValue {
@@ -250,7 +253,7 @@ fn ambiguous_multiple_outputs_are_refused() {
     .unwrap();
 
     // Both outputs meet the threshold on their own, so nothing but the ambiguity rule can refuse it.
-    assert!(a.output.minimum_value_promise >= THRESHOLD);
+    assert!(a.witness.minimum_value_promise >= THRESHOLD);
     assert_eq!(
         qualify(&policy(), &challenge(), &statement, &ctx(), false),
         Err(GateError::TooManyOutputs)
@@ -284,8 +287,11 @@ fn no_outputs_is_refused() {
 /// A script-only output would park the funds behind a predicate. The gate wants funds a key holds.
 #[test]
 fn non_key_spendable_output_is_refused() {
-    let (mut out, mask) = output(THRESHOLD, THRESHOLD);
-    out.auth = SpendAuthorization::Script(Hash32::from_array([3u8; 32]));
+    let out = output(THRESHOLD, THRESHOLD);
+    let out = StealthOutputWitness {
+        auth: SpendAuthorization::Script(Hash32::from_array([3u8; 32])),
+        ..out
+    };
     let input_mask = RistrettoSecretKey::random(&mut rand::rng());
     let statement = stealth::create_transfer_statement(
         [StealthInputWitness::new(MaskAndValue {
@@ -297,7 +303,7 @@ fn non_key_spendable_output_is_refused() {
         None,
     )
     .unwrap();
-    let _ = mask;
+    // The mask is only needed to build the witness; the script-only auth replaces its key role.
 
     assert_eq!(
         qualify(&policy(), &challenge(), &statement, &ctx(), false),
@@ -335,11 +341,10 @@ fn script_path_input_is_refused() {
 #[test]
 fn malformed_statement_bytes_do_not_decode() {
     let garbage = vec![0xffu8; 31];
-    assert!(tari_bor_decode::<StealthTransferStatement>(&garbage).is_err());
-}
-
-fn tari_bor_decode<T: tari_bor::Decode<'_, ()>>(bytes: &[u8]) -> Result<T, tari_bor::BorError> {
-    tari_bor::decode(bytes)
+    assert!(
+        tari_bor::decode::<StealthTransferStatement>(&garbage).is_err(),
+        "31 bytes of 0xff is not a valid CBOR statement"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -361,7 +366,7 @@ fn receipt_carries_only_public_lower_bound_and_nonce() {
     );
 
     // The receipt's encoding is three fields and nothing else.
-    let encoded = tari_bor::to_vec(&receipt).unwrap();
+    let encoded = tari_bor::encode(&receipt).unwrap();
     let decoded: ProofReceipt = tari_bor::decode(&encoded).unwrap();
     assert_eq!(decoded, receipt);
 }

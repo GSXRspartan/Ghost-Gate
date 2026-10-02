@@ -12,12 +12,13 @@ use tari_crypto::{
     keys::{PublicKey, SecretKey},
     ristretto::{RistrettoPublicKey, RistrettoSecretKey},
 };
-use tari_engine_types::{commit_result::CommitResult, substate_type::SubstateType};
+use tari_engine_types::substate::SubstateDiff;
+use tari_ootle_common_types::substate_type::SubstateType;
 use tari_ootle_wallet_crypto::{MaskAndValue, OutputWitness, StealthInputWitness, StealthOutputWitness};
 use tari_ootle_transaction::{Epoch, Transaction, args};
 use tari_template_lib::types::{
-    Amount, ComponentAddress, EncryptedData, Hash32, MaxBytes, ObjectKey, ResourceAddress, UtxoTag,
-    crypto::{PedersenCommitmentBytes, RistrettoPublicKeyBytes},
+    AccessRule, Amount, ComponentAddress, EncryptedData, Hash32, MaxBytes, ObjectKey, ResourceAddress,
+    crypto::{PedersenCommitmentBytes, RistrettoPublicKeyBytes, UtxoTag},
     stealth::{
         RevealedOutput, SpendAuthorization, SpendWitness, StealthInputsStatement, StealthOutputsStatement,
         StealthTransferStatement, StealthUnspentOutput, UnspentOutput,
@@ -26,13 +27,41 @@ use tari_template_lib::types::{
 use tari_template_test_tooling::{TemplateTest, support::assert_error::assert_reject_reason};
 
 const CRATE_PATH: &str = env!("CARGO_MANIFEST_DIR");
-const FAUCET_TEMPLATE: &str = "tests/templates/ghost_gate_faucet";
-const GATE_TEMPLATE: &str = "templates/ghost_gate";
+/// The funding fixture, resolved from this crate's manifest dir to the repo's templates directory.
+/// It is a separate cargo workspace because it also builds for wasm32.
+const FAUCET_TEMPLATE: &str = "../../templates/ghost_gate_faucet";
+const GATE_TEMPLATE: &str = "../../templates/ghost_gate";
 const GATE_NAME: &str = "GhostGate";
 const FAUCET_NAME: &str = "GhostGateFaucet";
 
 const RELYING_SITE: &[u8] = b"vip.example";
 const SESSION: &[u8] = b"session-1";
+
+/// JSONPath into the gate component's `proofs_accepted` field.
+///
+/// Field order follows the declaration order in the template state struct, and minicbor encodes a
+/// `#[n(i)]` struct as an array indexed by field number:
+///
+/// ```text
+/// $.0 policy   $.1 relying_site   $.2 session_commitment
+/// $.3 burnt_nonces   $.4 proofs_accepted
+/// ```
+const GATE_PROOFS_ACCEPTED_PATH: &str = "$.4";
+
+/// The epoch tests execute in. The bootstrap leaves the virtual substate at 0, which would make an
+/// "expired" challenge impossible to express, since expiry compares `current_epoch > expires_epoch`.
+const TEST_EPOCH: u64 = 5;
+
+/// The gate's configured relying-site identifier. Typed explicitly because `MaxBytes<N>` infers
+/// nothing at a transaction-argument boundary, where the value must already be `Encode`.
+fn site_id() -> MaxBytes<64> {
+    MaxBytes::new_checked(RELYING_SITE.to_vec()).expect("well under the limit")
+}
+
+/// The gate's configured browser-session commitment.
+fn session_id() -> MaxBytes<64> {
+    MaxBytes::new_checked(SESSION.to_vec()).expect("well under the limit")
+}
 const THRESHOLD: u64 = 10_000;
 
 /// The threshold in microtari is 10,000 tTARI's smallest unit would be 10_000_000; the test uses a
@@ -51,7 +80,14 @@ struct Funds {
 // ---------------------------------------------------------------------------------------------
 
 fn harness() -> TemplateTest {
-    TemplateTest::new(CRATE_PATH, [FAUCET_TEMPLATE, GATE_TEMPLATE])
+    let mut test = TemplateTest::new(CRATE_PATH, [FAUCET_TEMPLATE, GATE_TEMPLATE]);
+    // The bootstrap leaves the epoch at 0. Pinning it makes an expired challenge expressible and
+    // keeps every test's epoch arithmetic in one place.
+    test.set_virtual_substate(
+        tari_engine_types::virtual_substate::VirtualSubstateId::CurrentEpoch,
+        tari_engine_types::virtual_substate::VirtualSubstate::CurrentEpoch(TEST_EPOCH),
+    );
+    test
 }
 
 /// Deploys a stealth resource funded with `amounts`, each output key-authorised by `owner`.
@@ -86,8 +122,8 @@ fn fund(test: &mut TemplateTest, owner: &RistrettoSecretKey, amounts: &[u64], mv
         })
         .collect();
 
-    let total: u64 = amounts.iter().sum();
-    let statement = create_transfer_statement(outputs, &[], total, None);
+let total: u64 = amounts.iter().sum();
+    let statement = mint_statement(outputs, total);
 
     let faucet_addr = test.get_template_address(FAUCET_NAME);
     test.execute_expect_success(
@@ -126,19 +162,22 @@ fn stealth_spend_key(account_key: &RistrettoPublicKey, nonce: u64) -> RistrettoP
 }
 
 /// Deploys a gate over `resource` and returns its address.
-fn deploy_gate(test: &mut TemplateTest, resource: ResourceAddress, threshold: u64) -> ComponentAddress {
+///
+/// The address is allocated by the transaction under `name`, so two calls yield two distinct gates —
+/// which is what lets a test point a challenge at a *real* other gate instead of a synthetic address
+/// the engine would reject at substate lookup before the template ever ran.
+fn deploy_gate_named(test: &mut TemplateTest, name: &str, resource: ResourceAddress, threshold: u64) -> ComponentAddress {
     let template_addr = test.get_template_address(GATE_NAME);
+    // `test.transaction()` rather than a fresh localnet builder: it carries a per-call nonce, and
+    // an address allocation is derived from the transaction. Two deployments sharing a transaction
+    // would allocate the same component address and the second would collide.
     test.execute_expect_success(
-        Transaction::builder_localnet(Epoch(1))
+        test.transaction()
+            .allocate_component_address(name)
             .call_function(
                 template_addr,
                 "new",
-                args![
-                    resource,
-                    threshold,
-                    MaxBytes::new_checked(RELYING_SITE.to_vec()).unwrap(),
-                    MaxBytes::new_checked(SESSION.to_vec()).unwrap()
-                ],
+                args![Workspace(name), resource, threshold, site_id(), session_id()],
             )
             .build_and_seal(test.secret_key()),
         vec![],
@@ -146,6 +185,11 @@ fn deploy_gate(test: &mut TemplateTest, resource: ResourceAddress, threshold: u6
     test.get_previous_output_address(SubstateType::Component)
         .as_component_address()
         .unwrap()
+}
+
+/// Deploys a gate under a name unique to this test, so repeated calls within one test do not collide.
+fn deploy_gate(test: &mut TemplateTest, resource: ResourceAddress, threshold: u64) -> ComponentAddress {
+    deploy_gate_named(test, "ghost_gate", resource, threshold)
 }
 
 fn challenge_for(gate: ComponentAddress, resource: ResourceAddress, threshold: u64) -> Challenge {
@@ -156,8 +200,8 @@ fn challenge_for(gate: ComponentAddress, resource: ResourceAddress, threshold: u
         network: NETWORK_BYTE,
         nonce: Hash32::from_array([7u8; 32]),
         expires_epoch: 1_000,
-        relying_site: MaxBytes::new_checked(RELYING_SITE.to_vec()).unwrap(),
-        session_commitment: MaxBytes::new_checked(SESSION.to_vec()).unwrap(),
+        relying_site: site_id(),
+        session_commitment: session_id(),
     }
 }
 
@@ -185,7 +229,7 @@ fn proof_statement(input_mask: &RistrettoSecretKey, output_value: u64, mvp: u64)
         mvp,
         RistrettoPublicKey::from_secret_key(&RistrettoSecretKey::random(&mut rand::rng())).to_byte_type(),
     );
-    create_transfer_statement(vec![out], &[(*input_mask, output_value)], output_value, None)
+    create_transfer_statement(vec![out], &[(input_mask.clone(), output_value)], Amount::zero(), None)
 }
 
 /// A proof statement spending several inputs.
@@ -202,17 +246,17 @@ fn fragmented_statement(
     );
     let inputs: Vec<(RistrettoSecretKey, u64)> = input_masks
         .iter()
-        .copied()
+        .cloned()
         .zip(input_values.iter().copied())
         .collect();
-    create_transfer_statement(vec![out], &inputs, output_value, None)
+    create_transfer_statement(vec![out], &inputs, Amount::zero(), None)
 }
 
 /// Builds a transfer statement from witnesses plus `(mask, value)` inputs.
 fn create_transfer_statement(
     outputs: Vec<StealthOutputWitness>,
     inputs: &[(RistrettoSecretKey, u64)],
-    _output_value: u64,
+    revealed_input: Amount,
     revealed_output: Option<RevealedOutput>,
 ) -> StealthTransferStatement {
     let output_refs: Vec<&StealthOutputWitness> = outputs.iter().collect();
@@ -226,16 +270,31 @@ fn create_transfer_statement(
         })
         .collect();
 
-    let revealed_input: Amount = Amount::zero();
-    tari_ootle_wallet_crypto::stealth::create_transfer_statement(input_witnesses, revealed_input, output_refs, revealed_output)
-        .expect("test statement")
+    tari_ootle_wallet_crypto::stealth::create_transfer_statement(
+        input_witnesses,
+        revealed_input,
+        output_refs,
+        revealed_output,
+    )
+    .expect("test statement")
+}
+
+/// The mint statement that converts a freshly created resource's revealed supply into the stealth
+/// outputs a test asked for.
+///
+/// It reveals the whole supply as an *input* and creates only stealth outputs. The engine's
+/// pre-flight rejects a statement with neither inputs nor a revealed input amount
+/// (`crates/engine_types/src/stealth/transfer.rs`), which a mint with no inputs would be. This is the
+/// same shape the Ootle cohort's own stealth fixture uses.
+fn mint_statement(outputs: Vec<StealthOutputWitness>, supply: u64) -> StealthTransferStatement {
+    create_transfer_statement(outputs, &[], Amount::from(supply), None)
 }
 
 /// Two qualifying outputs. Only the ambiguity rule can refuse this.
 fn two_output_statement(input_mask: &RistrettoSecretKey, total: u64, spend_key: RistrettoPublicKeyBytes) -> StealthTransferStatement {
     let a = output_witness(total / 2, THRESHOLD, spend_key);
     let b = output_witness(total / 2, THRESHOLD, spend_key);
-    create_transfer_statement(vec![a, b], &[(*input_mask, total)], total, None)
+    create_transfer_statement(vec![a, b], &[(input_mask.clone(), total)], Amount::zero(), None)
 }
 
 /// A statement spending one input twice, with the balance proof re-signed over the doubled set.
@@ -254,7 +313,7 @@ fn double_spend_statement(input_mask: &RistrettoSecretKey, mvp: u64) -> StealthT
         .outputs_statement
         .outputs
         .iter()
-        .fold(RistrettoSecretKey::default(), |agg, o| agg + input_mask);
+        .fold(RistrettoSecretKey::default(), |agg, _o| agg + input_mask);
     statement.balance_proof = Some(
         tari_ootle_wallet_crypto::balance_proof::generate_stealth_balance_proof_signature(
             &agg_input_mask,
@@ -267,7 +326,7 @@ fn double_spend_statement(input_mask: &RistrettoSecretKey, mvp: u64) -> StealthT
     statement
 }
 
-fn count_new_utxos(diff: &CommitResult) -> usize {
+fn count_new_utxos(diff: &SubstateDiff) -> usize {
     diff.up_iter()
         .filter_map(|(_, substate)| substate.substate_value().as_utxo())
         .count()
@@ -286,11 +345,12 @@ fn public_of(secret: &RistrettoSecretKey) -> RistrettoPublicKeyBytes {
 #[test]
 fn a_proof_above_threshold_commits() {
     let mut test = harness();
-    let funds = fund(&mut test, test.secret_key(), &[30_000], &[]);
+    let account_key = test.secret_key().clone();
+    let funds = fund(&mut test, &account_key, &[30_000], &[]);
     let gate = deploy_gate(&mut test, funds.resource, THRESHOLD);
     let challenge = challenge_for(gate, funds.resource, THRESHOLD);
 
-    let input_sk = derive_input_spend_key(test.secret_key(), 0);
+    let input_sk = derive_input_spend_key(&account_key, 0);
     let statement = proof_statement(&funds.masks[0], 30_000, THRESHOLD);
 
     let result = test.execute_expect_success(
@@ -305,7 +365,7 @@ fn a_proof_above_threshold_commits() {
     let diff = result.finalize.any_accept().expect("gate proof must be accepted");
     assert_eq!(count_new_utxos(&diff), 1, "the qualifying output is the only new UTXO");
 
-    let accepted: u64 = test.extract_component_value(gate, "$.2");
+    let accepted: u64 = test.extract_component_value(gate, GATE_PROOFS_ACCEPTED_PATH);
     assert_eq!(accepted, 1, "the gate counted exactly one proof");
 }
 
@@ -313,11 +373,13 @@ fn a_proof_above_threshold_commits() {
 #[test]
 fn a_proof_exactly_at_threshold_commits() {
     let mut test = harness();
-    let funds = fund(&mut test, test.secret_key(), &[10_000], &[]);
+    let account_key = test.secret_key().clone();
+    // Exactly the threshold: the output's promise and its hidden value coincide.
+    let funds = fund(&mut test, &account_key, &[10_000], &[]);
     let gate = deploy_gate(&mut test, funds.resource, THRESHOLD);
     let challenge = challenge_for(gate, funds.resource, THRESHOLD);
 
-    let input_sk = derive_input_spend_key(test.secret_key(), 0);
+    let input_sk = derive_input_spend_key(&account_key, 0);
     let statement = proof_statement(&funds.masks[0], 10_000, THRESHOLD);
 
     test.execute_expect_success(
@@ -329,7 +391,7 @@ fn a_proof_exactly_at_threshold_commits() {
         vec![],
     );
 
-    let accepted: u64 = test.extract_component_value(gate, "$.2");
+    let accepted: u64 = test.extract_component_value(gate, GATE_PROOFS_ACCEPTED_PATH);
     assert_eq!(accepted, 1);
 }
 
@@ -337,11 +399,12 @@ fn a_proof_exactly_at_threshold_commits() {
 #[test]
 fn a_proof_below_threshold_is_refused() {
     let mut test = harness();
-    let funds = fund(&mut test, test.secret_key(), &[9_999], &[]);
+    let account_key = test.secret_key().clone();
+    let funds = fund(&mut test, &account_key, &[9_999], &[]);
     let gate = deploy_gate(&mut test, funds.resource, THRESHOLD);
     let challenge = challenge_for(gate, funds.resource, THRESHOLD);
 
-    let input_sk = derive_input_spend_key(test.secret_key(), 0);
+    let input_sk = derive_input_spend_key(&account_key, 0);
     let reason = test.execute_expect_failure(
         Transaction::builder_localnet(Epoch(1))
             .call_method(
@@ -356,7 +419,7 @@ fn a_proof_below_threshold_is_refused() {
     );
 
     assert_reject_reason(reason, "attested minimum is below the gate threshold");
-    let accepted: u64 = test.extract_component_value(gate, "$.2");
+    let accepted: u64 = test.extract_component_value(gate, GATE_PROOFS_ACCEPTED_PATH);
     assert_eq!(accepted, 0, "a refused proof leaves no trace");
 }
 
@@ -365,21 +428,27 @@ fn a_proof_below_threshold_is_refused() {
 fn fragmented_inputs_commit_as_one_proof() {
     let mut test = harness();
     let amounts = [3_100u64, 2_900, 4_800, 1_500];
-    let funds = fund(&mut test, test.secret_key(), &amounts, &[]);
+    let account_key = test.secret_key().clone();
+    let funds = fund(&mut test, &account_key, &amounts, &[]);
     let gate = deploy_gate(&mut test, funds.resource, THRESHOLD);
     let challenge = challenge_for(gate, funds.resource, THRESHOLD);
 
-    let total: u64 = amounts.iter().sum();
+let total: u64 = amounts.iter().sum();
     let statement = fragmented_statement(&funds.masks, &amounts, total, THRESHOLD);
 
-    let mut tx = Transaction::builder_localnet(Epoch(1)).call_method(gate, "prove_access", args![challenge, statement]);
+    // Each input carries its own one-time stealth spend key, so each needs its own signature. The
+    // builder is threaded rather than reassigned because `add_signer` returns an
+    // `UnsealedTransaction`, a different type from the builder it came from.
+    let mut sealed = Transaction::builder_localnet(Epoch(1))
+        .call_method(gate, "prove_access", args![challenge, statement])
+        .finish();
     for i in 0..amounts.len() {
-        let sk = derive_input_spend_key(test.secret_key(), i);
-        tx = tx.add_signer(&public_of(&sk), &sk);
+        let sk = derive_input_spend_key(&account_key, i);
+        sealed = sealed.add_signer(&public_of(&sk), &sk);
     }
-    test.execute_expect_success(tx.finish().seal(test.secret_key()), vec![]);
+    test.execute_expect_success(sealed.seal(test.secret_key()), vec![]);
 
-    let accepted: u64 = test.extract_component_value(gate, "$.2");
+    let accepted: u64 = test.extract_component_value(gate, GATE_PROOFS_ACCEPTED_PATH);
     assert_eq!(accepted, 1, "four inputs are one proof, not four");
 }
 
@@ -387,12 +456,14 @@ fn fragmented_inputs_commit_as_one_proof() {
 #[test]
 fn an_expired_challenge_is_refused() {
     let mut test = harness();
-    let funds = fund(&mut test, test.secret_key(), &[30_000], &[]);
+    let account_key = test.secret_key().clone();
+    let funds = fund(&mut test, &account_key, &[30_000], &[]);
     let gate = deploy_gate(&mut test, funds.resource, THRESHOLD);
     let mut challenge = challenge_for(gate, funds.resource, THRESHOLD);
-    challenge.expires_epoch = 0;
+    // One epoch behind the epoch this transaction executes in.
+    challenge.expires_epoch = TEST_EPOCH - 1;
 
-    let input_sk = derive_input_spend_key(test.secret_key(), 0);
+    let input_sk = derive_input_spend_key(&account_key, 0);
     let reason = test.execute_expect_failure(
         Transaction::builder_localnet(Epoch(1))
             .call_method(gate, "prove_access", args![challenge, proof_statement(&funds.masks[0], 30_000, THRESHOLD)])
@@ -405,15 +476,24 @@ fn an_expired_challenge_is_refused() {
 }
 
 /// A challenge naming a different gate is refused.
+///
+/// The "different" gate is a real deployed component, not a made-up address: the engine resolves
+/// every substate a template touches before the template runs, so a nonexistent address would be
+/// refused by substate lookup rather than by the gate's own rule, and the test would prove nothing.
 #[test]
 fn a_challenge_for_another_gate_is_refused() {
     let mut test = harness();
-    let funds = fund(&mut test, test.secret_key(), &[30_000], &[]);
-    let gate = deploy_gate(&mut test, funds.resource, THRESHOLD);
-    let mut challenge = challenge_for(gate, funds.resource, THRESHOLD);
-    challenge.gate = ComponentAddress::new(ObjectKey::from_array([3u8; ObjectKey::LENGTH]));
+    let account_key = test.secret_key().clone();
+    let funds = fund(&mut test, &account_key, &[30_000], &[]);
+    let gate = deploy_gate_named(&mut test, "gate_under_test", funds.resource, THRESHOLD);
+    let other_gate = deploy_gate_named(&mut test, "other_gate", funds.resource, THRESHOLD);
 
-    let input_sk = derive_input_spend_key(test.secret_key(), 0);
+    assert_ne!(gate, other_gate, "two deployments must yield two gate addresses");
+
+    let mut challenge = challenge_for(gate, funds.resource, THRESHOLD);
+    challenge.gate = other_gate;
+
+    let input_sk = derive_input_spend_key(&account_key, 0);
     let reason = test.execute_expect_failure(
         Transaction::builder_localnet(Epoch(1))
             .call_method(gate, "prove_access", args![challenge, proof_statement(&funds.masks[0], 30_000, THRESHOLD)])
@@ -426,15 +506,23 @@ fn a_challenge_for_another_gate_is_refused() {
 }
 
 /// A challenge naming a different resource is refused.
+///
+/// The substitute resource is a real deployed one, for the same reason as the gate case: the engine
+/// resolves substates before the template runs, so a synthetic address would be refused by lookup.
 #[test]
 fn a_challenge_for_another_resource_is_refused() {
     let mut test = harness();
-    let funds = fund(&mut test, test.secret_key(), &[30_000], &[]);
+    let account_key = test.secret_key().clone();
+    let funds = fund(&mut test, &account_key, &[30_000], &[]);
+    let other_funds = fund(&mut test, &account_key, &[30_000], &[]);
     let gate = deploy_gate(&mut test, funds.resource, THRESHOLD);
-    let mut challenge = challenge_for(gate, funds.resource, THRESHOLD);
-    challenge.resource = ResourceAddress::new(ObjectKey::from_array([9u8; ObjectKey::LENGTH]));
 
-    let input_sk = derive_input_spend_key(test.secret_key(), 0);
+    assert_ne!(funds.resource, other_funds.resource, "two faucets must yield two resources");
+
+    let mut challenge = challenge_for(gate, funds.resource, THRESHOLD);
+    challenge.resource = other_funds.resource;
+
+    let input_sk = derive_input_spend_key(&account_key, 0);
     let reason = test.execute_expect_failure(
         Transaction::builder_localnet(Epoch(1))
             .call_method(gate, "prove_access", args![challenge, proof_statement(&funds.masks[0], 30_000, THRESHOLD)])
@@ -451,12 +539,13 @@ fn a_challenge_for_another_resource_is_refused() {
 #[test]
 fn a_challenge_with_a_lowered_threshold_is_refused() {
     let mut test = harness();
-    let funds = fund(&mut test, test.secret_key(), &[30_000], &[]);
+    let account_key = test.secret_key().clone();
+    let funds = fund(&mut test, &account_key, &[30_000], &[]);
     let gate = deploy_gate(&mut test, funds.resource, THRESHOLD);
     let mut challenge = challenge_for(gate, funds.resource, THRESHOLD);
     challenge.threshold = 1;
 
-    let input_sk = derive_input_spend_key(test.secret_key(), 0);
+    let input_sk = derive_input_spend_key(&account_key, 0);
     let reason = test.execute_expect_failure(
         Transaction::builder_localnet(Epoch(1))
             .call_method(gate, "prove_access", args![challenge, proof_statement(&funds.masks[0], 30_000, THRESHOLD)])
@@ -472,12 +561,13 @@ fn a_challenge_with_a_lowered_threshold_is_refused() {
 #[test]
 fn a_challenge_for_another_site_is_refused() {
     let mut test = harness();
-    let funds = fund(&mut test, test.secret_key(), &[30_000], &[]);
+    let account_key = test.secret_key().clone();
+    let funds = fund(&mut test, &account_key, &[30_000], &[]);
     let gate = deploy_gate(&mut test, funds.resource, THRESHOLD);
     let mut challenge = challenge_for(gate, funds.resource, THRESHOLD);
-    challenge.relying_site = MaxBytes::new_checked(b"evil.example".to_vec()).unwrap();
+    challenge.relying_site = MaxBytes::<64>::new_checked(b"evil.example".to_vec()).unwrap();
 
-    let input_sk = derive_input_spend_key(test.secret_key(), 0);
+    let input_sk = derive_input_spend_key(&account_key, 0);
     let reason = test.execute_expect_failure(
         Transaction::builder_localnet(Epoch(1))
             .call_method(gate, "prove_access", args![challenge, proof_statement(&funds.masks[0], 30_000, THRESHOLD)])
@@ -493,12 +583,13 @@ fn a_challenge_for_another_site_is_refused() {
 #[test]
 fn a_challenge_for_another_session_is_refused() {
     let mut test = harness();
-    let funds = fund(&mut test, test.secret_key(), &[30_000], &[]);
+    let account_key = test.secret_key().clone();
+    let funds = fund(&mut test, &account_key, &[30_000], &[]);
     let gate = deploy_gate(&mut test, funds.resource, THRESHOLD);
     let mut challenge = challenge_for(gate, funds.resource, THRESHOLD);
-    challenge.session_commitment = MaxBytes::new_checked(b"session-2".to_vec()).unwrap();
+    challenge.session_commitment = MaxBytes::<64>::new_checked(b"session-2".to_vec()).unwrap();
 
-    let input_sk = derive_input_spend_key(test.secret_key(), 0);
+    let input_sk = derive_input_spend_key(&account_key, 0);
     let reason = test.execute_expect_failure(
         Transaction::builder_localnet(Epoch(1))
             .call_method(gate, "prove_access", args![challenge, proof_statement(&funds.masks[0], 30_000, THRESHOLD)])
@@ -514,12 +605,13 @@ fn a_challenge_for_another_session_is_refused() {
 #[test]
 fn a_challenge_for_another_network_is_refused() {
     let mut test = harness();
-    let funds = fund(&mut test, test.secret_key(), &[30_000], &[]);
+    let account_key = test.secret_key().clone();
+    let funds = fund(&mut test, &account_key, &[30_000], &[]);
     let gate = deploy_gate(&mut test, funds.resource, THRESHOLD);
     let mut challenge = challenge_for(gate, funds.resource, THRESHOLD);
     challenge.network = NETWORK_BYTE.wrapping_add(1);
 
-    let input_sk = derive_input_spend_key(test.secret_key(), 0);
+    let input_sk = derive_input_spend_key(&account_key, 0);
     let reason = test.execute_expect_failure(
         Transaction::builder_localnet(Epoch(1))
             .call_method(gate, "prove_access", args![challenge, proof_statement(&funds.masks[0], 30_000, THRESHOLD)])
@@ -535,11 +627,12 @@ fn a_challenge_for_another_network_is_refused() {
 #[test]
 fn a_challenge_cannot_be_redeemed_twice() {
     let mut test = harness();
-    let funds = fund(&mut test, test.secret_key(), &[30_000, 30_000], &[]);
+    let account_key = test.secret_key().clone();
+    let funds = fund(&mut test, &account_key, &[30_000, 30_000], &[]);
     let gate = deploy_gate(&mut test, funds.resource, THRESHOLD);
     let challenge = challenge_for(gate, funds.resource, THRESHOLD);
 
-    let first = derive_input_spend_key(test.secret_key(), 0);
+    let first = derive_input_spend_key(&account_key, 0);
     test.execute_expect_success(
         Transaction::builder_localnet(Epoch(1))
             .call_method(
@@ -554,7 +647,7 @@ fn a_challenge_cannot_be_redeemed_twice() {
     );
 
     // Replay the same challenge against a different, still-live input.
-    let second = derive_input_spend_key(test.secret_key(), 1);
+    let second = derive_input_spend_key(&account_key, 1);
     let reason = test.execute_expect_failure(
         Transaction::builder_localnet(Epoch(1))
             .call_method(
@@ -569,7 +662,7 @@ fn a_challenge_cannot_be_redeemed_twice() {
     );
     assert_reject_reason(reason, "challenge nonce has already been used");
 
-    let accepted: u64 = test.extract_component_value(gate, "$.2");
+    let accepted: u64 = test.extract_component_value(gate, GATE_PROOFS_ACCEPTED_PATH);
     assert_eq!(accepted, 1, "only the first redemption counted");
 }
 
@@ -577,13 +670,14 @@ fn a_challenge_cannot_be_redeemed_twice() {
 #[test]
 fn a_closed_gate_refuses_a_valid_proof() {
     let mut test = harness();
-    let funds = fund(&mut test, test.secret_key(), &[30_000], &[]);
+    let account_key = test.secret_key().clone();
+    let funds = fund(&mut test, &account_key, &[30_000], &[]);
     let gate = deploy_gate(&mut test, funds.resource, THRESHOLD);
     let challenge = challenge_for(gate, funds.resource, THRESHOLD);
 
     test.call_method::<()>(gate, "set_open", args![false], vec![]);
 
-    let input_sk = derive_input_spend_key(test.secret_key(), 0);
+    let input_sk = derive_input_spend_key(&account_key, 0);
     let reason = test.execute_expect_failure(
         Transaction::builder_localnet(Epoch(1))
             .call_method(gate, "prove_access", args![challenge, proof_statement(&funds.masks[0], 30_000, THRESHOLD)])
@@ -600,11 +694,12 @@ fn a_closed_gate_refuses_a_valid_proof() {
 #[test]
 fn a_revealed_output_is_refused() {
     let mut test = harness();
-    let funds = fund(&mut test, test.secret_key(), &[40_000], &[]);
+    let account_key = test.secret_key().clone();
+    let funds = fund(&mut test, &account_key, &[40_000], &[]);
     let gate = deploy_gate(&mut test, funds.resource, THRESHOLD);
     let challenge = challenge_for(gate, funds.resource, THRESHOLD);
 
-    let input_sk = derive_input_spend_key(test.secret_key(), 0);
+    let input_sk = derive_input_spend_key(&account_key, 0);
     let mut statement = proof_statement(&funds.masks[0], 30_000, THRESHOLD);
     statement.outputs_statement.revealed_output = Some(RevealedOutput::new(
         Amount::from(10_000u64),
@@ -627,11 +722,12 @@ fn a_revealed_output_is_refused() {
 #[test]
 fn two_outputs_are_refused_as_ambiguous() {
     let mut test = harness();
-    let funds = fund(&mut test, test.secret_key(), &[40_000], &[]);
+    let account_key = test.secret_key().clone();
+    let funds = fund(&mut test, &account_key, &[40_000], &[]);
     let gate = deploy_gate(&mut test, funds.resource, THRESHOLD);
     let challenge = challenge_for(gate, funds.resource, THRESHOLD);
 
-    let input_sk = derive_input_spend_key(test.secret_key(), 0);
+    let input_sk = derive_input_spend_key(&account_key, 0);
     let statement = two_output_statement(&funds.masks[0], 40_000, public_of(&input_sk));
 
     let reason = test.execute_expect_failure(
@@ -649,7 +745,8 @@ fn two_outputs_are_refused_as_ambiguous() {
 #[test]
 fn a_statement_with_no_inputs_is_refused() {
     let mut test = harness();
-    let funds = fund(&mut test, test.secret_key(), &[30_000], &[]);
+    let account_key = test.secret_key().clone();
+    let funds = fund(&mut test, &account_key, &[30_000], &[]);
     let gate = deploy_gate(&mut test, funds.resource, THRESHOLD);
     let challenge = challenge_for(gate, funds.resource, THRESHOLD);
 
@@ -674,7 +771,7 @@ fn a_statement_with_no_inputs_is_refused() {
                     minimum_value_promise: THRESHOLD,
                     viewable_balance_proof: None,
                 },
-                auth: SpendAuthorization::Key(out.witness.mask.public_key().to_byte_type()),
+                auth: SpendAuthorization::Key(RistrettoPublicKey::from_secret_key(&out.witness.mask).to_byte_type()),
                 tag: UtxoTag::new(0),
             }],
             revealed_output: None,
@@ -701,7 +798,8 @@ fn a_statement_with_no_inputs_is_refused() {
 #[test]
 fn an_unauthorized_input_is_refused_by_the_engine() {
     let mut test = harness();
-    let funds = fund(&mut test, test.secret_key(), &[30_000], &[]);
+    let account_key = test.secret_key().clone();
+    let funds = fund(&mut test, &account_key, &[30_000], &[]);
     let gate = deploy_gate(&mut test, funds.resource, THRESHOLD);
     let challenge = challenge_for(gate, funds.resource, THRESHOLD);
 
@@ -720,7 +818,7 @@ fn an_unauthorized_input_is_refused_by_the_engine() {
         text.contains("required") || text.contains("signature") || text.contains("auth"),
         "expected an authorisation failure, got: {text}"
     );
-    let accepted: u64 = test.extract_component_value(gate, "$.2");
+    let accepted: u64 = test.extract_component_value(gate, GATE_PROOFS_ACCEPTED_PATH);
     assert_eq!(accepted, 0);
 }
 
@@ -728,11 +826,12 @@ fn an_unauthorized_input_is_refused_by_the_engine() {
 #[test]
 fn a_script_path_input_is_refused() {
     let mut test = harness();
-    let funds = fund(&mut test, test.secret_key(), &[30_000], &[]);
+    let account_key = test.secret_key().clone();
+    let funds = fund(&mut test, &account_key, &[30_000], &[]);
     let gate = deploy_gate(&mut test, funds.resource, THRESHOLD);
     let challenge = challenge_for(gate, funds.resource, THRESHOLD);
 
-    let input_sk = derive_input_spend_key(test.secret_key(), 0);
+    let input_sk = derive_input_spend_key(&account_key, 0);
     let mut statement = proof_statement(&funds.masks[0], 30_000, THRESHOLD);
     statement.inputs_statement.inputs[0].witness = SpendWitness::script_path(
         tari_template_lib::types::stealth::SpendCondition::access_rule(AccessRule::AllowAll),
@@ -756,13 +855,14 @@ fn a_script_path_input_is_refused() {
 #[test]
 fn a_tampered_promise_is_refused_by_the_engine() {
     let mut test = harness();
-    let funds = fund(&mut test, test.secret_key(), &[30_000], &[]);
+    let account_key = test.secret_key().clone();
+    let funds = fund(&mut test, &account_key, &[30_000], &[]);
     // Gate threshold 20,000: the tampered promise of 40,000 clears it, so only the range proof can
     // catch this.
     let gate = deploy_gate(&mut test, funds.resource, 20_000);
     let challenge = challenge_for(gate, funds.resource, 20_000);
 
-    let input_sk = derive_input_spend_key(test.secret_key(), 0);
+    let input_sk = derive_input_spend_key(&account_key, 0);
     let mut statement = proof_statement(&funds.masks[0], 30_000, 30_000);
     statement.outputs_statement.outputs[0].output.minimum_value_promise = 40_000;
 
@@ -781,11 +881,12 @@ fn a_tampered_promise_is_refused_by_the_engine() {
 #[test]
 fn an_invalid_balance_proof_is_refused_by_the_engine() {
     let mut test = harness();
-    let funds = fund(&mut test, test.secret_key(), &[30_000], &[]);
+    let account_key = test.secret_key().clone();
+    let funds = fund(&mut test, &account_key, &[30_000], &[]);
     let gate = deploy_gate(&mut test, funds.resource, THRESHOLD);
     let challenge = challenge_for(gate, funds.resource, THRESHOLD);
 
-    let input_sk = derive_input_spend_key(test.secret_key(), 0);
+    let input_sk = derive_input_spend_key(&account_key, 0);
     let mut statement = proof_statement(&funds.masks[0], 30_000, THRESHOLD);
     // Swap in a balance proof over a different input set: the statement's inputs no longer match.
     let wrong = proof_statement(&RistrettoSecretKey::from(424_242u64), 30_000, THRESHOLD);
@@ -806,11 +907,12 @@ fn an_invalid_balance_proof_is_refused_by_the_engine() {
 #[test]
 fn a_missing_balance_proof_is_refused_by_the_template() {
     let mut test = harness();
-    let funds = fund(&mut test, test.secret_key(), &[30_000], &[]);
+    let account_key = test.secret_key().clone();
+    let funds = fund(&mut test, &account_key, &[30_000], &[]);
     let gate = deploy_gate(&mut test, funds.resource, THRESHOLD);
     let challenge = challenge_for(gate, funds.resource, THRESHOLD);
 
-    let input_sk = derive_input_spend_key(test.secret_key(), 0);
+    let input_sk = derive_input_spend_key(&account_key, 0);
     let mut statement = proof_statement(&funds.masks[0], 30_000, THRESHOLD);
     statement.balance_proof = None;
 
@@ -829,11 +931,12 @@ fn a_missing_balance_proof_is_refused_by_the_template() {
 #[test]
 fn a_double_spent_input_is_refused() {
     let mut test = harness();
-    let funds = fund(&mut test, test.secret_key(), &[30_000], &[]);
+    let account_key = test.secret_key().clone();
+    let funds = fund(&mut test, &account_key, &[30_000], &[]);
     let gate = deploy_gate(&mut test, funds.resource, THRESHOLD);
     let challenge = challenge_for(gate, funds.resource, THRESHOLD);
 
-    let input_sk = derive_input_spend_key(test.secret_key(), 0);
+    let input_sk = derive_input_spend_key(&account_key, 0);
     let reason = test.execute_expect_failure(
         Transaction::builder_localnet(Epoch(1))
             .call_method(gate, "prove_access", args![challenge, double_spend_statement(&funds.masks[0], THRESHOLD)])
@@ -844,7 +947,7 @@ fn a_double_spent_input_is_refused() {
     );
 
     assert!(!reason.to_string().is_empty(), "the engine must reject a double spend");
-    let accepted: u64 = test.extract_component_value(gate, "$.2");
+    let accepted: u64 = test.extract_component_value(gate, GATE_PROOFS_ACCEPTED_PATH);
     assert_eq!(accepted, 0);
 }
 
@@ -852,13 +955,12 @@ fn a_double_spent_input_is_refused() {
 #[test]
 fn a_script_only_output_is_refused() {
     let mut test = harness();
-    let funds = fund(&mut test, test.secret_key(), &[30_000], &[]);
+    let account_key = test.secret_key().clone();
+    let funds = fund(&mut test, &account_key, &[30_000], &[]);
     let gate = deploy_gate(&mut test, funds.resource, THRESHOLD);
     let challenge = challenge_for(gate, funds.resource, THRESHOLD);
 
-    let input_sk = derive_input_spend_key(test.secret_key(), 0);
-    let mut out = output_witness(30_000, THRESHOLD, public_of(&input_sk));
-    let _ = &mut out;
+    let input_sk = derive_input_spend_key(&account_key, 0);
     let mut statement = proof_statement(&funds.masks[0], 30_000, THRESHOLD);
     // Replace the output's authorisation with a condition tree and no key path.
     let auth = SpendAuthorization::Script(Hash32::from_array([4u8; 32]));
@@ -879,7 +981,8 @@ fn a_script_only_output_is_refused() {
 #[test]
 fn a_malformed_statement_is_refused_at_decode() {
     let mut test = harness();
-    let funds = fund(&mut test, test.secret_key(), &[30_000], &[]);
+    let account_key = test.secret_key().clone();
+    let funds = fund(&mut test, &account_key, &[30_000], &[]);
     let gate = deploy_gate(&mut test, funds.resource, THRESHOLD);
     let challenge = challenge_for(gate, funds.resource, THRESHOLD);
 
@@ -905,7 +1008,8 @@ fn a_malformed_statement_is_refused_at_decode() {
 #[test]
 fn the_gate_reports_its_own_policy() {
     let mut test = harness();
-    let funds = fund(&mut test, test.secret_key(), &[30_000], &[]);
+    let account_key = test.secret_key().clone();
+    let funds = fund(&mut test, &account_key, &[30_000], &[]);
     let gate = deploy_gate(&mut test, funds.resource, THRESHOLD);
 
     let threshold: u64 = test.call_method(gate, "threshold", args![], vec![]);
@@ -929,7 +1033,10 @@ fn the_shared_rules_agree_with_the_template() {
     use ghost_gate_core::{GateError, GatePolicy};
 
     let mut test = harness();
-    let funds = fund(&mut test, test.secret_key(), &[30_000], &[]);
+    let account_key = test.secret_key().clone();
+    // Two outputs: the first is spent by the on-chain proof, the second only builds the
+    // below-threshold statement the shared rules must refuse.
+    let funds = fund(&mut test, &account_key, &[30_000, 30_000], &[]);
     let gate = deploy_gate(&mut test, funds.resource, THRESHOLD);
     let challenge = challenge_for(gate, funds.resource, THRESHOLD);
 
@@ -940,13 +1047,13 @@ fn the_shared_rules_agree_with_the_template() {
     };
     let ctx = GateContext {
         self_address: gate,
-        current_epoch: 1,
+        current_epoch: TEST_EPOCH,
         current_network: NETWORK_BYTE,
         relying_site: RELYING_SITE,
         session_commitment: SESSION,
     };
 
-    let input_sk = derive_input_spend_key(test.secret_key(), 0);
+    let input_sk = derive_input_spend_key(&account_key, 0);
 
     // A well-formed proof: the shared rules accept it, and so does the engine.
     let good = proof_statement(&funds.masks[0], 30_000, THRESHOLD);
@@ -962,9 +1069,9 @@ fn the_shared_rules_agree_with_the_template() {
         vec![],
     );
 
-    // The same rules refuse the below-threshold shape the template refuses.
-    let mut low = proof_statement(&funds.masks[1], 9_999, 9_999);
-    low.covenant_claims.clear();
+    // The same rules refuse the below-threshold shape the template refuses. The second output is
+    // never spent, so this assertion costs nothing on chain.
+    let low = proof_statement(&funds.masks[1], 9_999, 9_999);
     assert!(matches!(
         ghost_gate_core::find_qualifying_output(&policy, &low),
         Err(GateError::BelowThreshold { .. })
@@ -1006,10 +1113,10 @@ fn the_receipt_has_exactly_three_fields() {
         THRESHOLD,
         RistrettoPublicKey::from_secret_key(&RistrettoSecretKey::random(&mut rand::rng())).to_byte_type(),
     );
-    let statement = create_transfer_statement(
+let statement = create_transfer_statement(
         vec![out],
         &[(RistrettoSecretKey::random(&mut rand::rng()), 30_000)],
-        30_000,
+        Amount::zero(),
         None,
     );
 

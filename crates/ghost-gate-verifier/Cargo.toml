@@ -9,7 +9,7 @@ authors.workspace = true
 
 [dependencies]
 ghost-gate-core = { path = "../ghost-gate-core" }
-tari_template_lib_types = { workspace = true, features = ["alloc"] }
+tari_template_lib_types = { workspace = true, features = ["std"] }
 tari_crypto = { workspace = true }
 rand = { workspace = true }
 sha2 = { workspace = true }

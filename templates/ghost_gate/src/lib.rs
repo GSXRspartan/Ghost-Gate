@@ -22,13 +22,13 @@
 
 use tari_template_lib::prelude::*;
 
-use ghost_gate_core::{
-    Challenge, GateContext, GateError, GatePolicy, MARK, NETWORK_BYTE, ProofReceipt, qualify,
-};
+use ghost_gate_core::{Challenge, GateContext, GatePolicy, MARK, NETWORK_BYTE, ProofReceipt, qualify};
 
 /// The Ghost Gate component.
 #[template]
 mod template {
+    use tari_template_abi::rust::collections::BTreeMap;
+
     use super::*;
 
     /// A private threshold access gate.
@@ -52,9 +52,14 @@ mod template {
     impl GhostGate {
         /// Creates a gate for `resource` requiring at least `threshold` of its hidden value.
         ///
+        /// `allocation` is allocated by the caller. A component address derived inside the template
+        /// collides across two deployments in the same transaction sequence, and a relying site
+        /// running several gates needs distinct, predictable addresses anyway.
+        ///
         /// `relying_site` and `session_commitment` are opaque to the gate: it only compares them.
         /// They exist so a challenge is bound to one site and one browser session.
         pub fn new(
+            allocation: ComponentAddressAllocation,
             resource: ResourceAddress,
             threshold: u64,
             relying_site: MaxBytes<64>,
@@ -74,6 +79,7 @@ mod template {
                 burnt_nonces: BTreeMap::new(),
                 proofs_accepted: 0,
             })
+            .with_address_allocation(allocation)
             .with_access_rules(AccessRules::allow_all())
             .create()
         }
@@ -132,13 +138,12 @@ mod template {
             self.burnt_nonces.insert(challenge.nonce, epoch);
             self.proofs_accepted = self.proofs_accepted.saturating_add(1);
 
-            emit_event(
-                MARK,
-                Metadata {
-                    key: b"ghost_gate_proof",
-                    value: MetadataValue::Binary(receipt.to_vec()),
-                },
-            );
+            // The receipt is emitted as an event so an indexer or a relying site can observe that this gate
+            // accepted a proof without reading component state. It carries a public lower bound and a
+            // burnt nonce — no value, no address, no identity.
+            let mut payload = Metadata::new();
+            payload.insert("receipt", &receipt);
+            emit_event(MARK, payload);
 
             receipt
         }
@@ -165,14 +170,11 @@ mod template {
         }
 
         /// Whether a nonce has already been burnt.
-        pub fn is_nonce_used(&self, nonce: &Hash32) -> bool {
-            self.burnt_nonces.contains_key(nonce)
-        }
-    }
-
-    impl From<GateError> for String {
-        fn from(e: GateError) -> Self {
-            e.reason().to_string()
+        ///
+        /// Takes the nonce by value: the `#[template]` macro's type parser accepts only plain paths
+        /// and tuples in a public signature, so a `&Hash32` parameter would not compile.
+        pub fn is_nonce_used(&self, nonce: Hash32) -> bool {
+            self.burnt_nonces.contains_key(&nonce)
         }
     }
 }

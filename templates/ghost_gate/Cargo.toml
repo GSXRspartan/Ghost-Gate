@@ -12,6 +12,9 @@ authors = ["Ghost Gate contributors"]
 
 [dependencies]
 tari_template_lib = { path = "../../../_ootle-v042-build/crates/template_lib", version = "0.33.0" }
+# Needed directly for `collections::BTreeMap` in component state: the prelude re-exports the map
+# type only for the engine host side, not into a template's own module.
+tari_template_abi = { path = "../../../_ootle-v042-build/crates/template_abi", version = "0.20.1", default-features = false }
 ghost-gate-core = { path = "../../crates/ghost-gate-core" }
 
 [lib]
