@@ -1,0 +1,14 @@
+[package]
+name = "ghost-gate-core"
+description = "Consensus-visible Ghost Gate proof qualification rules, shared by the on-chain template and the off-chain verifier"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+tari_template_lib_types = { workspace = true, features = ["alloc"] }
+# Matches the minicbor the v0.42.0 workspace resolves; the derive must be the same major as the
+# one tari_template_lib_types derives its CBOR impls with, or the two disagree on the wire format.
+minicbor = { version = "2.3", default-features = false, features = ["alloc", "derive"] }

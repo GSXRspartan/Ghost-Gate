@@ -1,0 +1,18 @@
+[workspace]
+# The template builds for wasm32-unknown-unknown and is deliberately outside the native workspace.
+
+[package]
+name = "ghost-gate-template"
+description = "Ghost Gate: consensus-enforced private threshold access proof for Tari Ootle"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+license = "MIT"
+authors = ["Ghost Gate contributors"]
+
+[dependencies]
+tari_template_lib = { path = "../../../_ootle-v042-build/crates/template_lib", version = "0.33.0" }
+ghost-gate-core = { path = "../../crates/ghost-gate-core" }
+
+[lib]
+crate-type = ["cdylib"]

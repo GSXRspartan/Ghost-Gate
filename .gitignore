@@ -1,0 +1,27 @@
+# Keep build artifacts out of the repo.
+target/
+_cargo-target/
+
+# Never commit keys, wallets or databases.
+*.sqlite
+*.sqlite3
+*.db
+keys.json
+*.key
+.env
+.env.*
+
+# Editor / OS noise
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Local test scratch
+temp/
+/tmp/
+*.log
+npm-debug.log*
+node_modules/
+.pnpm-store/
