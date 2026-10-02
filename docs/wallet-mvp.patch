@@ -161,7 +161,7 @@ Applying:  git apply -p1 wallet-mvp.patch   (from a clean v0.42.0 checkout)
              .collect::<Result<Vec<_>, _>>()?;
 --- /dev/null
 +++ b/crates/wallet/sdk/src/apis/stealth_transfer/minimum_value_promise_tests.rs
-@@ -0,0 +1,385 @@
+@@ -0,0 +1,373 @@
 +//   Copyright 2026 The Tari Project
 +//   SPDX-License-Identifier: BSD-3-Clause
 +
@@ -178,14 +178,13 @@ Applying:  git apply -p1 wallet-mvp.patch   (from a clean v0.42.0 checkout)
 +    ristretto::{RistrettoPublicKey, RistrettoSecretKey},
 +};
 +use tari_engine_types::stealth::validate_stealth_outputs_statement;
-+use tari_ootle_wallet_crypto::{
-+    MaskAndValue, OutputWitness, StealthInputWitness, StealthOutputWitness, stealth,
-+};
++use tari_ootle_wallet_crypto::{stealth, MaskAndValue, OutputWitness, StealthInputWitness, StealthOutputWitness};
 +use tari_template_lib::types::{
-+    Amount, EncryptedData,
 +    constants::STEALTH_TARI_RESOURCE_ADDRESS,
 +    crypto::UtxoTag,
 +    stealth::{SpendAuthorization, StealthTransferStatement},
++    Amount,
++    EncryptedData,
 +};
 +
 +use super::*;
@@ -317,13 +316,10 @@ Applying:  git apply -p1 wallet-mvp.patch   (from a clean v0.42.0 checkout)
 +    let err = params
 +        .validate(NETWORK)
 +        .expect_err("a revealed amount must not be able to carry the promise");
-+    assert!(matches!(
-+        err,
-+        StealthTransferApiError::InvalidParameter {
-+            param: "minimum_value_promise",
-+            ..
-+        }
-+    ));
++    assert!(matches!(err, StealthTransferApiError::InvalidParameter {
++        param: "minimum_value_promise",
++        ..
++    }));
 +}
 +
 +/// The largest promise is still just a `u64` comparison — no arithmetic, so no overflow path.
@@ -332,13 +328,10 @@ Applying:  git apply -p1 wallet-mvp.patch   (from a clean v0.42.0 checkout)
 +    let err = params_with(10_000, u64::MAX)
 +        .validate(NETWORK)
 +        .expect_err("u64::MAX cannot be bounded by 10_000");
-+    assert!(matches!(
-+        err,
-+        StealthTransferApiError::InvalidParameter {
-+            param: "minimum_value_promise",
-+            ..
-+        }
-+    ));
++    assert!(matches!(err, StealthTransferApiError::InvalidParameter {
++        param: "minimum_value_promise",
++        ..
++    }));
 +}
 +
 +/// A revealed-only output carries no hidden value, so a promise on one is meaningless and the
@@ -384,11 +377,7 @@ Applying:  git apply -p1 wallet-mvp.patch   (from a clean v0.42.0 checkout)
 +}
 +
 +/// The same, funded by several fragmented inputs.
-+fn promised_statement_from_inputs(
-+    amount: u64,
-+    promise: u64,
-+    input_values: &[u64],
-+) -> StealthTransferStatement {
++fn promised_statement_from_inputs(amount: u64, promise: u64, input_values: &[u64]) -> StealthTransferStatement {
 +    let out = promised_output(amount, promise);
 +    let inputs: Vec<StealthInputWitness> = input_values
 +        .iter()
@@ -462,8 +451,7 @@ Applying:  git apply -p1 wallet-mvp.patch   (from a clean v0.42.0 checkout)
 +        large.outputs_statement.outputs[0].output.minimum_value_promise
 +    );
 +    assert_ne!(
-+        small.outputs_statement.outputs[0].output.commitment,
-+        large.outputs_statement.outputs[0].output.commitment,
++        small.outputs_statement.outputs[0].output.commitment, large.outputs_statement.outputs[0].output.commitment,
 +        "the commitments differ, so the amounts are not equal"
 +    );
 +}
@@ -656,24 +644,26 @@ Applying:  git apply -p1 wallet-mvp.patch   (from a clean v0.42.0 checkout)
          }
 --- /dev/null
 +++ b/applications/tari_walletd/src/handlers/accounts/create_stealth_transfer_statement_handler_tests/mvp_integration_tests.rs
-@@ -0,0 +1,283 @@
+@@ -0,0 +1,275 @@
 +//   Copyright 2026 The Tari Project
 +//   SPDX-License-Identifier: BSD-3-Clause
 +
-+//! End-to-end tests for a minimum-value-promise-bearing output requested through the wallet's normal
++//! Wallet-level tests for a minimum-value-promise-bearing output requested through the normal
 +//! statement RPC.
 +//!
-+//! These decide whether a relying site can ask a *stock* wallet for the output a threshold access
-+//! proof needs. Everything runs against a real wallet — a real SQLite store, a real key manager, a
-+//! real cipher seed, a real account with an owner key — with only the indexer network interface
-+//! offline, because the handler resolves its inputs locally.
++//! The question is whether a relying site can get the output a threshold access proof needs out of an
++//! unmodified request/response cycle. Everything runs against a real wallet — a real SQLite store, a
++//! real key manager, a real cipher seed, a real account with an owner key — with only the indexer
++//! network interface offline, because the handler resolves its inputs locally.
 +//!
-+//! What is proven here:
++//! What is established here:
 +//! - the caller-requested promise reaches the statement the wallet hands back;
 +//! - the resulting statement is one the engine's own transfer validator accepts;
 +//! - the inputs are selected, locked and left locked under the returned lock;
 +//! - the wallet returns signer metadata and no key material;
 +//! - an unsatisfiable promise is refused before any lock is taken.
++//!
++//! Acceptance by a live validator is a separate question, and is not answered here.
 +
 +use tari_template_lib_types::stealth::SpendWitness;
 +
@@ -690,9 +680,7 @@ Applying:  git apply -p1 wallet-mvp.patch   (from a clean v0.42.0 checkout)
 +    let test = setup().await;
 +    let bearer = test.bearer(&test.transfer_and_read_scopes());
 +
-+    let inputs: Vec<_> = (0u64..3)
-+        .map(|i| insert_valid_output(&test, 4_000 + i))
-+        .collect();
++    let inputs: Vec<_> = (0u64..3).map(|i| insert_valid_output(&test, 4_000 + i)).collect();
 +
 +    let request = AccountsCreateStealthTransferStatementRequest {
 +        requests: vec![TransferStatementRequest {
@@ -835,9 +823,7 @@ Applying:  git apply -p1 wallet-mvp.patch   (from a clean v0.42.0 checkout)
 +async fn the_response_carries_signer_metadata_and_no_secrets() {
 +    let test = setup().await;
 +    let bearer = test.bearer(&test.transfer_and_read_scopes());
-+    let inputs: Vec<_> = (0u64..2)
-+        .map(|i| insert_valid_output(&test, 5_000 + i))
-+        .collect();
++    let inputs: Vec<_> = (0u64..2).map(|i| insert_valid_output(&test, 5_000 + i)).collect();
 +
 +    let request = AccountsCreateStealthTransferStatementRequest {
 +        requests: vec![TransferStatementRequest {
@@ -926,21 +912,14 @@ Applying:  git apply -p1 wallet-mvp.patch   (from a clean v0.42.0 checkout)
 +        "ordinary wallet funds spend on the key path"
 +    );
 +    assert!(
-+        statement.outputs_statement.outputs[0]
-+            .auth
-+            .spend_key()
-+            .is_some(),
++        statement.outputs_statement.outputs[0].auth.spend_key().is_some(),
 +        "the qualifying output must be key-spendable so the funds stay under the owner's control"
 +    );
 +    assert!(
-+        statement.outputs_statement.outputs[0]
-+            .output
-+            .minimum_value_promise
-+            >= 10_000,
++        statement.outputs_statement.outputs[0].output.minimum_value_promise >= 10_000,
 +        "the promised bound must clear the gate threshold"
 +    );
 +}
-\ No newline at end of file
 --- a/utilities/traffic-sim/src/sim.rs
 +++ b/utilities/traffic-sim/src/sim.rs
 @@ -247,9 +247,9 @@ impl TrafficSim {
