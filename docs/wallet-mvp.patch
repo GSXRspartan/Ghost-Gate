@@ -56,14 +56,18 @@
              }],
              badge_usage: BadgeUsage::None,
              resource_address: STEALTH_TARI_RESOURCE_ADDRESS,
-@@ -340,3 +368,8 @@
+@@ -340,3 +368,12 @@
              .expect("distinct condition leaves form a tree");
      }
  }
 +
 +/// Tests for the caller-requested minimum value promise, kept in their own file because they reach
 +/// past parameter validation into the built statement and the engine's range-proof validator.
++///
++/// The explicit path is required: a bare `mod` inside this inline `tests` module would resolve to
++/// `params/minimum_value_promise_tests.rs`, a sibling file that does not exist.
 +#[cfg(test)]
++#[path = "minimum_value_promise_tests.rs"]
 +mod minimum_value_promise_tests;
 --- a/crates/wallet/sdk/src/apis/stealth_transfer/types.rs
 +++ b/crates/wallet/sdk/src/apis/stealth_transfer/types.rs
@@ -112,13 +116,17 @@
 //! access proof needs and what an ordinary transfer cannot express.
 
 use ootle_byte_type::ToByteType;
-use tari_crypto::{keys::PublicKey as _, ristretto::RistrettoPublicKey, ristretto::RistrettoSecretKey};
+use tari_crypto::{
+    keys::{PublicKey as _, SecretKey as _},
+    ristretto::{RistrettoPublicKey, RistrettoSecretKey},
+};
 use tari_engine_types::stealth::validate_stealth_outputs_statement;
 use tari_ootle_wallet_crypto::{
     MaskAndValue, OutputWitness, StealthInputWitness, StealthOutputWitness, stealth,
 };
 use tari_template_lib::types::{
     Amount, EncryptedData,
+    constants::STEALTH_TARI_RESOURCE_ADDRESS,
     crypto::UtxoTag,
     stealth::{SpendAuthorization, StealthTransferStatement},
 };
@@ -302,7 +310,7 @@ fn promised_output(amount: u64, promise: u64) -> StealthOutputWitness {
         witness: OutputWitness {
             amount,
             mask: mask.clone(),
-            sender_public_nonce: RistrettoPublicKey::random(&mut rand::rng()),
+            sender_public_nonce: RistrettoPublicKey::random_keypair(&mut rand::rng()).1,
             minimum_value_promise: promise,
             encrypted_data: EncryptedData::try_from(vec![0u8; EncryptedData::min_size()]).unwrap(),
             resource_view_key: None,
@@ -421,7 +429,10 @@ fn fragmented_inputs_carry_the_promise_unchanged() {
 /// `TryFrom<&TransferOutput>` must carry the field, or the RPC path would silently drop it.
 #[test]
 fn the_rpc_conversion_carries_the_promise() {
-    let converted = StealthOutputToCreate::try_from(&output(30_000, 10_000)).expect("conversion");
+    // The conversion borrows (`StealthOutputToCreate<'a>` holds `memo: Option<&'a Memo>`), so the
+    // source has to outlive it — binding the temporary to a local first.
+    let requested = output(30_000, 10_000);
+    let converted = StealthOutputToCreate::try_from(&requested).expect("conversion");
     assert_eq!(converted.minimum_value_promise, 10_000);
     assert_eq!(converted.amount, 30_000);
 }
@@ -432,7 +443,7 @@ fn the_rpc_conversion_carries_the_promise() {
 #[test]
 fn the_statement_carries_no_secret_material() {
     let statement = promised_statement(30_000, 10_000);
-    let encoded = tari_bor::to_vec(&statement).expect("statement encodes");
+    let encoded = tari_bor::encode(&statement).expect("statement encodes");
     let decoded: StealthTransferStatement = tari_bor::decode(&encoded).expect("round trip");
 
     assert_eq!(decoded, statement);
