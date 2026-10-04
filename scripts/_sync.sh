@@ -13,11 +13,15 @@ WINDOWS_ROOT="$1"
 LINUX_ROOT="$2"
 
 mkdir -p "$LINUX_ROOT/ghost-gate"
-if [ -d "$WINDOWS_ROOT/_ootle-v042-build" ]; then
-  mkdir -p "$LINUX_ROOT/_ootle-v042-build"
-fi
 
-for name in ghost-gate _ootle-v042-build; do
+# Only this repository is synced. The cohort trees (`_ootle-v042-build`, `_ootle-v042-ghost-gate`) are
+# large, are prepared once by scripts/prepare_reference.sh and scripts/patch_test.sh, and are kept in
+# sync by those scripts. Re-copying them on every run would cost minutes of rsync off /mnt/c to move
+# bytes that have not changed, and a half-finished copy would be worse than a stale one.
+#
+# To refresh the patched cohort after editing the Windows copy of it, run:
+#   scripts/patch_test.sh sync
+for name in ghost-gate; do
   src="$WINDOWS_ROOT/$name"
   dst="$LINUX_ROOT/$name"
   if [ ! -d "$src" ]; then

@@ -42,20 +42,33 @@ mkdir -p "$WALLET_WEB_DIST"
 # the nested cargo build inherits CARGO_TARGET_DIR — which would send the artifact somewhere the
 # script does not look. The wallet SDK does not need the builtins, but building anything in that
 # workspace can, so pre-build them with the variable unset.
-echo "[patch-test] pre-building builtin templates (in-tree, CARGO_TARGET_DIR unset)"
-( unset CARGO_TARGET_DIR
-  for tpl in account nft_faucet faucet liquidity_pool burn_rate_governance; do
-    dir="$PATCHED_DST/crates/template_builtin/templates/$tpl"
-    [ -d "$dir" ] || continue
-    ( cd "$dir" && cargo build --target wasm32-unknown-unknown --release >/dev/null 2>&1 ) || {
-      echo "[patch-test] warning: could not pre-build $tpl" >&2
-    }
-  done
-)
+#
+# Skipped for `sync`: the artifacts live under each template's own target/, which the rsync above
+# excludes, so they are already there and re-invoking cargo for them costs minutes for nothing.
+if [ "${1:-test}" != "sync" ]; then
+  echo "[patch-test] pre-building builtin templates (in-tree, CARGO_TARGET_DIR unset)"
+  ( unset CARGO_TARGET_DIR
+    for tpl in account nft_faucet faucet liquidity_pool burn_rate_governance; do
+      dir="$PATCHED_DST/crates/template_builtin/templates/$tpl"
+      [ -d "$dir" ] || continue
+      ( cd "$dir" && cargo build --target wasm32-unknown-unknown --release >/dev/null 2>&1 ) || {
+        echo "[patch-test] warning: could not pre-build $tpl" >&2
+      }
+    done
+  )
+fi
 
 cd "$PATCHED_DST" || exit 1
 
 case "${1:-test}" in
+  sync)
+    # Refresh the staged tree and the web_ui placeholder without building anything.
+    #
+    # This is how an edit to the Windows copy of the patched cohort reaches the Linux tree once the
+    # workspace's pins point at it. The builtin templates are deliberately not rebuilt: they live
+    # under a target/ directory, which the rsync above excludes, so they survive untouched.
+    exit 0
+    ;;
   check|build)
     shift || true
     exec cargo check -p tari_ootle_wallet_sdk --all-targets "$@"

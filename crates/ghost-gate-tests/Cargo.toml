@@ -25,3 +25,11 @@ tari_bor = { workspace = true, features = ["std"] }
 tari_crypto = { workspace = true }
 rand = { workspace = true }
 hex = { workspace = true }
+# Gate 3 builds its statement with a real wallet, so these come along. The SDK is the patched crate:
+# the promise-bearing output request below only type-checks against the tree carrying the MVP change.
+tari_ootle_wallet_sdk = { workspace = true }
+tari_ootle_wallet_sdk_services = { workspace = true }
+tari_ootle_wallet_storage_sqlite = { workspace = true }
+tari_ootle_address = { workspace = true }
+tari_utilities = { workspace = true }
+tempfile = "3.24"

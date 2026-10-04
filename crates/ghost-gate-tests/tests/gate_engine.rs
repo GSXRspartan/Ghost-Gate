@@ -13,8 +13,17 @@ use tari_crypto::{
     ristretto::{RistrettoPublicKey, RistrettoSecretKey},
 };
 use tari_engine_types::substate::SubstateDiff;
+use tari_ootle_address::{Network, RistrettoOotleAddress};
 use tari_ootle_common_types::substate_type::SubstateType;
 use tari_ootle_wallet_crypto::{MaskAndValue, OutputWitness, StealthInputWitness, StealthOutputWitness};
+use tari_ootle_wallet_sdk::{
+    WalletSdk, WalletSdkConfig,
+    apis::{stealth_outputs::TransferStatementParams, stealth_transfer::StealthOutputToCreate},
+    cipher_seed::CipherSeedRestore,
+    models::{EpochBirthday, InputSpendData, KeyBranch, KeyId},
+};
+use tari_ootle_wallet_sdk_services::indexer_rest_api::IndexerRestApiNetworkInterface;
+use tari_ootle_wallet_storage_sqlite::SqliteWalletStore;
 use tari_ootle_transaction::{Epoch, Transaction, args};
 use tari_template_lib::types::{
     AccessRule, Amount, ComponentAddress, EncryptedData, Hash32, MaxBytes, ObjectKey, ResourceAddress,
@@ -25,6 +34,7 @@ use tari_template_lib::types::{
     },
 };
 use tari_template_test_tooling::{TemplateTest, support::assert_error::assert_reject_reason};
+use tari_utilities::SafePassword;
 
 const CRATE_PATH: &str = env!("CARGO_MANIFEST_DIR");
 /// The funding fixture, resolved from this crate's manifest dir to the repo's templates directory.
@@ -68,11 +78,20 @@ const THRESHOLD: u64 = 10_000;
 /// smaller figure so amounts stay readable. One tTARI is a million microtari.
 const TARI: u64 = 1_000_000;
 
+/// What the wallet owns when it proves access. Comfortably above the threshold, so the only thing
+/// separating acceptance from refusal is the promise, not the balance.
+const FUNDING: u64 = 30_000;
+
 /// A deployed funding resource plus the masks needed to spend its outputs.
 struct Funds {
     resource: ResourceAddress,
     /// Parallel to the `amounts` the faucet was created with: each output's Pedersen mask.
     masks: Vec<RistrettoSecretKey>,
+    /// Parallel to `masks`: what the wallet needs in order to *name* each output as an input. The
+    /// commitment and nonce are the on-chain identity of the UTXO, which a wallet reads from its own
+    /// store rather than recomputing. Gate 3 needs them because it hands those identities to the
+    /// wallet's statement builder, exactly as the RPC handler hands it outputs the wallet selected.
+    inputs: Vec<InputSpendData>,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -94,7 +113,7 @@ fn harness() -> TemplateTest {
 ///
 /// The test builds the mint statement, because a template cannot create stealth outputs on its own.
 /// Each output's spend key is derived from a nonce the test picks, so the test also holds the key
-/// that authorises spending it — the same relationship an ordinary wallet output has.
+/// that authorises spending it ? the same relationship an ordinary wallet output has.
 fn fund(test: &mut TemplateTest, owner: &RistrettoSecretKey, amounts: &[u64], mvps: &[u64]) -> Funds {
     let owner_pk = RistrettoPublicKey::from_secret_key(owner);
 
@@ -137,12 +156,28 @@ let total: u64 = amounts.iter().sum();
         vec![],
     );
 
-    Funds {
+Funds {
         resource: test.get_previous_output_address(SubstateType::Resource).as_resource_address().unwrap(),
         masks: amounts
             .iter()
             .enumerate()
             .map(|(i, _)| RistrettoSecretKey::from(MASK_BASE + u64::try_from(i).unwrap()))
+            .collect(),
+        // Read back off the statement the faucet was called with: those are the exact on-chain
+        // identities, including the sender nonces, so no test has to recompute a commitment and hope
+        // it matches.
+        inputs: statement
+            .outputs_statement
+            .outputs
+            .iter()
+            .zip(amounts.iter().copied())
+            .map(|(output, value)| InputSpendData {
+                commitment: output.commitment,
+                public_nonce: output.sender_public_nonce,
+                encrypted_data: output.encrypted_data.clone(),
+                value,
+                is_on_chain: true,
+            })
             .collect(),
     }
 }
@@ -163,7 +198,7 @@ fn stealth_spend_key(account_key: &RistrettoPublicKey, nonce: u64) -> RistrettoP
 
 /// Deploys a gate over `resource` and returns its address.
 ///
-/// The address is allocated by the transaction under `name`, so two calls yield two distinct gates —
+/// The address is allocated by the transaction under `name`, so two calls yield two distinct gates ?
 /// which is what lets a test point a challenge at a *real* other gate instead of a synthetic address
 /// the engine would reject at substate lookup before the template ever ran.
 fn deploy_gate_named(test: &mut TemplateTest, name: &str, resource: ResourceAddress, threshold: u64) -> ComponentAddress {
@@ -338,7 +373,7 @@ fn public_of(secret: &RistrettoSecretKey) -> RistrettoPublicKeyBytes {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Gate 2 — the template under the engine
+// Gate 2 ? the template under the engine
 // ---------------------------------------------------------------------------------------------
 
 /// The happy path. A hidden value above the threshold, one key-spendable output, committed.
@@ -1078,7 +1113,7 @@ fn the_shared_rules_agree_with_the_template() {
     ));
 }
 
-/// One tTARI is a million microtari, so the README's "≥ 10,000 tTARI" is 10^10 microtari.
+/// One tTARI is a million microtari, so the README's "= 10,000 tTARI" is 10^10 microtari.
 #[test]
 fn the_documented_example_is_consistent() {
     assert_eq!(TARI, 1_000_000);
@@ -1130,7 +1165,7 @@ let statement = create_transfer_statement(
 /// `derive_stealth_owner_public_key(network, k.G, r)` produces the committed key; the matching
 /// private half is `derive_stealth_owner_secret(network, k, r.G)`. Both sides of the DH are needed
 /// and the two functions take them in opposite order, which is the easiest thing in this file to
-/// get wrong — so the test derives it the same way the fixture derived the public half rather than
+/// get wrong ? so the test derives it the same way the fixture derived the public half rather than
 /// assuming they are the same call.
 ///
 /// The engine only ever checks the public key against the auth scope, so the private half exists
@@ -1143,4 +1178,250 @@ fn derive_input_spend_key(account_secret: &RistrettoSecretKey, index: usize) -> 
         account_secret,
         &nonce_public,
     )
+}
+// ---------------------------------------------------------------------------------------------
+// Gate 3 - the wallet and the engine meet
+// ---------------------------------------------------------------------------------------------
+//
+// Everything above proves the gate's rule. Everything in the walletd suite proves a wallet will
+// build a promised output when asked. Neither shows the two halves meet, and the meeting is the
+// claim this product rests on: the bytes an ordinary wallet produces are the bytes consensus accepts.
+//
+// These tests close that loop. The statement is built by the wallet's own `generate_transfer_statement`
+// from a promise-bearing `StealthOutputToCreate` -- the same call, with the same field, that the
+// patched `accounts.create_stealth_transfer_statement` handler makes -- and the funds it spends are
+// key-path outputs authorised by a real wallet account key read out of the wallet's own keyring.
+//
+// The cohort is pinned to the *patched* v0.42.0 tree (see the workspace Cargo.toml). That is load
+// bearing: the wallet and the engine have to be one compilation of the same crates, or the statement
+// the wallet produces is not a statement the engine can accept.
+//
+// STATUS: NOT YET COMPILED. This section has never been through rustc. The build that would prove it
+// ran out of memory three times on a 5 GB host (see docs/GATE3_RESULTS.md). Treat it as a reviewed
+// draft: the APIs it calls were each read out of the cohort source rather than guessed, but reading is
+// not compiling. Run scripts/gg_test.sh test -p ghost-gate-tests --test gate_engine before trusting
+// any of it.
+//
+// Not covered here: RPC transport, the indexer, mempool admission, block production. Those belong to
+// the cohort's own `integration_tests` harness, which needs the base-layer Minotari dependency graph
+// and so cannot be built on a machine this size.
+/// The SDK spec this test uses: a local keyring, a SQLite store, and the cohort's indexer client.
+///
+/// Declared here rather than imported from `tari_walletd`, which owns the daemon's own spec, because
+/// pulling the daemon in as a dev-dependency of the test crate would build an application nobody in
+/// this workspace needs. The three associated types are the whole spec.
+struct TestSpec;
+
+impl tari_ootle_wallet_sdk::WalletSdkSpec for TestSpec {
+    type KeyStore = tari_ootle_wallet_sdk::local_key_store::LocalKeyStore;
+    type NetworkInterface = IndexerRestApiNetworkInterface;
+    type Store = SqliteWalletStore;
+}
+
+type TestSdk = WalletSdk<TestSpec>;
+
+/// An ordinary wallet: a real SQLite store, a real key manager, a real cipher seed, one account with
+/// an owner key. Only the indexer interface is inert, because the statement path resolves its inputs
+/// from the wallet rather than from the network.
+///
+/// The account key is read back out of the wallet's own keyring. That stands in for walletd signing
+/// with a key it never exports; there is no caller in this flow for a key to be exported to.
+struct OrdinaryWallet {
+    sdk: TestSdk,
+    view_only_key_id: KeyId,
+    owner_secret: RistrettoSecretKey,
+    /// Where the qualifying output goes: back to the owner.
+    owner_address: RistrettoOotleAddress,
+    /// Keeps the SQLite directory alive for as long as the wallet is.
+    _store_dir: tempfile::TempDir,
+}
+
+impl OrdinaryWallet {
+    fn create() -> OrdinaryWallet {
+        let store_dir = tempfile::tempdir().expect("temp dir for the wallet store");
+        let store = SqliteWalletStore::try_open(store_dir.path().join("wallet.sqlite")).expect("open store");
+        store.run_migrations().expect("migrate store");
+
+        let sdk = WalletSdk::initialize_with_local_key_store(
+            store,
+            IndexerRestApiNetworkInterface::new("http://127.0.0.1:1"),
+            WalletSdkConfig {
+                network: Network::LocalNet,
+                override_keyring_password: Some(SafePassword::from(b"ghost gate".to_vec())),
+            },
+            EpochBirthday::far_future(),
+        )
+        .expect("initialise wallet");
+        sdk.initialize_cipher_seed(CipherSeedRestore::CreateNewIfRequired)
+            .expect("create cipher seed");
+
+        let account: ComponentAddress =
+            "component_0dc41b5cc74b36d696c7b140323a40a2f98b71df5d60e5a6bf4c1a07ffffffff"
+                .parse()
+                .expect("component address");
+        let view_only_key_id = KeyId::derived(KeyBranch::ViewOnlyKey, 0);
+        let owner_key_id = KeyId::derived(KeyBranch::Account, 0);
+        sdk.accounts_api()
+            .add_account(
+                Some("gate"),
+                &account,
+                view_only_key_id,
+                owner_key_id,
+                Epoch::zero(),
+                true,
+                true,
+            )
+            .expect("add account");
+
+        let owner_secret = sdk
+            .key_manager_api()
+            .get_private_key(owner_key_id)
+            .expect("read the account key out of the wallet's own keyring")
+            .secret_key()
+            .clone();
+        let owner_address = RistrettoOotleAddress::new(
+            Network::LocalNet,
+            sdk.key_manager_api()
+                .get_public_key(view_only_key_id)
+                .expect("view-only key")
+                .public_key()
+                .to_byte_type(),
+            sdk.key_manager_api()
+                .get_public_key(owner_key_id)
+                .expect("account key")
+                .public_key()
+                .to_byte_type(),
+        );
+
+        OrdinaryWallet {
+            sdk,
+            view_only_key_id,
+            owner_secret,
+            owner_address,
+            _store_dir: store_dir,
+        }
+    }
+
+    /// Builds the statement the way the patched statement handler does: the wallet is handed a
+    /// promise-bearing output request and nothing else. It derives the output witnesses, the range
+    /// proof, the balance proof and the balance signature itself.
+    fn statement(
+        &self,
+        resource: ResourceAddress,
+        inputs: &[InputSpendData],
+        amount: u64,
+        minimum_value_promise: u64,
+    ) -> StealthTransferStatement {
+        self.sdk
+            .stealth_outputs_api()
+            .generate_transfer_statement(TransferStatementParams {
+                view_only_key_id: self.view_only_key_id,
+                resource_address: &resource,
+                resource_view_key: None,
+                inputs,
+                input_revealed_amount: Amount::zero(),
+                outputs: vec![StealthOutputToCreate {
+                    owner_address: self.owner_address.clone(),
+                    pay_to: tari_ootle_wallet_crypto::pay_to::PayTo::StealthPublicKey,
+                    amount,
+                    memo: None,
+                    minimum_value_promise,
+                }],
+                revealed_output: None,
+            })
+            .expect("the wallet builds the statement")
+    }
+}
+
+/// A wallet builds the statement; consensus accepts it; the gate counts exactly one proof.
+#[test]
+fn a_wallet_built_statement_satisfies_the_gate() {
+    let mut test = harness();
+    let wallet = OrdinaryWallet::create();
+
+    // The wallet's own funds, authorised by its account key, so the spend below is an ordinary
+    // key-path spend rather than a special case the gate has to accommodate.
+    let funds = fund(&mut test, &wallet.owner_secret, &[FUNDING], &[]);
+    let gate = deploy_gate(&mut test, funds.resource, THRESHOLD);
+    let challenge = challenge_for(gate, funds.resource, THRESHOLD);
+
+    let statement = wallet.statement(funds.resource, &funds.inputs, FUNDING, THRESHOLD);
+
+    // The wallet honoured the request, and published a bound rather than an amount.
+    assert_eq!(statement.outputs_statement.outputs.len(), 1);
+    assert_eq!(
+        statement.outputs_statement.outputs[0]
+            .output
+            .minimum_value_promise,
+        THRESHOLD,
+        "the statement must carry the promise the caller asked for"
+    );
+    assert!(statement.outputs_statement.revealed_output.is_none());
+    assert_eq!(statement.inputs_statement.inputs.len(), 1);
+
+    // The engine's transfer validator is the first gate; the template's threshold is the second.
+    tari_engine_types::stealth::validate_transfer(&statement, None)
+        .expect("consensus accepts the statement the wallet built");
+
+    let input_spend_key = derive_input_spend_key(&wallet.owner_secret, 0);
+    let result = test.execute_expect_success(
+        Transaction::builder_localnet(Epoch(1))
+            .call_method(gate, "prove_access", args![challenge, statement])
+            .finish()
+            .add_signer(&public_of(&input_spend_key), &input_spend_key)
+            .seal(wallet.owner_secret.clone()),
+        vec![],
+    );
+
+    let diff = result
+        .finalize
+        .any_accept()
+        .expect("the gate must accept a qualifying proof");
+    assert_eq!(count_new_utxos(&diff), 1, "the qualifying output is the only new UTXO");
+
+    let accepted: u64 = test.extract_component_value(gate, GATE_PROOFS_ACCEPTED_PATH);
+    assert_eq!(accepted, 1, "the gate counted exactly one proof");
+}
+
+/// An under-promising wallet statement is refused.
+///
+/// Without this, the test above would also pass against a template that ignored the promise and
+/// counted any statement. Here the caller asks for one unit less than the threshold; the wallet builds
+/// exactly that, because the statement is well formed and refusing it is not the wallet's job. The gate
+/// is what has to apply the bound.
+#[test]
+fn a_wallet_statement_below_the_threshold_is_refused() {
+    let mut test = harness();
+    let wallet = OrdinaryWallet::create();
+
+    let funds = fund(&mut test, &wallet.owner_secret, &[FUNDING], &[]);
+    let gate = deploy_gate(&mut test, funds.resource, THRESHOLD);
+    let challenge = challenge_for(gate, funds.resource, THRESHOLD);
+
+    let under = THRESHOLD - 1;
+    let statement = wallet.statement(funds.resource, &funds.inputs, FUNDING, under);
+
+    // The wallet did not round up, and did not refuse.
+    assert_eq!(
+        statement.outputs_statement.outputs[0]
+            .output
+            .minimum_value_promise,
+        under
+    );
+    // Consensus still accepts the statement. It is a valid statement; it just does not qualify.
+    tari_engine_types::stealth::validate_transfer(&statement, None)
+        .expect("an under-promising statement is still a valid statement");
+
+    let input_spend_key = derive_input_spend_key(&wallet.owner_secret, 0);
+    test.execute_expect_failure(
+        Transaction::builder_localnet(Epoch(1))
+            .call_method(gate, "prove_access", args![challenge, statement])
+            .finish()
+            .add_signer(&public_of(&input_spend_key), &input_spend_key)
+            .seal(wallet.owner_secret.clone()),
+        vec![],
+    );
+
+    let accepted: u64 = test.extract_component_value(gate, GATE_PROOFS_ACCEPTED_PATH);
+    assert_eq!(accepted, 0, "an under-promising proof must not count");
 }
