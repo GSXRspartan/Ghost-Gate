@@ -343,6 +343,31 @@ case is the same statement one unit of promise lower and is refused.
 
 ## The transport half: real localnet
 
+**The cohort's own end-to-end harness runs on this machine. The baseline is green; the Ghost Gate
+scenario is the open item.**
+
+### Baseline: `@transfer` passes
+
+```text
+scripts/ootle_e2e.sh -- --tags "@transfer"
+
+[Summary]
+1 feature
+3 scenarios (3 passed)
+48 steps (48 passed)
+```
+
+All three scenarios, including `Stealth transfer to account that does not previously exist`. That is a
+base node, a validator, an indexer, a miner, a wallet daemon and a Minotari console wallet, started in
+process and driven over real RPC, mining blocks, claiming a base-layer burn and moving stealth tTARI.
+Everything the localnet half of this gate needs is therefore working here.
+
+(The arguments go after a `--`: `cargo` parses `--tags` itself and refuses the command otherwise, which
+is why the script's own usage line was wrong until this run.)
+
+### What it cost to get here
+
+
 **This is a separate claim from the 30/30 above, and it is not green yet.**
 
 The harness is the cohort's own `integration_tests` (a base node, validator, indexer, miner and wallet
@@ -357,6 +382,45 @@ all on this machine:
 | `hidapi` (via the Minotari base-layer wallet) needs libudev's *dev* files, which this image lacks, and `sudo` needs a password | `scripts/stage_libudev.sh` unpacks `libudev-dev` from the Ubuntu 22.04 archive into `/home/pdark/gg-local` and the script exports `PKG_CONFIG_PATH` and `CPATH`. Nothing outside `$HOME` is touched. |
 | base-layer protos use proto3 optional fields, which the distro's protoc 3.12.4 rejects | `PROTOC=/home/pdark/ootle-build/protoc/bin/protoc` (21.12, already staged on this machine) |
 | the target directory must stay off the D: drive, but `CARGO_TARGET_DIR` breaks the cohort's own build script | `--config build.target-dir=...`, as above |
+
+### What was added to the cohort tree, and why it is safe
+
+The harness lives inside the cohort (`integration_tests/`), so exercising the Ghost Gate template on a real
+localnet means adding files to the cohort tree. `scripts/check_gate3_integration.sh` enumerates every
+difference between the pristine reference and the patched cohort and fails on anything unaccounted for:
+
+```text
+wallet MVP patch (docs/wallet-mvp.patch): 9 entries
+Gate 3 integration additions:             8 entries
+cohort build-script output:              17 entries
+no unexplained divergence
+ALL CHECKS PASSED
+```
+
+The Gate 3 additions are:
+
+| Path | What it is |
+| --- | --- |
+| `integration_tests/src/templates/ghost_gate/` | The template, copied from `templates/ghost_gate`, with its path dependencies rewritten to the cohort's own crates. |
+| `integration_tests/src/ghost_gate_core/` | `crates/ghost-gate-core` copied in, because a path into the Ghost Gate workspace would put two spellings of the same cohort crate in one lockfile (see below). |
+| `integration_tests/tests/steps/ghost_gate.rs` | Four steps: deploy the gate and issue a challenge, ask the wallet for a statement with a promise, submit the proof, replay it. |
+| `integration_tests/tests/features/ghost_gate.feature` | One scenario. |
+| `integration_tests/tests/steps/mod.rs`, `integration_tests/src/lib.rs`, `integration_tests/Cargo.toml`, `Cargo.lock` | Registration and the two new `TariWorld` fields the steps need. |
+
+Both copies are byte-identical to the Ghost Gate repository's originals, which the same script checks with
+`cmp`. The copies exist for one reason worth recording: `ghost-gate/Cargo.toml` pins the cohort as
+`../_ootle-v042-ghost-gate`, a symlink, while the cohort's own crates refer to each other by their real
+paths. Cargo does not canonicalise those, so a single dependency graph containing both spellings of
+`ootle_serde v0.6.0` is refused outright:
+
+```text
+error: package collision in the lockfile: packages ootle_serde v0.6.0 (.../_ootle-v042-ghost-gate/...)
+and ootle_serde v0.6.0 (.../tari-ootle-v0.42.0-ghost-gate/...) are different, but only one can be written
+to lockfile unambiguously
+```
+
+The same collision is what made the engine suite fail before any of this was written: the two template
+workspaces had been left pointing at the pristine tree by the cohort switch (fix 1 above).
 
 Useful discovery for the transport work: **tTARI on Ootle is itself a stealth resource.** The harness's
 existing steps `I do a stealth transfer ... via the wallet daemon ...` operate on `TARI_TOKEN` through

@@ -16,11 +16,16 @@
 # with "Copy file to dest: No such file or directory". The cohort tree is left untouched, which also
 # keeps the patched tree byte-comparable with the pristine reference (docs/wallet-mvp.patch).
 #
-# Usage: scripts/ootle_e2e.sh [cucumber args...]
-#   e.g. scripts/ootle_e2e.sh --tags "@transfer"
-#        scripts/ootle_e2e.sh --name "Stealth transfer to account that does not previously exist"
+# Usage: scripts/ootle_e2e.sh [--] [cucumber args...]
+#   Everything after `--` goes to the test binary, which is where cucumber's own arguments belong. Passing
+#   them straight through does not work: cargo parses `--tags` itself and refuses the command.
+#   e.g. scripts/ootle_e2e.sh -- --tags "@transfer"
+#        scripts/ootle_e2e.sh -- --name "Stealth transfer to account that does not previously exist"
 
 set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 export RUST_BACKTRACE=1
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-3}"
 # The cohort pins 1.97.1 and rustup only applies a rust-toolchain.toml to processes started inside that
@@ -29,16 +34,19 @@ export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-1.97.1}"
 # protoc 21.12; the distro's 3.12.4 rejects proto3 optional fields.
 export PROTOC="${PROTOC:-/home/pdark/ootle-build/protoc/bin/protoc}"
 
-# libudev. The Minotari base-layer wallet pulls in `hidapi`, whose Linux build script compiles a C
-# shim and needs libudev's *development* files -- header, .pc and link name -- which this WSL image does
-# not have (only the runtime libudev.so.1). `sudo` needs a password here, so rather than installing
-# libudev-dev system-wide the dev files were unpacked from the Ubuntu 22.04 package into a user-writable
-# prefix and pkg-config is pointed at it. See scripts/stage_libudev.sh; nothing outside $HOME changes.
-export PKG_CONFIG_PATH="${PKG_CONFIG_PATH:-/home/pdark/gg-local/lib/pkgconfig}"
+# Two native build dependencies are missing from this image and `sudo` needs a password, so they are
+# unpacked from their distribution packages into a user-writable prefix instead:
+#   - libudev's development files, for `hidapi`'s C shim (pulled in by the Minotari base-layer wallet)
+#   - autoconf/automake/m4/libtool, because `libtor-src` builds Tor from source via `autoreconf`
+# scripts/stage_native_deps.sh does the work; the exports below are what its output asks for. Nothing
+# outside $HOME is touched.
+bash "$SCRIPT_DIR/stage_native_deps.sh" >/dev/null
+export PATH="/home/pdark/gg-local/usr/bin:$PATH"
+export PKG_CONFIG_PATH="${PKG_CONFIG_PATH:-/home/pdark/gg-local/usr/lib/x86_64-linux-gnu/pkgconfig}"
 # hidapi compiles its C shim *before* asking pkg-config anything, so the header has to be findable by the
 # C compiler itself. CPATH is gcc/clang's own "additional include search path" variable, which is why it
 # is used here instead of CFLAGS: nothing about the compiler invocation changes, only where it looks.
-export CPATH="${CPATH:-/home/pdark/gg-local/include}${CPATH:+:$CPATH}"
+export CPATH="${CPATH:-/home/pdark/gg-local/usr/include}${CPATH:+:$CPATH}"
 
 TARGET="${TARGET:-/home/pdark/gg-ootle-target}"
 STAGED="${STAGED:-/mnt/d/Codex/ghost-gate-workspace/_ootle-v042-ghost-gate}"
