@@ -28,7 +28,11 @@ hex = { workspace = true }
 # Gate 3 builds its statement with a real wallet, so these come along. The SDK is the patched crate:
 # the promise-bearing output request below only type-checks against the tree carrying the MVP change.
 tari_ootle_wallet_sdk = { workspace = true }
-tari_ootle_wallet_sdk_services = { workspace = true }
+# `indexer_client` is what puts `IndexerRestApiNetworkInterface` in the crate: the SDK requires a network
+# interface to be supplied at construction, and this is the one the cohort's own default spec uses. The
+# Gate 3 tests never call it -- the statement path resolves its inputs from the wallet store, not the
+# network -- but the spec still has to name a real implementation.
+tari_ootle_wallet_sdk_services = { workspace = true, features = ["indexer_client"] }
 tari_ootle_wallet_storage_sqlite = { workspace = true }
 tari_ootle_address = { workspace = true }
 tari_utilities = { workspace = true }

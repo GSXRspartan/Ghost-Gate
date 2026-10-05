@@ -1,39 +1,49 @@
 #!/usr/bin/env bash
-# Sync the Windows checkout into the native Linux tree and run a cargo command in it.
-#
-# Split out from scripts/wsl_run.sh so it can be pointed at the shared warm target directory
-# (/root/gg-ootle-target) rather than wsl_run.sh's own /root/gg-target. The cohort crates are only
-# compiled once, in whichever target directory the cohort was built in, and pointing a second command
-# at a different one silently recompiles the whole Ootle layer.
+# Run a cargo command against the Ghost Gate workspace with this machine's build settings.
 #
 # The cohort switch lives in the root Cargo.toml's [workspace.dependencies]; nothing here decides it.
+#
+# Three settings this script exists to get right, each of which cost a build on this project:
+#
+#   - RUSTUP_TOOLCHAIN. The cohort pins 1.97.1 (tari-ootle-v0.42.0-ghost-gate/rust-toolchain.toml) and
+#     the workspace asks for the same rust-version, so the default `stable` toolchain (1.99.0 here) is
+#     not what this project is built with. rustup only applies a directory's rust-toolchain.toml to
+#     processes started inside that directory, and a build started here is *not* inside the cohort tree,
+#     so the pin has to be applied explicitly.
+#
+#   - The target directory. `.cargo/config.toml` (git-ignored, machine-local) points it at the Linux
+#     filesystem rather than the HDD-mounted D: drive. It is deliberately config and not the
+#     CARGO_TARGET_DIR environment variable: cargo exports CARGO_TARGET_DIR to build scripts, and
+#     `crates/template_builtin/build.rs` shells out to a nested cargo for each builtin template and then
+#     reads the .wasm from that template's own target/ directory. Inherit the variable and the nested
+#     build writes elsewhere, and the cohort build dies with "Copy file to dest: No such file or
+#     directory".
+#
+#   - One heavy build at a time. This box has ~9.7 GiB of RAM and 8 CPUs; the default here is 3 jobs.
 #
 # Usage: scripts/gg_test.sh <cargo-subcommand> [args...]
 #   scripts/gg_test.sh test -p ghost-gate-tests --test gate_engine -- --test-threads=2
 set -uo pipefail
-export PATH="/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-WINDOWS_ROOT="${WINDOWS_ROOT:-/mnt/c/Users/pdark/Documents/Codex/2026-10-01/ghost-gate-workspace}"
-LINUX_ROOT="${LINUX_ROOT:-/root/gg}"
-TARGET="${TARGET:-/root/gg-ootle-target}"
-JOBS="${CARGO_BUILD_JOBS:-1}"
-LOG="${LOG:-/root/gg-test.log}"
+ROOT="${GG_ROOT:-/mnt/d/Codex/ghost-gate-workspace}"
+JOBS="${CARGO_BUILD_JOBS:-3}"
+LOG="${LOG:-/home/pdark/gg-logs/gg_test.log}"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# protoc 21.12, not the distro's 3.12.4: the base-layer protos use proto3 optional fields.
+export PROTOC="${PROTOC:-/home/pdark/ootle-build/protoc/bin/protoc}"
+export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-1.97.1}"
+export CARGO_BUILD_JOBS="$JOBS"
+export RUST_BACKTRACE=1
 
-# Keep the Linux tree in step with the Windows source of truth. _sync.sh copies only this repository;
-# the cohort trees are prepared separately (scripts/prepare_reference.sh, scripts/patch_test.sh).
-bash "$SCRIPT_DIR/_sync.sh" "$WINDOWS_ROOT" "$LINUX_ROOT" || exit 1
-
-cd "$LINUX_ROOT/ghost-gate" || exit 1
+mkdir -p "$(dirname "$LOG")"
+cd "$ROOT/ghost-gate" || exit 1
 
 SUB="${1:-test}"
 shift || true
 
 {
-  echo "=== $(date -Is) cargo $SUB $* (target=$TARGET jobs=$JOBS) ==="
+  echo "=== $(date -Is) cargo $SUB $* (target=$(cargo config get build.target-dir 2>/dev/null | tail -1) jobs=$JOBS toolchain=$RUSTUP_TOOLCHAIN) ==="
 } >> "$LOG"
 
-env CARGO_TARGET_DIR="$TARGET" CARGO_BUILD_JOBS="$JOBS" RUST_BACKTRACE=1 \
-  cargo "$SUB" "$@" 2>&1 | tee -a "$LOG"
+cargo "$SUB" "$@" 2>&1 | tee -a "$LOG"
 exit "${PIPESTATUS[0]}"

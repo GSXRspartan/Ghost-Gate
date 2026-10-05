@@ -29,12 +29,15 @@ consensus threshold enforcement
 COMMITTED ? access proof
 ```
 
-## Verdict: NOT GREEN ? the wallet half is proven, the two halves have not been joined
+## Verdict: the consensus half is GREEN (30/30); the transport half is still open
 
 The gap that used to make this gate unreachable ? stock walletd cannot express a minimum value
-promise ? is closed by a local patch, and both halves of that patch are now verified: 17 SDK tests and
-5 walletd handler tests pass. What has **not** happened is the run that matters, where a statement a
-wallet built is spent into a gate call and consensus accepts it.
+promise ? is closed by a local patch, and all three of its verifications now pass: 17 SDK tests, 5
+walletd handler tests, and -- as of 2026-10-04 -- the 30-test engine suite, whose last two cases are a
+statement a real wallet built being spent into a gate call and accepted by consensus.
+
+What that does **not** cover is the transport: no RPC, no mempool, no block, no network. The localnet
+half of this gate is a separate claim and is tracked separately below.
 
 | Step | Status |
 | --- | --- |
@@ -44,9 +47,13 @@ wallet built is spent into a gate call and consensus accepts it.
 | Wallet SDK MVP tests | **17 passed, 0 failed** |
 | walletd handler tests, real wallet, real RPC path | **5 passed, 0 failed** |
 | walletd lib + tests type-check | clean |
-| Engine suite re-run against the patched cohort | **not completed** ? build killed, see below |
-| Wallet-built statement accepted by a gate call | **written, never compiled** |
-| Live localnet: validator + walletd, four-step flow, `COMMITTED` | not started |
+| Engine suite re-run against the patched cohort | **30 passed, 0 failed** (2026-10-04, gaming PC) |
+| Wallet-built statement accepted by a gate call | **passing** (same run; was "written, never compiled") |
+| Live localnet: validator + walletd, four-step flow, `COMMITTED` | see "The transport half" below |
+
+The 30/30 above is the **consensus** half of this gate and nothing more: the statement is built by a
+real wallet and executed by the real engine in one process. It says nothing about RPC, mempool
+admission or block production. Those are a separate claim, and they are made separately below.
 
 Nothing below is green until a validator has accepted a transaction whose statement came out of a
 real wallet. Read the rest of this document as "the path is built and partly tested", not as a pass.
@@ -223,76 +230,172 @@ inputs are the normal case and need no special handling.
 `transactions.wait_result` returns `TransactionFinalizedResult::{Pending, Finalized, Rejected}`, and
 `Rejected` is documented as "rejected by mempool validation at submission and was never sequenced".
 `ghost-gate-verifier::observe_and_authorize` grants only on `Committed { accept: true }`.
-## Current blocker: this machine cannot build the end-to-end run
+## Run of 2026-10-04: the wallet/consensus seam, measured
 
-The walletd work is done and verified. Everything after it needs more machine than this one has.
+This is the first time the two halves of Gate 3 have been in the same process, let alone the same
+build. Everything below was produced on the gaming PC; nothing is carried over from the laptop except
+the cohort and the patch.
 
-**What the hardware is.** 5 GB of RAM, no more. WSL is capped at 2800 MB (`~/.wslconfig`), which leaves
-Windows roughly 2 GB. `CARGO_BUILD_JOBS` is pinned to 1 across the scripts.
+**Machine.** 16 GB host, of which WSL gets ~9.7 GiB with 8 GiB of swap and 8 visible CPUs. Source on
+`D:` (internal SATA HDD) at `/mnt/d/Codex/ghost-gate-workspace`; the Linux filesystem had 920 GB free, so
+the Cargo target directory lives there (`/home/pdark/gg-ootle-target`, 11 GB after both suites) and no
+build artifact was written to the nearly-full `C:`.
 
-**What that rules out.** Three separate builds died to the OOM killer with no diagnostic at all — not a
-compiler error, not a cargo error, just a stopped process:
+**Toolchain.** `rustc 1.97.1 (8bab26f4f 2026-07-14)`, which is what the cohort's own
+`rust-toolchain.toml` pins (`channel = "1.97.1"`, matching `rust-version` in this workspace's
+`Cargo.toml`). This has to be applied explicitly: rustup only applies a directory's
+`rust-toolchain.toml` to processes started inside that directory, and the build starts in
+`ghost-gate/`, not in the cohort tree. The machine's default toolchain is `stable` = 1.99.0, and the
+build deliberately does not use it.
 
-1. `cargo build` of `tari_validator_node` + `tari_indexer` + `tari_ootle_walletd` for a live localnet.
-   Killed while linking.
-2. `cargo test -p integration_tests --test cucumber`, the cohort's own end-to-end harness. This is the
-   right harness for the four-step flow — it starts a base node, validator, indexer, miner and wallet
-   daemon in-process and drives them over the real RPC surface — but it pulls the entire base-layer
-   Minotari dependency graph, and `tari_core`/`tari_p2p` do not fit. It ran for 25 minutes before
-   dying. Separately, its build needs `utoipa-swagger-ui`, whose build script downloads a Swagger UI
-   archive from github.com; `scripts/stage_swagger_ui.sh` now fetches it once and the build reads it
-   from disk, so that dependency is off the network, but the memory is not solvable.
-3. `cargo test -p ghost-gate-tests` against the patched cohort. This is the smallest of the three and
-   still died, compiling `tari_template_lib`.
+**Cargo jobs.** 3 (`CARGO_BUILD_JOBS=3`), one heavy build at a time. Peak observed usage was ~3.6 GiB
+resident, so the memory ceiling that killed the laptop's builds was never approached.
 
-The host also restarted Windows once mid-session, which cost the in-flight build and about half an hour
-of WSL recovery. `D:` (a USB 3.0 disk) briefly disappeared entirely, taking the WSL distros with it; on
-return `/root/gg-ootle-target` had grown to 45 GB and `/root/gg/_ootle-v042-ghost-gate` was intact.
+**Cohort.** `a43773e600b9503ed3fadcd3f0048f86131e3644` (tag v0.42.0), patched tree selected:
+`diff -rq reference patched` reports exactly the 8 source files `docs/wallet-mvp.patch` touches, plus the
+new `mvp_integration_tests.rs`. After building, the patched tree additionally contains five
+build-script outputs (`crates/template_builtin/compiled/*.wasm`) that the pristine reference does not;
+they are generated by `crates/template_builtin/build.rs` and are not part of the patch.
 
-**What this means for the numbers above.** The walletd results stand: they were produced, 17 and 5
-passing. The engine results were produced earlier, against the pristine cohort. Neither has been
-reproduced against the patched cohort, and the new Gate 3 test in `gate_engine.rs` has never been
-through rustc.
+**Command.**
 
-**Why the cohort pin flip is nonetheless safe to keep.** `Cargo.toml` now points at
-`../_ootle-v042-ghost-gate` instead of `../_ootle-v042-build`. The patch touches six non-test files:
-four in the wallet SDK, one in walletd, one in `traffic-sim`. The engine suite depends on none of them —
-not on the wallet SDK at all until the new test adds it. Every crate the engine suite does use is
-byte-identical between the two cohorts, so the 28 results should be unchanged; that is an argument, not a
-measurement, and it is the first thing to check on a bigger machine.
+```text
+scripts/gg_test.sh test -p ghost-gate-tests --test gate_engine -- --test-threads=2
 
-## To finish this gate
+running 30 tests
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 145.46s
+```
 
-In order, on a machine with room:
+**The original 28 are unchanged.** Sorting the `#[test]` function names at Gate 2 (`3781941`) and now and
+diffing gives exactly two additions and no modifications:
 
-1. `scripts/gg_test.sh test -p ghost-gate-tests --test gate_engine -- --test-threads=2`
-   First run recompiles the cohort against the patched tree. Expect 28 passing plus the two new Gate 3
-   tests; the new ones will need whatever fixing a first compile surfaces.
-2. If the two new tests pass, Gate 3's consensus claim is established and only the transport layer is
-   missing.
-3. For the true four-step localnet flow, `scripts/ootle_e2e.sh --tags "@transfer"` runs the cohort's
-   harness. Add a `ghost_gate.feature` beside the existing ones, with steps for
-   `create_stealth_transfer_statement` carrying a promise and for submitting a transaction with the gate
-   instruction appended. `transfer.feature`'s "Stealth transfer to account that does not previously
-   exist" scenario is the closest existing template; note that no existing step uses
-   `create_stealth_transfer_statement`, so both steps are new.
-4. Assert `COMMITTED`, `accept: true`, an incrementing `proofs_accepted`, and a burnt nonce.
+```text
+> a_wallet_built_statement_satisfies_the_gate
+> a_wallet_statement_below_the_threshold_is_refused
+```
 
-Step 1 is cheap and is the one that matters. Step 3 is the expensive one, and it is the only thing that
-would exercise `transactions.submit`'s lock-derived signer derivation against a live validator.
+**The two new cases.**
+
+| Test | What it establishes |
+| --- | --- |
+| `a_wallet_built_statement_satisfies_the_gate` | A statement built by `StealthOutputsApi::generate_transfer_statement` from a promise-bearing `StealthOutputToCreate` -- the same call and field the patched `accounts.create_stealth_transfer_statement` handler makes -- carries `minimum_value_promise == threshold`, passes `tari_engine_types::stealth::validate_transfer`, is accepted by `GhostGate::prove_access` under the engine, produces exactly one new UTXO, and increments `proofs_accepted` to 1. |
+| `a_wallet_statement_below_the_threshold_is_refused` | The same call with `minimum_value_promise == threshold - 1`. The wallet neither rounds up nor refuses, the statement is still valid to the engine's own validator, and the transaction is refused by the template with `proofs_accepted` still 0. This is what rules out a template that ignores the promise. |
+
+The wallet in those tests is a real one: a SQLite store in a temp directory, a real key manager with a
+real cipher seed, an account with an owner key read back out of the wallet's own keyring. Only the
+indexer network interface is inert, because the statement path resolves inputs from the wallet rather
+than from the network.
+
+### What had to be fixed to get there
+
+The seam had never been through rustc, so it had ten defects. Eight were mechanical, two were design.
+
+Mechanical:
+
+1. **The cohort switch had missed the template workspaces.** `templates/ghost_gate/Cargo.toml` and
+   `templates/ghost_gate_faucet/Cargo.toml` each declare their own `[workspace]` (they build for wasm32),
+   and both still pinned `../_ootle-v042-build`. One of their lockfiles therefore held two different
+   copies of the same cohort crate and cargo refused: `package collision in the lockfile: packages
+   ootle_serde v0.6.0 (...) and ootle_serde v0.6.0 (...) are different`. Both now pin the patched tree,
+   which is what the root workspace's COHORT SWITCH comment says they do.
+2. **`KeyManagerApi::get_private_key` does not exist**; it is `get_key`, and the secret accessor is
+   `secret()`, not `secret_key()`.
+3. **`SafePassword::from(Vec<u8>)` is not implemented**; `SafePassword::from_str("...")` is.
+4. **`RistrettoOotleAddress::new` takes `RistrettoPublicKey`, not its byte form.**
+5. **`IndexerRestApiNetworkInterface` is behind the `indexer_client` feature** of
+   `tari_ootle_wallet_sdk_services`, which the dev-dependency did not enable.
+6. **`StealthUnspentOutput` exposes `commitment()` as a method**, with the nonce and ciphertext under
+   `.output`. This was in `fund()`, i.e. in code the Gate 2 suite already used -- it was added in
+   `c25bb22` and, like the rest of that section, never compiled.
+7. **`UnsealedTransaction::seal` takes `&RistrettoSecretKey`.**
+8. **`CARGO_TARGET_DIR` is exported by cargo to build scripts.** Keeping the target directory on the
+   Linux filesystem through that variable breaks the cohort's own
+   `crates/template_builtin/build.rs`, which shells out to a nested `cargo build` per builtin template
+   and then reads the `.wasm` from that template's own `target/` directory:
+   `Error: Copy file to dest / No such file or directory`. Verified directly: a build script sees
+   `CARGO_TARGET_DIR` when the variable is in the environment, and does not when the same directory comes
+   from `build.target-dir` in config or from `cargo --config build.target-dir=...`. The target directory
+   is therefore set in `.cargo/config.toml` (git-ignored, machine-local, absolute path), and
+   `scripts/ootle_e2e.sh` passes `--config build.target-dir=...` for the same reason.
+
+Design:
+
+9. **The funding had to be built by the wallet too.** `fund()` mints faucet outputs with all-zero
+   `encrypted_data`, which no wallet can decrypt. `generate_transfer_statement` recovers each input's
+   mask and value by decrypting the output with the wallet's own view-only key
+   (`resolve_output_masks_for_spending`), so a wallet cannot spend a UTXO whose encryption it did not
+   perform. That is a property of every wallet, not a fixture limitation, and the real flow has the same
+   shape: funds arrive as an ordinary transfer, and only then can a statement be built. So
+   `GhostGateFaucet` gained a second entry point, `mint`, and funding a wallet is now two transactions:
+   `fund` creates the resource and mints the tranche the test controls, and once the resource address
+   exists the wallet builds its own output for it and `mint` turns that into a UTXO. The first step is
+   necessary because a stealth output's tag is derived by its *sender* from the resource address, which
+   does not exist until the faucet that creates it has executed.
+10. **The input spend key is the wallet's own derivation.** For a wallet-created output the sender's
+    secret nonce is unknowable to the test, so `derive_input_spend_key(owner_secret, index)` -- which
+    recomputes a nonce the fixture chose -- cannot be used. The test now calls
+    `StealthCryptoApi::derive_stealth_owner_secret(network, account_secret, output_public_nonce)`, which
+    is exactly what `KeyManagerApi::generate_stealth_owner_key` does inside the SDK: the same key pair,
+    derived from the on-chain nonce instead of from the sender's secret.
+
+Nothing was weakened to make this pass. The positive case spends a wallet-built statement; the negative
+case is the same statement one unit of promise lower and is refused.
+
+## The transport half: real localnet
+
+**This is a separate claim from the 30/30 above, and it is not green yet.**
+
+The harness is the cohort's own `integration_tests` (a base node, validator, indexer, miner and wallet
+daemon in one process, driven over real RPC by Cucumber), which is the right tool: it is what the cohort
+tests its own wallet flows with. Three environment facts had to be established before it would build at
+all on this machine:
+
+| Obstacle | Resolution |
+| --- | --- |
+| `rustup` default is 1.99.0, the cohort pins 1.97.1 | `RUSTUP_TOOLCHAIN=1.97.1` in `scripts/ootle_e2e.sh` |
+| `utoipa-swagger-ui` downloads a Swagger UI archive from github.com in its build script | `scripts/stage_swagger_ui.sh` fetched `swagger-ui-v5.17.14.zip` (4,388,280 bytes, zip header and `dist/` entries verified) to `/home/pdark/gg-cache/`; the script honours `SWAGGER_UI_DOWNLOAD_URL=file:...` |
+| `hidapi` (via the Minotari base-layer wallet) needs libudev's *dev* files, which this image lacks, and `sudo` needs a password | `scripts/stage_libudev.sh` unpacks `libudev-dev` from the Ubuntu 22.04 archive into `/home/pdark/gg-local` and the script exports `PKG_CONFIG_PATH` and `CPATH`. Nothing outside `$HOME` is touched. |
+| base-layer protos use proto3 optional fields, which the distro's protoc 3.12.4 rejects | `PROTOC=/home/pdark/ootle-build/protoc/bin/protoc` (21.12, already staged on this machine) |
+| the target directory must stay off the D: drive, but `CARGO_TARGET_DIR` breaks the cohort's own build script | `--config build.target-dir=...`, as above |
+
+Useful discovery for the transport work: **tTARI on Ootle is itself a stealth resource.** The harness's
+existing steps `I do a stealth transfer ... via the wallet daemon ...` operate on `TARI_TOKEN` through
+`accounts.stealth_transfer`. A gate can therefore watch the resource the test account already holds,
+without a purpose-built stealth faucet: what is missing is a step that calls the patched
+`accounts.create_stealth_transfer_statement` with a promise and then submits a transaction whose main
+intent is `CallMethod(gate, "prove_access", args![challenge, statement])` with the returned `lock_id`,
+plus a `ghost_gate.feature` beside the existing ones.
+
+## What remains for Gate 3 to be GREEN
+
+1. `scripts/ootle_e2e.sh --tags "@transfer"` as a baseline: the cohort's own transfer scenario over the
+   real stack. If that passes, the stack this machine can run is established.
+2. Add to `integration_tests`: a `ghost_gate` template under `src/templates/`, a `ghost_gate.feature`, a
+   step that calls `accounts.create_stealth_transfer_statement` with a `minimum_value_promise`, and a step
+   that builds and submits `CallMethod(gate, "prove_access", args![challenge, statement])` with the
+   returned `lock_id` and asserts `accept: true`.
+3. Then, in the same scenario: replay protection over the network (a second proof with the same nonce is
+   refused), and the public evidence a site would act on -- `proofs_accepted`, the burnt nonce, and the
+   emitted event -- with no private value anywhere in it.
+
+Only (1) and (2) together make the claim "a real RPC path carries and commits a Ghost Gate proof". The
+consensus half, measured above, is necessary but not sufficient.
 
 ## The honest summary
 
 The architecture is sound and every component of it is verified against v0.42.0 source, including the
-load-bearing one — that ordinary key-path wallet funds are authorised correctly even when spent from
+load-bearing one ? that ordinary key-path wallet funds are authorised correctly even when spent from
 inside a custom template.
 
-The walletd gap is closed by a small, auditable patch, and both halves of that patch are now tested:
-17 SDK tests and 5 walletd handler tests, the latter driving the real handler against a real wallet with
-a real keyring and confirming the caller's promise reaches a statement the engine's own transfer
-validator accepts.
+The walletd gap is closed by a small, auditable patch, and all three of its verifications pass: 17 SDK
+tests, 5 walletd handler tests driving the real handler against a real wallet, and now 30/30 in the
+engine suite against the same patched cohort the wallet comes from.
 
-What is *not* true yet is the thing this gate is named for: a wallet-built statement spent into a gate
-call and accepted by consensus. That test is written and its APIs were each read out of the cohort
-source, but it has not been compiled. The blocker is not the design and not the patch — it is that this
-machine has 5 GB of RAM and the job needs more.
+What is true as of 2026-10-04, stated at exactly the strength the evidence supports: **a statement built
+by an ordinary wallet, carrying a minimum value promise the caller chose, is accepted by consensus when
+it is spent into `GhostGate::prove_access`, and refused when the promise is one unit short.** Both
+directions are covered, in the same process, with a real keyring and a real SQLite store.
+
+What is not yet true: that a validator has accepted such a transaction over RPC, from a node, in a block.
+The engine test executes the transaction directly. A localnet run is a different claim about a
+different set of components, and it is reported separately when it exists.

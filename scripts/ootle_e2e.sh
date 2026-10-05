@@ -5,26 +5,46 @@
 # this is a real network exercising the real RPC surface rather than a stand-in. It is the harness the
 # cohort uses for its own wallet flows, which is why Gate 3 uses it instead of a hand-rolled localnet.
 #
-# Debug profile, not the release profile the cohort README suggests: the shared target directory is
-# warm in debug and cold in release, and at jobs=1 on this box a release rebuild is not affordable.
+# Debug profile, not the release profile the cohort README suggests. The shared target directory is
+# warm in debug from the engine suite, and a release build of the whole node stack on this box is a
+# multi-hour rebuild that buys nothing for a correctness run.
 #
-# Jobs default to 1 and the WSL VM is capped at 2800 MB (see ~/.wslconfig): overcommitting the host
-# restarts Windows, which costs far more than the recoverable in-VM OOM this avoids.
+# The target directory is passed with `--config build.target-dir` rather than CARGO_TARGET_DIR, and the
+# reason is the cohort's own `crates/template_builtin/build.rs`: cargo exports CARGO_TARGET_DIR to build
+# scripts, that script shells out to a nested cargo for each builtin template and then reads the .wasm
+# out of that template's own target/ directory, so an inherited variable makes the cohort build fail
+# with "Copy file to dest: No such file or directory". The cohort tree is left untouched, which also
+# keeps the patched tree byte-comparable with the pristine reference (docs/wallet-mvp.patch).
 #
 # Usage: scripts/ootle_e2e.sh [cucumber args...]
 #   e.g. scripts/ootle_e2e.sh --tags "@transfer"
 #        scripts/ootle_e2e.sh --name "Stealth transfer to account that does not previously exist"
 
 set -uo pipefail
-export PATH="/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export RUST_BACKTRACE=1
-export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}"
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-3}"
+# The cohort pins 1.97.1 and rustup only applies a rust-toolchain.toml to processes started inside that
+# tree, so the pin is applied here explicitly rather than inherited from the working directory.
+export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-1.97.1}"
+# protoc 21.12; the distro's 3.12.4 rejects proto3 optional fields.
+export PROTOC="${PROTOC:-/home/pdark/ootle-build/protoc/bin/protoc}"
 
-TARGET="${TARGET:-/root/gg-ootle-target}"
-STAGED="${STAGED:-/root/gg/_ootle-v042-ghost-gate}"
-LOG="${LOG:-/root/e2e.log}"
+# libudev. The Minotari base-layer wallet pulls in `hidapi`, whose Linux build script compiles a C
+# shim and needs libudev's *development* files -- header, .pc and link name -- which this WSL image does
+# not have (only the runtime libudev.so.1). `sudo` needs a password here, so rather than installing
+# libudev-dev system-wide the dev files were unpacked from the Ubuntu 22.04 package into a user-writable
+# prefix and pkg-config is pointed at it. See scripts/stage_libudev.sh; nothing outside $HOME changes.
+export PKG_CONFIG_PATH="${PKG_CONFIG_PATH:-/home/pdark/gg-local/lib/pkgconfig}"
+# hidapi compiles its C shim *before* asking pkg-config anything, so the header has to be findable by the
+# C compiler itself. CPATH is gcc/clang's own "additional include search path" variable, which is why it
+# is used here instead of CFLAGS: nothing about the compiler invocation changes, only where it looks.
+export CPATH="${CPATH:-/home/pdark/gg-local/include}${CPATH:+:$CPATH}"
 
-[ -f "$STAGED/Cargo.toml" ] || { echo "error: staged tree missing at $STAGED" >&2; exit 1; }
+TARGET="${TARGET:-/home/pdark/gg-ootle-target}"
+STAGED="${STAGED:-/mnt/d/Codex/ghost-gate-workspace/_ootle-v042-ghost-gate}"
+LOG="${LOG:-/home/pdark/gg-logs/e2e.log}"
+
+[ -f "$STAGED/Cargo.toml" ] || { echo "error: cohort tree missing at $STAGED" >&2; exit 1; }
 
 cd "$STAGED" || exit 1
 
@@ -32,7 +52,7 @@ cd "$STAGED" || exit 1
 # script, and that fetch is the single point where building this harness depends on the network. The
 # crate honours SWAGGER_UI_DOWNLOAD_URL when it starts with `file:`, so scripts/stage_swagger_ui.sh
 # fetches the archive once and the build reuses it from disk.
-SWAGGER_ZIP="${SWAGGER_ZIP:-/root/gg-cache/swagger-ui-v5.17.14.zip}"
+SWAGGER_ZIP="${SWAGGER_ZIP:-/home/pdark/gg-cache/swagger-ui-v5.17.14.zip}"
 if [ -s "$SWAGGER_ZIP" ]; then
   export SWAGGER_UI_DOWNLOAD_URL="file:$SWAGGER_ZIP"
   echo "using local Swagger UI archive: $SWAGGER_ZIP"
@@ -41,12 +61,13 @@ else
   echo "         run scripts/stage_swagger_ui.sh first if that fails" >&2
 fi
 
+mkdir -p "$(dirname "$LOG")"
 # A fresh log per invocation: a stale tail here is indistinguishable from a current one.
 : > "$LOG"
 {
-  echo "=== $(date -Is) cargo test -p integration_tests --test cucumber $* ==="
+  echo "=== $(date -Is) cargo test -p integration_tests --test cucumber $* (target=$TARGET jobs=$CARGO_BUILD_JOBS) ==="
 } >> "$LOG"
 
-env CARGO_TARGET_DIR="$TARGET" CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" \
-  cargo test -p integration_tests --test cucumber "$@" 2>&1 | tee -a "$LOG"
+cargo --config "build.target-dir=\"$TARGET\"" test -p integration_tests --test cucumber "$@" 2>&1 |
+  tee -a "$LOG"
 exit "${PIPESTATUS[0]}"

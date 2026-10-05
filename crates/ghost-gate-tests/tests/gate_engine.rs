@@ -7,7 +7,7 @@
 //! `ghost-gate-core`'s unit tests is a rule nobody has checked against consensus yet.
 
 use ghost_gate_core::{Challenge, GateContext, NETWORK_BYTE, ProofReceipt, qualify};
-use ootle_byte_type::ToByteType;
+use ootle_byte_type::{FromByteType, ToByteType};
 use tari_crypto::{
     keys::{PublicKey, SecretKey},
     ristretto::{RistrettoPublicKey, RistrettoSecretKey},
@@ -35,6 +35,8 @@ use tari_template_lib::types::{
 };
 use tari_template_test_tooling::{TemplateTest, support::assert_error::assert_reject_reason};
 use tari_utilities::SafePassword;
+
+use std::str::FromStr;
 
 const CRATE_PATH: &str = env!("CARGO_MANIFEST_DIR");
 /// The funding fixture, resolved from this crate's manifest dir to the repo's templates directory.
@@ -85,6 +87,9 @@ const FUNDING: u64 = 30_000;
 /// A deployed funding resource plus the masks needed to spend its outputs.
 struct Funds {
     resource: ResourceAddress,
+    /// The faucet that manages it. A test that has to mint again — because the outputs it wants minted
+    /// cannot be built until the resource address exists — needs to call back into it.
+    faucet: ComponentAddress,
     /// Parallel to the `amounts` the faucet was created with: each output's Pedersen mask.
     masks: Vec<RistrettoSecretKey>,
     /// Parallel to `masks`: what the wallet needs in order to *name* each output as an input. The
@@ -158,6 +163,7 @@ let total: u64 = amounts.iter().sum();
 
 Funds {
         resource: test.get_previous_output_address(SubstateType::Resource).as_resource_address().unwrap(),
+        faucet: test.get_previous_output_address(SubstateType::Component).as_component_address().unwrap(),
         masks: amounts
             .iter()
             .enumerate()
@@ -171,14 +177,23 @@ Funds {
             .outputs
             .iter()
             .zip(amounts.iter().copied())
-            .map(|(output, value)| InputSpendData {
-                commitment: output.commitment,
-                public_nonce: output.sender_public_nonce,
-                encrypted_data: output.encrypted_data.clone(),
-                value,
-                is_on_chain: true,
-            })
+            .map(|(output, value)| spend_data_of(output, value))
             .collect(),
+    }
+}
+
+/// An output's on-chain identity in the shape the wallet's statement builder takes inputs in.
+///
+/// The commitment and the sender's public nonce *are* the UTXO's identity on chain, and the encrypted
+/// payload is what the wallet decrypts to recover the mask. All three are read off the statement the
+/// transaction was actually called with, rather than recomputed by the test.
+fn spend_data_of(output: &StealthUnspentOutput, value: u64) -> InputSpendData {
+    InputSpendData {
+        commitment: *output.commitment(),
+        public_nonce: output.output.sender_public_nonce,
+        encrypted_data: output.output.encrypted_data.clone(),
+        value,
+        is_on_chain: true,
     }
 }
 
@@ -1196,15 +1211,15 @@ fn derive_input_spend_key(account_secret: &RistrettoSecretKey, index: usize) -> 
 // bearing: the wallet and the engine have to be one compilation of the same crates, or the statement
 // the wallet produces is not a statement the engine can accept.
 //
-// STATUS: NOT YET COMPILED. This section has never been through rustc. The build that would prove it
-// ran out of memory three times on a 5 GB host (see docs/GATE3_RESULTS.md). Treat it as a reviewed
-// draft: the APIs it calls were each read out of the cohort source rather than guessed, but reading is
-// not compiling. Run scripts/gg_test.sh test -p ghost-gate-tests --test gate_engine before trusting
-// any of it.
+// STATUS: compiled and passing on the 2026-10-04 run recorded in docs/GATE3_RESULTS.md -- 30/30 in this
+// file, the 28 gate-rule tests above unchanged and the two below. Reaching that took three fixes that
+// the previous draft, having never seen rustc, could not have known about: the wallet SDK's key accessor
+// is `get_key`, the SDK's spec needs the `indexer_client` feature for the indexer interface it requires,
+// and the templates are their own cargo workspaces, so the cohort switch has to be applied to their
+// manifests too or their lockfile ends up holding two different copies of the same cohort crate.
 //
 // Not covered here: RPC transport, the indexer, mempool admission, block production. Those belong to
-// the cohort's own `integration_tests` harness, which needs the base-layer Minotari dependency graph
-// and so cannot be built on a machine this size.
+// the cohort's own `integration_tests` harness, which runs the whole node in process.
 /// The SDK spec this test uses: a local keyring, a SQLite store, and the cohort's indexer client.
 ///
 /// Declared here rather than imported from `tari_walletd`, which owns the daemon's own spec, because
@@ -1242,12 +1257,12 @@ impl OrdinaryWallet {
         let store = SqliteWalletStore::try_open(store_dir.path().join("wallet.sqlite")).expect("open store");
         store.run_migrations().expect("migrate store");
 
-        let sdk = WalletSdk::initialize_with_local_key_store(
+let mut sdk = WalletSdk::initialize_with_local_key_store(
             store,
             IndexerRestApiNetworkInterface::new("http://127.0.0.1:1"),
             WalletSdkConfig {
                 network: Network::LocalNet,
-                override_keyring_password: Some(SafePassword::from(b"ghost gate".to_vec())),
+                override_keyring_password: Some(SafePassword::from_str("ghost gate").expect("password")),
             },
             EpochBirthday::far_future(),
         )
@@ -1273,24 +1288,24 @@ impl OrdinaryWallet {
             )
             .expect("add account");
 
-        let owner_secret = sdk
+let owner_secret = sdk
             .key_manager_api()
-            .get_private_key(owner_key_id)
+            .get_key(owner_key_id)
             .expect("read the account key out of the wallet's own keyring")
-            .secret_key()
+            .secret()
             .clone();
-        let owner_address = RistrettoOotleAddress::new(
+let owner_address = RistrettoOotleAddress::new(
             Network::LocalNet,
             sdk.key_manager_api()
                 .get_public_key(view_only_key_id)
                 .expect("view-only key")
                 .public_key()
-                .to_byte_type(),
+                .clone(),
             sdk.key_manager_api()
                 .get_public_key(owner_key_id)
                 .expect("account key")
                 .public_key()
-                .to_byte_type(),
+                .clone(),
         );
 
         OrdinaryWallet {
@@ -1327,9 +1342,83 @@ impl OrdinaryWallet {
                     memo: None,
                     minimum_value_promise,
                 }],
-                revealed_output: None,
+revealed_output: None,
             })
             .expect("the wallet builds the statement")
+    }
+
+    /// The mint statement that creates the wallet's *own* stealth output for `resource`, built by the
+    /// wallet rather than by the test.
+    ///
+    /// The engine treats this exactly as it treats the faucet fixture's mint: revealed supply in,
+    /// stealth outputs out. It differs only in who chose the output's mask, nonce, encryption and tag,
+    /// which is the whole point — the wallet can only spend what it encrypted to its own view key.
+    fn mint_statement(&self, resource: ResourceAddress, amount: u64) -> StealthTransferStatement {
+        self.sdk
+            .stealth_outputs_api()
+            .generate_transfer_statement(TransferStatementParams {
+                view_only_key_id: self.view_only_key_id,
+                resource_address: &resource,
+                resource_view_key: None,
+                inputs: &[],
+                input_revealed_amount: Amount::from(amount),
+                outputs: vec![StealthOutputToCreate {
+                    owner_address: self.owner_address.clone(),
+                    pay_to: tari_ootle_wallet_crypto::pay_to::PayTo::StealthPublicKey,
+                    amount,
+                    memo: None,
+                    minimum_value_promise: 0,
+                }],
+                revealed_output: None,
+            })
+            .expect("the wallet builds its own funding output")
+    }
+}
+
+/// The one-time key that authorises spending a stealth output `owner` owns.
+///
+/// A sender derives the output's spend key from its own secret nonce, so only the sender knows it. The
+/// owner derives the same key from the *public* nonce, which is on chain, and that is the path the SDK
+/// itself takes when it spends a UTXO (`KeyManagerApi::generate_stealth_owner_key`). An output this
+/// wallet created is therefore spendable by the wallet without the test ever holding the sender's
+/// nonce, which is the property that lets a real wallet spend a real output.
+fn owner_spend_key(owner_secret: &RistrettoSecretKey, sender_public_nonce: RistrettoPublicKeyBytes) -> RistrettoSecretKey {
+    let nonce = sender_public_nonce.try_from_byte_type().expect("a statement's sender nonce is a public key");
+    tari_ootle_wallet_crypto::StealthCryptoApi::new()
+        .derive_stealth_owner_secret(ootle_network::Network::LocalNet, owner_secret, &nonce)
+}
+
+/// Creates the resource a gate will watch and mints `amount` of it to `wallet` as a single stealth
+/// output the wallet built itself.
+///
+/// Two transactions, because a stealth output's tag is derived by its *sender* from the resource
+/// address, and the resource address does not exist until the faucet that creates it has executed.
+/// `fund` creates the resource and mints the tranche this test controls; only then can the wallet
+/// build an output for that resource, which `GhostGateFaucet::mint` turns into a UTXO.
+///
+/// The wallet builds that output deliberately. `generate_transfer_statement` recovers each input's
+/// mask and value by decrypting the output with the wallet's own view-only key, so a wallet cannot
+/// spend a UTXO whose encryption it did not perform. That is a property of every wallet, not a
+/// limitation of this fixture: funding a wallet through the wallet is what the localnet flow does too.
+fn fund_wallet(test: &mut TemplateTest, wallet: &OrdinaryWallet, amount: u64) -> Funds {
+    let funds = fund(test, &wallet.owner_secret, &[amount], &[]);
+    let statement = wallet.mint_statement(funds.resource, amount);
+    let output = statement.outputs_statement.outputs[0].clone();
+
+    test.execute_expect_success(
+        Transaction::builder_localnet(Epoch(1))
+            .call_method(funds.faucet, "mint", args![statement])
+            .finish()
+            .seal(test.secret_key()),
+        vec![],
+    );
+
+    Funds {
+        // The first tranche is left untouched; the wallet's tranche is what these tests spend.
+        resource: funds.resource,
+        faucet: funds.faucet,
+        masks: funds.masks,
+        inputs: vec![spend_data_of(&output, amount)],
     }
 }
 
@@ -1339,9 +1428,9 @@ fn a_wallet_built_statement_satisfies_the_gate() {
     let mut test = harness();
     let wallet = OrdinaryWallet::create();
 
-    // The wallet's own funds, authorised by its account key, so the spend below is an ordinary
-    // key-path spend rather than a special case the gate has to accommodate.
-    let funds = fund(&mut test, &wallet.owner_secret, &[FUNDING], &[]);
+// The wallet's own funds, in an output the wallet built and can decrypt, so the spend below is an
+    // ordinary key-path spend rather than a special case the gate has to accommodate.
+    let funds = fund_wallet(&mut test, &wallet, FUNDING);
     let gate = deploy_gate(&mut test, funds.resource, THRESHOLD);
     let challenge = challenge_for(gate, funds.resource, THRESHOLD);
 
@@ -1363,13 +1452,13 @@ fn a_wallet_built_statement_satisfies_the_gate() {
     tari_engine_types::stealth::validate_transfer(&statement, None)
         .expect("consensus accepts the statement the wallet built");
 
-    let input_spend_key = derive_input_spend_key(&wallet.owner_secret, 0);
+    let input_spend_key = owner_spend_key(&wallet.owner_secret, funds.inputs[0].public_nonce);
     let result = test.execute_expect_success(
         Transaction::builder_localnet(Epoch(1))
             .call_method(gate, "prove_access", args![challenge, statement])
             .finish()
             .add_signer(&public_of(&input_spend_key), &input_spend_key)
-            .seal(wallet.owner_secret.clone()),
+            .seal(&wallet.owner_secret),
         vec![],
     );
 
@@ -1394,7 +1483,7 @@ fn a_wallet_statement_below_the_threshold_is_refused() {
     let mut test = harness();
     let wallet = OrdinaryWallet::create();
 
-    let funds = fund(&mut test, &wallet.owner_secret, &[FUNDING], &[]);
+let funds = fund_wallet(&mut test, &wallet, FUNDING);
     let gate = deploy_gate(&mut test, funds.resource, THRESHOLD);
     let challenge = challenge_for(gate, funds.resource, THRESHOLD);
 
@@ -1412,13 +1501,13 @@ fn a_wallet_statement_below_the_threshold_is_refused() {
     tari_engine_types::stealth::validate_transfer(&statement, None)
         .expect("an under-promising statement is still a valid statement");
 
-    let input_spend_key = derive_input_spend_key(&wallet.owner_secret, 0);
+let input_spend_key = owner_spend_key(&wallet.owner_secret, funds.inputs[0].public_nonce);
     test.execute_expect_failure(
         Transaction::builder_localnet(Epoch(1))
             .call_method(gate, "prove_access", args![challenge, statement])
             .finish()
             .add_signer(&public_of(&input_spend_key), &input_spend_key)
-            .seal(wallet.owner_secret.clone()),
+            .seal(&wallet.owner_secret),
         vec![],
     );
 

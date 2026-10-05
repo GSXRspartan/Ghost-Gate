@@ -25,3 +25,5 @@ temp/
 npm-debug.log*
 node_modules/
 .pnpm-store/
+# Machine-local Cargo config (absolute target-dir path; see the file for why)
+/.cargo/

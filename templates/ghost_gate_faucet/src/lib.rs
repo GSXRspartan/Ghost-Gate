@@ -51,6 +51,21 @@ mod faucet {
             .create()
         }
 
+        /// Mints the stealth outputs described by `mint` out of newly minted supply.
+        ///
+        /// `new` mints the resource's *initial* supply, which fixes the outputs before the resource
+        /// address exists. A test whose outputs have to be built by a wallet cannot use that path: the
+        /// sender derives a stealth output's tag from the resource address, so the wallet cannot build
+        /// the output until the resource is on chain. This second entry point lets such a test create
+        /// the resource first and mint the wallet's outputs afterwards.
+        ///
+        /// The amount comes from the statement's own revealed input, so it cannot disagree with the
+        /// outputs the statement creates.
+        pub fn mint(&mut self, mint: StealthTransferStatement) {
+            let bucket = self.manager.mint_stealth(mint.inputs_statement.revealed_amount);
+            self.supply_vault.deposit(bucket.stealth_transfer(mint));
+        }
+
         pub fn resource(&self) -> ResourceAddress {
             self.manager.resource_address()
         }
