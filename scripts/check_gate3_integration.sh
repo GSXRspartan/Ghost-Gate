@@ -85,6 +85,7 @@ is_build_output() {
     Only\ in\ *"/crates/template_builtin/compiled: "*) return 0 ;;
     Only\ in\ *"/web_ui: dist"*) return 0 ;; # the indexer, validator and walletd web UIs, built by their build scripts
     Only\ in\ *"/crates/template_builtin/templates/"*": target"* | Only\ in\ *"/crates/template_builtin/templates/"*": Cargo.lock"*) return 0 ;;
+    Only\ in\ *"/integration_tests/src/templates/ghost_gate: target"* | Only\ in\ *"/integration_tests/src/templates/ghost_gate: Cargo.lock"*) return 0 ;;
     Only\ in\ *"/reference/.git"*) return 0 ;;
     *) return 1 ;;
   esac

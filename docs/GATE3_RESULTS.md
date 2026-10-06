@@ -422,6 +422,22 @@ to lockfile unambiguously
 The same collision is what made the engine suite fail before any of this was written: the two template
 workspaces had been left pointing at the pristine tree by the cohort switch (fix 1 above).
 
+### The Ghost Gate scenario: what it took to get it running
+
+Four attempts, each one a fact about the stack rather than about the gate. They are recorded because the
+next person to run this will hit the same walls in the same order.
+
+| Attempt | What failed | Fix |
+| --- | --- | --- |
+| 1 | The template would not compile: `failed to load manifest for dependency 'ghost-gate-core'` -- the vendored copy sat one directory too high (`../ghost_gate_core` instead of `../../ghost_gate_core`) | Fixed the path. The template then compiled to wasm from inside the cohort. |
+| 2 | `Dry-run transaction rejected: InsufficientFunds ... Required: 1009897246, Available: 999647246` -- publishing a template costs about 1010 TARI in *estimated fees* (a size premium), and 10 TARI of burn was not enough headroom | Burn 50 TARI instead. |
+| 3 | `NotYetValid: Burn claim proof names base layer state this epoch does not have: block header not found for hash ... in an epoch before Epoch(3)` -- the claim names a base-layer header the validator had not ingested yet | Wait for the scan, exactly as `wallet_daemon.feature` does: `there is 1 transaction in the mempool of BASE_NODE`, then `miner MINER mines 13 new blocks`, then `VN has scanned to at least height 40`. |
+
+What the attempts established beyond the fixes themselves: the network starts, the account is created and
+funded over RPC, a base-layer burn is claimed into it, a **stealth transfer of tTARI into the same account
+succeeds and the wallet's balance reflects the stealth output** -- so the prover really does hold stealth
+funds, discovered by the wallet, over the real RPC surface. That is the precondition the gate needs.
+
 Useful discovery for the transport work: **tTARI on Ootle is itself a stealth resource.** The harness's
 existing steps `I do a stealth transfer ... via the wallet daemon ...` operate on `TARI_TOKEN` through
 `accounts.stealth_transfer`. A gate can therefore watch the resource the test account already holds,
@@ -432,18 +448,49 @@ plus a `ghost_gate.feature` beside the existing ones.
 
 ## What remains for Gate 3 to be GREEN
 
-1. `scripts/ootle_e2e.sh --tags "@transfer"` as a baseline: the cohort's own transfer scenario over the
-   real stack. If that passes, the stack this machine can run is established.
-2. Add to `integration_tests`: a `ghost_gate` template under `src/templates/`, a `ghost_gate.feature`, a
-   step that calls `accounts.create_stealth_transfer_statement` with a `minimum_value_promise`, and a step
-   that builds and submits `CallMethod(gate, "prove_access", args![challenge, statement])` with the
-   returned `lock_id` and asserts `accept: true`.
-3. Then, in the same scenario: replay protection over the network (a second proof with the same nonce is
-   refused), and the public evidence a site would act on -- `proofs_accepted`, the burnt nonce, and the
-   emitted event -- with no private value anywhere in it.
+Done, on 2026-10-04:
 
-Only (1) and (2) together make the claim "a real RPC path carries and commits a Ghost Gate proof". The
+1. the baseline -- `scripts/ootle_e2e.sh -- --tags "@transfer"` -> 3 scenarios, 48 steps, all passed
+2. the harness additions -- the template, the vendored rules, four steps and one scenario, all registered
+   and compiling inside the cohort's own `integration_tests`
+
+Open:
+
+3. the Ghost Gate scenario itself, `scripts/ootle_e2e.sh -- --tags "@ghost_gate"`: a wallet-built,
+   promise-bearing statement carried over real JSON-RPC, spent into a real gate call, committed by a real
+   validator, and then replayed and refused. The steps are written; whether the scenario passes is a
+   question about the wallet's behaviour on a live network, not about compilation, and it has not been run
+   to a conclusion yet.
+4. the public evidence a relying site would act on -- `proofs_accepted`, the burnt nonce and the emitted
+   event, read back from chain state rather than inferred from the transaction result. The scenario
+   currently asserts the transaction result and the status; it does not read the gate's state.
+   `ghost-gate-verifier::observe_and_authorize` is the piece that would consume it.
+
+Only (3) and (4) together make the claim "a real RPC path carries and commits a Ghost Gate proof". The
 consensus half, measured above, is necessary but not sufficient.
+
+## Reproducing this
+
+```text
+# Phase 1, the consensus seam (30/30)
+scripts/gg_test.sh test -p ghost-gate-tests --test gate_engine -- --test-threads=2
+
+# Phase 2, the transport
+scripts/stage_swagger_ui.sh                     # one-off: the indexer's swagger-ui build input
+scripts/ootle_e2e.sh -- --tags "@transfer"      # the cohort's own baseline: 3 scenarios, 48 steps
+scripts/ootle_e2e.sh -- --tags "@ghost_gate"    # the Ghost Gate scenario
+
+# integrity: the cohort tree is v0.42.0 plus documented additions, and nothing else
+scripts/check_gate3_integration.sh
+```
+
+Two things about the environment, both learned the hard way and both still true:
+
+- **The cucumber test binary takes ~20 minutes to link.** Any change under `integration_tests/` -- a
+  feature file included -- invalidates it, so scenario tweaks are expensive. Batch them.
+- **The machine is shared.** Another user's cargo build was running for much of this session; the link
+  is the memory-hungry step (about 4.4 GB resident with LTO), and one WSL VM restart killed a link
+  outright. The run that follows a successful link takes about four minutes.
 
 ## The honest summary
 
