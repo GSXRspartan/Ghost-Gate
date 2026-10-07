@@ -424,15 +424,23 @@ workspaces had been left pointing at the pristine tree by the cohort switch (fix
 
 ### The Ghost Gate scenario: what it took to get it running
 
-Four attempts, each one a fact about the stack rather than about the gate. They are recorded because the
-next person to run this will hit the same walls in the same order.
+Five failures on the way to the first committed proof, each one a fact about the stack rather than about
+the gate, plus two scenario bugs of my own. They are recorded in the order they happened, because the next
+person to run this hits the same walls in the same order.
 
 | Attempt | What failed | Fix |
 | --- | --- | --- |
 | 1 | The template would not compile: `failed to load manifest for dependency 'ghost-gate-core'` -- the vendored copy sat one directory too high (`../ghost_gate_core` instead of `../../ghost_gate_core`) | Fixed the path. The template then compiled to wasm from inside the cohort. |
 | 2 | `Dry-run transaction rejected: InsufficientFunds ... Required: 1009897246, Available: 999647246` -- publishing a template costs about 1010 TARI in *estimated fees* (a size premium), and 10 TARI of burn was not enough headroom | Burn 50 TARI instead. |
-| 3 | `NotYetValid: Burn claim proof names base layer state this epoch does not have: block header not found for hash ... in an epoch before Epoch(3)` -- the claim names a base-layer header the validator had not ingested yet | Wait for the scan, exactly as `wallet_daemon.feature` does: `there is 1 transaction in the mempool of BASE_NODE`, then `miner MINER mines 13 new blocks`, then `VN has scanned to at least height 40`. |
+| 3 | `NotYetValid: Burn claim proof names base layer state this epoch does not have: block header not found for hash ... in an epoch before Epoch(3)` -- the claim names a base-layer header the validator had not ingested yet | Wait for the scan, exactly as `wallet_daemon.feature` does, and mine into the next epoch so the validator's *consensus* epoch passes the burn's. |
+| 4 | `InsufficientFunds: Required: 999947246, Available: 999647246` on template publication -- a gap of exactly 300000, the amount of the stealth transfer that preceded it | The harness sizes publication's `max_fee` at `min(estimate * 1.1, total balance)` while fees come out of *revealed* funds, so moving value into a stealth output first makes `max_fee` exceed what the fee source can pay. Publish and deploy **before** the funds move. |
+| 5 | `Substates not found: utxo_<resource>_<commitment> not found` when submitting the proof -- the statement spends a UTXO the validator had not committed yet | `miner MINER mines to the next epoch`, which takes the chain past the funding transaction and waits for the tip. A UTXO only exists on chain once the transaction carrying it is in a block; a relying site has to wait for the funding transaction to finalise before a proof can be accepted. |
 
+Two of the attempts in between were pure scenario bugs rather than stack behaviour, recorded because they
+cost the same 40-minute link each: a step whose text did not match its definition (`validator node VN is past
+...` against `{word} is past ...`), and a statement that asked a single 300000 stealth input to create a
+100000 output (`Input: 300000, Output: 100000` -- a stealth output cannot be split, so the wallet selects
+its input whole).
 What the attempts established beyond the fixes themselves: the network starts, the account is created and
 funded over RPC, a base-layer burn is claimed into it, a **stealth transfer of tTARI into the same account
 succeeds and the wallet's balance reflects the stealth output** -- so the prover really does hold stealth
@@ -468,6 +476,199 @@ Open:
 
 Only (3) and (4) together make the claim "a real RPC path carries and commits a Ghost Gate proof". The
 consensus half, measured above, is necessary but not sufficient.
+
+## Security reconciliation: GHSA-pp4v-v773-9qxg
+
+The cohort is pinned to `a43773e6` (v0.42.0, 2026-09-30). Upstream merged a security fix on 2026-10-01,
+after that tag: **`965e0bc6f` "fix(engine)!: reject zero-amount and empty proofs as resource
+possession", GHSA-pp4v-v773-9qxg.** Because the pinned cohort predates it, this had to be reconciled
+rather than assumed irrelevant.
+
+### What the advisory is
+
+> A proof created by amount 0 or by an empty set of non-fungible ids satisfied `rule!(resource(X))`,
+> because the requirement check compared only the proof's resource address. Anyone able to create an
+> empty vault of X could pass any rule gated on holding X: mint, burn, withdraw, recall, freeze,
+> method rules and `OwnerRule::ByAccessRule`.
+
+Three hunks: `ResourceContainer::lock_by_amount` refuses a zero amount, `lock_by_non_fungible_ids`
+refuses an empty id set, and `RuleRequirement::Resource` skips empty proofs (`!proof.is_empty()`,
+backed by a new `Proof::is_empty()`). The upstream regression tests ship with it.
+
+### Does the pinned cohort contain it?
+
+Yes, in full. `crates/engine/src/runtime/tracker_auth.rs:243`:
+
+```rust
+for proof_id in scope.proofs() {
+    let proof = state.get_proof(*proof_id)?;
+
+    if resx == proof.resource_address() {      // <-- an empty proof satisfies this
+        return Ok(true);
+    }
+}
+```
+
+and `crates/engine_types/src/resource_container.rs:856` (`lock_by_amount`) checks only
+`amount > available_amount`, so locking 0 succeeds and yields exactly the empty proof the advisory
+describes. The primitive is present.
+
+### Can it reach Ghost Gate's threshold?
+
+Not through the path Ghost Gate uses. Three findings, in order of how much they matter:
+
+**1. The threshold is never expressed as a resource rule.** This is the load-bearing point, and it is a
+design property rather than luck. Ghost Gate asks "does this prover control at least X" by putting
+`minimum_value_promise >= threshold` in the qualifying output's witness and letting the engine verify
+the bulletproof over `[mvp, 2^64)`, plus requiring every input to be key-authorised. Neither question is
+routed through `RuleRequirement::Resource`, so the vulnerable branch is not on the path at all. The empty
+proof cannot make an output's bulletproof attest a value it does not have, and it cannot add a signer
+badge to the transaction's auth scope.
+
+**2. The only route from a stealth spend into `check_requirement` is closed by the gate's own rules.**
+`verify_input_authorizations` (`crates/engine/src/runtime/impl.rs:817`) resolves an input two ways: a
+**key path**, whose `spend_key` needs a signer badge in the transaction's auth scope, or a **script
+path**, whose revealed leaf is evaluated against an `AccessRule` -- and that is where
+`check_requirement` becomes reachable. Ghost Gate refuses non-key-path inputs before the engine sees
+them:
+
+```rust
+// ghost-gate-core, find_qualifying_output
+if statement.inputs_statement.inputs.iter().any(|i| !i.witness.is_key_path()) {
+    return Err(GateError::NonKeyPathInput);
+}
+```
+
+So on the Gate 3 path no `AccessRule` leaf is ever evaluated, and no empty proof can stand in for
+possession.
+
+**3. Nothing in the Gate 3 deployment asks for possession anyway.** `RequireRule::Resource` /
+`AccessRule::Resource` is constructed **nowhere** in the cohort's templates, in
+`integration_tests/src/templates`, or in the applications:
+
+```text
+$ grep -rn 'RequireRule::Resource' --include=*.rs crates/ integration_tests/ applications/
+(no matches)
+$ grep -rn 'rule!(resource' --include=*.rs crates/template_builtin/templates/ integration_tests/src/templates/
+(no matches)
+```
+
+The account template gates its methods with `rule!(allow_all)` and a `rule!(deny_all)` default; the
+Ghost Gate component is `AccessRules::allow_all()`; the faucet fixture is
+`mintable(rule!(allow_all), OWNER)` / `withdrawable(rule!(allow_all), OWNER)`. Fees are paid from the
+account's revealed funds by the seal signer, not by a proof.
+
+### Verdict, and why the fix was backported anyway
+
+Ghost Gate's threshold path does not depend on the vulnerable construct, and no component of the Gate 3
+deployment uses the construct the advisory is about. Two reasons not to stop there:
+
+- The cohort is a **consensus node**, and any user can publish a template. A user who published a
+  component whose method is gated by `rule!(resource(X))` -- a "bank" or a vault -- would hand an
+  attacker with an empty vault of X a withdrawal on this cohort. That is a real deviation from upstream
+  behaviour even though Ghost Gate does not use it.
+- The fix is three hunks, and shipping a node that is knowingly behind a published advisory is a worse
+  default than a small, documented backport.
+
+### The exploit is real on this cohort, and closed by the backport
+
+The advisory's claim was not taken on trust. With the three source hunks reversed -- the cohort at its
+pinned, pre-fix state, keeping upstream's regression tests -- the upstream test fails in exactly the way
+the advisory describes:
+
+```text
+cargo test -p tari_engine --test access_rules        # cohort at a43773e6 + wallet-mvp.patch, no GHSA fix
+
+test resource_access_rules::an_empty_proof_cannot_satisfy_a_resource_rule ... FAILED
+panicked at crates/engine/tests/access_rules.rs:1094:
+  Transaction succeeded but it was expected to fail
+test result: FAILED. 47 passed; 1 failed
+```
+
+Line 1094 is the attack: a user whose badge vault is **empty** presents a zero-amount proof to a component
+whose method is gated by `rule!(resource(badge))`, and `take_tokens_using_proof` hands over **10 tokens**.
+So the primitive -- possession satisfied by an empty proof -- is live in this cohort, and it is a
+third-party asset-theft primitive against any template that gates on holding a resource.
+
+With the backport applied:
+
+```text
+cargo test -p tari_engine --test access_rules
+
+test resource_access_rules::an_empty_proof_cannot_satisfy_a_resource_rule ... ok
+test result: ok. 48 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 130.93s
+```
+
+and the Ghost Gate seam is unaffected:
+
+```text
+scripts/gg_test.sh test -p ghost-gate-tests --test gate_engine -- --test-threads=2
+running 30 tests
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 137.56s
+```
+
+30/30 before the backport and 30/30 after it, which is the expected outcome for a fix to a construct
+Ghost Gate does not use, and is itself evidence that the seam does not depend on it.
+
+### The backport, and how it was verified
+
+`docs/ghsa-empty-proof.patch` carries exactly those three hunks plus the upstream regression tests, so
+the fix is verifiable rather than asserted. `scripts/verify_patches.sh` proves four separate things,
+each with its own exit status (no pipeline masking `git apply`'s status):
+
+```text
+=== the reference is the pinned commit ===
+  reference HEAD: a43773e600b9503ed3fadcd3f0048f86131e3644
+  ok  reference is at the pinned commit v0.42.0
+
+=== each patch applies to a clean LF export of a43773e6 ===
+  ok  docs/wallet-mvp.patch applies (exit 0, no output)
+      files: 8
+  ok  docs/ghsa-empty-proof.patch applies (exit 0, no output)
+      files: 4
+
+=== each patch applies to the pristine reference working tree ===
+  (CRLF checkout on a Windows mount: --ignore-whitespace, and file-mode warnings are expected)
+  ok  docs/wallet-mvp.patch applies to the reference working tree (exit 0, 0 file-mode warning(s))
+  ok  docs/ghsa-empty-proof.patch applies to the reference working tree (exit 0, 0 file-mode warning(s))
+
+=== the patched cohort carries exactly what the patches say ===
+  ok  crates/engine/src/runtime/tracker_auth.rs matches (CRLF-normalised)
+  ok  crates/engine/tests/access_rules.rs matches (CRLF-normalised)
+  ok  crates/engine_types/src/proof.rs matches (CRLF-normalised)
+  ok  crates/engine_types/src/resource_container.rs matches (CRLF-normalised)
+  ... (8 further wallet-mvp files)
+  (12 file(s) compared, 0 mismatch(es))
+
+ALL CHECKS PASSED
+```
+
+Three things that verification has to be careful about on this machine, all of them environmental and
+none of them a property of either patch:
+
+- **The reference working tree is CRLF.** D: is mounted through WSL, so the reference's files carry CRLF
+  while the repository's blobs are LF. A plain `git apply --check` against it fails on the context of
+  every hunk. The check that proves the patch correct is against a **clean LF export of the pinned
+  commit** (`git archive a43773e6 | tar -x`), which is byte-exact for that commit and reports exit 0 with
+  no output. The CRLF case is verified separately with `--ignore-whitespace`, and is *not* reported as
+  warning-free.
+- **File modes.** Applying to the Windows-mounted trees warns `has type 100755, expected 100644` for
+  every file, because the mount reports everything as executable. With `--ignore-whitespace` the check
+  reported 0 such warnings; without it, the direct `git apply` into the patched cohort emitted one per
+  touched file. Neither indicates a problem with the patch.
+- **Content comparison has to normalise CRLF**, or every file differs from the LF export for that reason
+  alone. `verify_patches.sh` compares SHA-256 of both sides with CR stripped, which still fails on any
+  real content difference.
+
+`scripts/check_gate3_integration.sh` counts the GHSA patch as an accounted-for divergence:
+
+```text
+  documented patches (wallet-mvp + ghsa-empty-proof): 13 entries
+  Gate 3 integration additions:                        8 entries
+  cohort build-script output:                        21 entries
+  no unexplained divergence
+ALL CHECKS PASSED
+```
 
 ## Reproducing this
 
