@@ -29,15 +29,18 @@ consensus threshold enforcement
 COMMITTED ? access proof
 ```
 
-## Verdict: the consensus half is GREEN (30/30); the transport half is still open
+## Verdict: GREEN -- both halves, measured separately
 
 The gap that used to make this gate unreachable ? stock walletd cannot express a minimum value
 promise ? is closed by a local patch, and all three of its verifications now pass: 17 SDK tests, 5
 walletd handler tests, and -- as of 2026-10-04 -- the 30-test engine suite, whose last two cases are a
 statement a real wallet built being spent into a gate call and accepted by consensus.
 
-What that does **not** cover is the transport: no RPC, no mempool, no block, no network. The localnet
-half of this gate is a separate claim and is tracked separately below.
+What that does **not** cover is the transport: no RPC, no mempool, no block, no network. That is the
+second claim, and it has now been measured too, on the cohort's own end-to-end harness: **22 steps, 22
+passed**, with a wallet-built statement carried over JSON-RPC, committed by a validator, read back as
+public chain evidence, and refused on replay. The two results are reported separately because they are
+separate proofs, and both are needed.
 
 | Step | Status |
 | --- | --- |
@@ -49,7 +52,10 @@ half of this gate is a separate claim and is tracked separately below.
 | walletd lib + tests type-check | clean |
 | Engine suite re-run against the patched cohort | **30 passed, 0 failed** (2026-10-04, gaming PC) |
 | Wallet-built statement accepted by a gate call | **passing** (same run; was "written, never compiled") |
-| Live localnet: validator + walletd, four-step flow, `COMMITTED` | see "The transport half" below |
+| Live localnet: validator + walletd, four-step flow, `COMMITTED` | **22 steps, 22 passed** (2026-10-07) |
+| Public chain evidence read back (receipt, count, burnt nonce) | **read back** |
+| Replay of the same challenge over RPC | **refused by consensus** |
+| GHSA-pp4v-v773-9qxg (empty proof as resource possession) | reconciled, backported, regression green |
 
 The 30/30 above is the **consensus** half of this gate and nothing more: the statement is built by a
 real wallet and executed by the real engine in one process. It says nothing about RPC, mempool
@@ -341,7 +347,91 @@ Design:
 Nothing was weakened to make this pass. The positive case spends a wallet-built statement; the negative
 case is the same statement one unit of promise lower and is refused.
 
-## The transport half: real localnet
+## The transport half: real localnet -- GREEN
+
+**A wallet-built, promise-bearing statement was carried over real JSON-RPC, spent into a real
+`GhostGate::prove_access` call, accepted and committed by a real validator, read back as public chain
+evidence, and then refused when the same challenge was replayed.**
+
+```text
+scripts/ootle_e2e.sh -- --tags "@ghost_gate"
+
+[Summary]
+1 feature
+1 scenario (1 passed)
+22 steps (22 passed)
+```
+
+The scenario, in the order it runs:
+
+| Step | What it proves |
+| --- | --- |
+| a network with a registered validator, indexer, miner and wallet daemon | the stack is real, in process, over RPC |
+| publish the `ghost_gate` template through walletd | the Ghost Gate template compiles to wasm and is published on chain |
+| deploy a gate over tTARI with a 10000 threshold | a gate component exists with a real policy |
+| a stealth transfer of 300000 to the account | the prover holds **stealth** tTARI, discovered by the wallet |
+| `accounts.create_stealth_transfer_statement` with `minimum_value_promise: 10000` | the patched RPC carries the promise; the wallet builds the whole statement |
+| `prove_access` submitted with the wallet's lock id | key-path signing derived by the wallet from its own lock; no key leaves the daemon |
+| the receipt, the count, the burnt nonce, read back | the public evidence a site consumes exists in committed state |
+| a second fresh statement, then the same challenge again | replay protection, over the wire |
+
+### The evidence, exactly as the network reported it
+
+The validator's block transaction executor, from the scenario's own log:
+
+```text
+Transaction 33a724aee380f9dd53bc87988ae04adc7a0f1470ffac5c73ca2d992cfb3b8f4a executed in 11.01ms.
+  Accept(2 up, 1 down)
+```
+
+`Accept`, not a submission response: a validator executed that transaction against committed state and
+included it. Two up-substates and one down -- the gate's component state (nonce burnt, count incremented)
+and the qualifying output in, the spent UTXO out. The wallet added **1 stealth signer** from its own lock,
+and the whole proof cost **11298** microtari in fees.
+
+The events that transaction committed:
+
+```text
+the committed proof emitted 3 event(s): ["std.vault.pay_fee", "GhostGate.GG", "std.component.updated"]
+```
+
+`GhostGate.GG` is the template's receipt event. Note the topic is **`<module>.<MARK>`**, not `GG`: the
+engine namespaces a custom event topic with the emitting module (`Runtime::emit_event` does
+`format!("{module}.{topic}")`). A site filtering on a bare `"GG"` would see nothing, which is worth
+knowing before anyone writes that filter.
+
+The receipt, decoded from the committed event rather than assembled by the test:
+
+```text
+receipt read back from the committed event:
+  ProofReceipt { attested_minimum: 10000, input_count: 1, challenge_nonce: Hash32([67, 67, ...]) }
+```
+
+`ProofReceipt` has exactly three fields -- a public floor, a count of live inputs, and the burnt nonce --
+so decoding into it and checking those three is also a check that the event published **no amount, no
+address and no identity**. The floor is 10000, which is the gate's threshold; the real value was 300000 and
+appears nowhere.
+
+Then the gate's own state, read by calling its accessors on chain (what `ghost-gate-verifier` would do):
+
+```text
+the ghost gate GATE reports 1 proofs accepted
+the ghost gate GATE reports the nonce of challenge CHALLENGE as burnt
+```
+
+And the replay, built from a *fresh* statement so the only thing the two transactions share is the nonce:
+
+```text
+Transaction 2c8e62d37d2d9f336d87b82e67d3b59e52a39671efb6499cc7feeb7b8b8ac296 executed in 13.65ms.
+  AcceptFee(2 up, 1 down), Reject Execution failure (TemplateError): At instruction #1:
+  Template error: GG: challenge nonce has already been used
+```
+
+`AcceptFee(..., Reject)` is the shape to expect: the fee intent settles and the main intent is refused, so
+the network pays for nothing and commits no proof. The reason is the gate's own rule, in the gate's own
+words, which is what makes the refusal legible to a site without re-implementing anything.
+
+
 
 **The cohort's own end-to-end harness runs on this machine. The baseline is green; the Ghost Gate
 scenario is the open item.**
@@ -436,6 +526,68 @@ person to run this hits the same walls in the same order.
 | 4 | `InsufficientFunds: Required: 999947246, Available: 999647246` on template publication -- a gap of exactly 300000, the amount of the stealth transfer that preceded it | The harness sizes publication's `max_fee` at `min(estimate * 1.1, total balance)` while fees come out of *revealed* funds, so moving value into a stealth output first makes `max_fee` exceed what the fee source can pay. Publish and deploy **before** the funds move. |
 | 5 | `Substates not found: utxo_<resource>_<commitment> not found` when submitting the proof -- the statement spends a UTXO the validator had not committed yet | `miner MINER mines to the next epoch`, which takes the chain past the funding transaction and waits for the tip. A UTXO only exists on chain once the transaction carrying it is in a block; a relying site has to wait for the funding transaction to finalise before a proof can be accepted. |
 
+### The one that was not a scenario bug: an input has to be a *declared* input
+
+Worth recording on its own, because the error message misleads. The proof was refused twice with
+
+```text
+Substates not found: At instruction #1: utxo_01010101..._f4c9ba83... not found
+```
+
+which reads like "that UTXO is not on chain". It is not. The validator's own log says what it really is:
+
+```text
+Runtime error: Substate 'utxo_01010101..._f4c9ba83...' not found **or is not a transaction input**
+  at crates/engine/src/wasm/process.rs:470
+```
+
+The engine resolves every substate a transaction's arguments reference
+(`WorkingState::check_all_substates_in_scope`) and refuses one the transaction did not declare as an
+input. The statement named a UTXO that was committed -- it was in the validator's RocksDB, the indexer's
+state and the wallet's own store, all three verified by grepping the scenario's temp directory -- but the
+*transaction* declared only the gate component, so from the engine's point of view the spend referenced a
+substate outside the transaction's scope.
+
+**What this does and does not say about input selection.** The scenario names the exact UTXO the proof
+spends (`InputSelection::Specific`), and that is *test scaffolding*, not a product design. It is
+deterministic infrastructure: the scenario knows which transaction created which output, because it ran
+that transaction, and a regression test that lets a wallet pick would be testing the wallet's input
+selection heuristics rather than the gate. The same reasoning applies to `.add_input(built.input)`: a
+deterministic fixture, not a claim about who chooses what in production.
+
+For the real architecture the constraint is the opposite one. `accounts.create_stealth_transfer_statement`
+takes `InputSelection::Selection(...)` as well as `Specific { utxo_addresses }`, and the handler resolves
+`Selection` itself from the wallet's own store. So input selection *can* stay wallet-local, and it should:
+the wallet or a trusted local bridge chooses or approves the qualifying output, and the browser or relying
+site receives the minimum it needs to submit and observe the proof -- the challenge, the transaction, the
+committed result and the receipt event. A site has no business learning the user's UTXO identifiers or
+wallet inventory, and nothing in the protocol requires it to.
+
+Where the current API *does* constrain us, and it is worth writing down rather than glossing: to submit a
+transaction that spends a specific UTXO, the caller has to declare that UTXO as an input, because the
+engine refuses a statement referencing a substate the transaction did not declare. That is an engine rule,
+not a wallet choice, and it is why `utxo_signers` and the locked inputs come back with the statement: the
+caller is consenting to spend specific outputs. The least-privacy-leaking shape is therefore the one where
+the *wallet* holds that consent: the site supplies the challenge and receives the receipt, while the
+selection and the declaration stay behind the wallet's RPC boundary. Nothing about the threshold itself
+depends on any of this -- it is enforced on the bulletproof.
+
+Two things follow. The first is the fix: the proof transaction declares the UTXO as a write input
+(`.add_input(built.input)`), which is what `InputDeclaration: From<SubstateRequirement>` exists for, and
+what walletd does for the transfers it builds itself. The second is a property of the flow worth stating
+plainly: **a qualifying statement is only spendable from a transaction that declares the outputs it
+spends.** A relying site's backend has to know the UTXO it is asking to spend, which is exactly why the
+wallet's statement RPC returns `utxo_signers` alongside the statement -- the outputs being spent are part
+of what the caller is consenting to.
+
+Pinning the input also removed a real ambiguity. With `ConfidentialOnly` the wallet picks the inputs, and
+a wallet's idea of what it holds can include outputs a validator does not have; with
+`InputSelection::Specific` the scenario names the exact output the funding transaction created, read from
+that transaction's own committed diff through the harness's output records. The wallet still does
+everything that matters -- it decrypts the input, builds the bulletproof over
+`[minimum_value_promise, 2^64)`, signs the key path from its own lock, and never exports a key -- and the
+site names what it wants spent, which is what a site does.
+
 Two of the attempts in between were pure scenario bugs rather than stack behaviour, recorded because they
 cost the same 40-minute link each: a step whose text did not match its definition (`validator node VN is past
 ...` against `{word} is past ...`), and a statement that asked a single 300000 stealth input to create a
@@ -456,219 +608,15 @@ plus a `ghost_gate.feature` beside the existing ones.
 
 ## What remains for Gate 3 to be GREEN
 
-Done, on 2026-10-04:
+Nothing in the two claims above. What remains is *not* Gate 3:
 
-1. the baseline -- `scripts/ootle_e2e.sh -- --tags "@transfer"` -> 3 scenarios, 48 steps, all passed
-2. the harness additions -- the template, the vendored rules, four steps and one scenario, all registered
-   and compiling inside the cohort's own `integration_tests`
-
-Open:
-
-3. the Ghost Gate scenario itself, `scripts/ootle_e2e.sh -- --tags "@ghost_gate"`: a wallet-built,
-   promise-bearing statement carried over real JSON-RPC, spent into a real gate call, committed by a real
-   validator, and then replayed and refused. The steps are written; whether the scenario passes is a
-   question about the wallet's behaviour on a live network, not about compilation, and it has not been run
-   to a conclusion yet.
-4. the public evidence a relying site would act on -- `proofs_accepted`, the burnt nonce and the emitted
-   event, read back from chain state rather than inferred from the transaction result. The scenario
-   currently asserts the transaction result and the status; it does not read the gate's state.
-   `ghost-gate-verifier::observe_and_authorize` is the piece that would consume it.
-
-Only (3) and (4) together make the claim "a real RPC path carries and commits a Ghost Gate proof". The
-consensus half, measured above, is necessary but not sufficient.
-
-## Security reconciliation: GHSA-pp4v-v773-9qxg
-
-The cohort is pinned to `a43773e6` (v0.42.0, 2026-09-30). Upstream merged a security fix on 2026-10-01,
-after that tag: **`965e0bc6f` "fix(engine)!: reject zero-amount and empty proofs as resource
-possession", GHSA-pp4v-v773-9qxg.** Because the pinned cohort predates it, this had to be reconciled
-rather than assumed irrelevant.
-
-### What the advisory is
-
-> A proof created by amount 0 or by an empty set of non-fungible ids satisfied `rule!(resource(X))`,
-> because the requirement check compared only the proof's resource address. Anyone able to create an
-> empty vault of X could pass any rule gated on holding X: mint, burn, withdraw, recall, freeze,
-> method rules and `OwnerRule::ByAccessRule`.
-
-Three hunks: `ResourceContainer::lock_by_amount` refuses a zero amount, `lock_by_non_fungible_ids`
-refuses an empty id set, and `RuleRequirement::Resource` skips empty proofs (`!proof.is_empty()`,
-backed by a new `Proof::is_empty()`). The upstream regression tests ship with it.
-
-### Does the pinned cohort contain it?
-
-Yes, in full. `crates/engine/src/runtime/tracker_auth.rs:243`:
-
-```rust
-for proof_id in scope.proofs() {
-    let proof = state.get_proof(*proof_id)?;
-
-    if resx == proof.resource_address() {      // <-- an empty proof satisfies this
-        return Ok(true);
-    }
-}
-```
-
-and `crates/engine_types/src/resource_container.rs:856` (`lock_by_amount`) checks only
-`amount > available_amount`, so locking 0 succeeds and yields exactly the empty proof the advisory
-describes. The primitive is present.
-
-### Can it reach Ghost Gate's threshold?
-
-Not through the path Ghost Gate uses. Three findings, in order of how much they matter:
-
-**1. The threshold is never expressed as a resource rule.** This is the load-bearing point, and it is a
-design property rather than luck. Ghost Gate asks "does this prover control at least X" by putting
-`minimum_value_promise >= threshold` in the qualifying output's witness and letting the engine verify
-the bulletproof over `[mvp, 2^64)`, plus requiring every input to be key-authorised. Neither question is
-routed through `RuleRequirement::Resource`, so the vulnerable branch is not on the path at all. The empty
-proof cannot make an output's bulletproof attest a value it does not have, and it cannot add a signer
-badge to the transaction's auth scope.
-
-**2. The only route from a stealth spend into `check_requirement` is closed by the gate's own rules.**
-`verify_input_authorizations` (`crates/engine/src/runtime/impl.rs:817`) resolves an input two ways: a
-**key path**, whose `spend_key` needs a signer badge in the transaction's auth scope, or a **script
-path**, whose revealed leaf is evaluated against an `AccessRule` -- and that is where
-`check_requirement` becomes reachable. Ghost Gate refuses non-key-path inputs before the engine sees
-them:
-
-```rust
-// ghost-gate-core, find_qualifying_output
-if statement.inputs_statement.inputs.iter().any(|i| !i.witness.is_key_path()) {
-    return Err(GateError::NonKeyPathInput);
-}
-```
-
-So on the Gate 3 path no `AccessRule` leaf is ever evaluated, and no empty proof can stand in for
-possession.
-
-**3. Nothing in the Gate 3 deployment asks for possession anyway.** `RequireRule::Resource` /
-`AccessRule::Resource` is constructed **nowhere** in the cohort's templates, in
-`integration_tests/src/templates`, or in the applications:
-
-```text
-$ grep -rn 'RequireRule::Resource' --include=*.rs crates/ integration_tests/ applications/
-(no matches)
-$ grep -rn 'rule!(resource' --include=*.rs crates/template_builtin/templates/ integration_tests/src/templates/
-(no matches)
-```
-
-The account template gates its methods with `rule!(allow_all)` and a `rule!(deny_all)` default; the
-Ghost Gate component is `AccessRules::allow_all()`; the faucet fixture is
-`mintable(rule!(allow_all), OWNER)` / `withdrawable(rule!(allow_all), OWNER)`. Fees are paid from the
-account's revealed funds by the seal signer, not by a proof.
-
-### Verdict, and why the fix was backported anyway
-
-Ghost Gate's threshold path does not depend on the vulnerable construct, and no component of the Gate 3
-deployment uses the construct the advisory is about. Two reasons not to stop there:
-
-- The cohort is a **consensus node**, and any user can publish a template. A user who published a
-  component whose method is gated by `rule!(resource(X))` -- a "bank" or a vault -- would hand an
-  attacker with an empty vault of X a withdrawal on this cohort. That is a real deviation from upstream
-  behaviour even though Ghost Gate does not use it.
-- The fix is three hunks, and shipping a node that is knowingly behind a published advisory is a worse
-  default than a small, documented backport.
-
-### The exploit is real on this cohort, and closed by the backport
-
-The advisory's claim was not taken on trust. With the three source hunks reversed -- the cohort at its
-pinned, pre-fix state, keeping upstream's regression tests -- the upstream test fails in exactly the way
-the advisory describes:
-
-```text
-cargo test -p tari_engine --test access_rules        # cohort at a43773e6 + wallet-mvp.patch, no GHSA fix
-
-test resource_access_rules::an_empty_proof_cannot_satisfy_a_resource_rule ... FAILED
-panicked at crates/engine/tests/access_rules.rs:1094:
-  Transaction succeeded but it was expected to fail
-test result: FAILED. 47 passed; 1 failed
-```
-
-Line 1094 is the attack: a user whose badge vault is **empty** presents a zero-amount proof to a component
-whose method is gated by `rule!(resource(badge))`, and `take_tokens_using_proof` hands over **10 tokens**.
-So the primitive -- possession satisfied by an empty proof -- is live in this cohort, and it is a
-third-party asset-theft primitive against any template that gates on holding a resource.
-
-With the backport applied:
-
-```text
-cargo test -p tari_engine --test access_rules
-
-test resource_access_rules::an_empty_proof_cannot_satisfy_a_resource_rule ... ok
-test result: ok. 48 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 130.93s
-```
-
-and the Ghost Gate seam is unaffected:
-
-```text
-scripts/gg_test.sh test -p ghost-gate-tests --test gate_engine -- --test-threads=2
-running 30 tests
-test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 137.56s
-```
-
-30/30 before the backport and 30/30 after it, which is the expected outcome for a fix to a construct
-Ghost Gate does not use, and is itself evidence that the seam does not depend on it.
-
-### The backport, and how it was verified
-
-`docs/ghsa-empty-proof.patch` carries exactly those three hunks plus the upstream regression tests, so
-the fix is verifiable rather than asserted. `scripts/verify_patches.sh` proves four separate things,
-each with its own exit status (no pipeline masking `git apply`'s status):
-
-```text
-=== the reference is the pinned commit ===
-  reference HEAD: a43773e600b9503ed3fadcd3f0048f86131e3644
-  ok  reference is at the pinned commit v0.42.0
-
-=== each patch applies to a clean LF export of a43773e6 ===
-  ok  docs/wallet-mvp.patch applies (exit 0, no output)
-      files: 8
-  ok  docs/ghsa-empty-proof.patch applies (exit 0, no output)
-      files: 4
-
-=== each patch applies to the pristine reference working tree ===
-  (CRLF checkout on a Windows mount: --ignore-whitespace, and file-mode warnings are expected)
-  ok  docs/wallet-mvp.patch applies to the reference working tree (exit 0, 0 file-mode warning(s))
-  ok  docs/ghsa-empty-proof.patch applies to the reference working tree (exit 0, 0 file-mode warning(s))
-
-=== the patched cohort carries exactly what the patches say ===
-  ok  crates/engine/src/runtime/tracker_auth.rs matches (CRLF-normalised)
-  ok  crates/engine/tests/access_rules.rs matches (CRLF-normalised)
-  ok  crates/engine_types/src/proof.rs matches (CRLF-normalised)
-  ok  crates/engine_types/src/resource_container.rs matches (CRLF-normalised)
-  ... (8 further wallet-mvp files)
-  (12 file(s) compared, 0 mismatch(es))
-
-ALL CHECKS PASSED
-```
-
-Three things that verification has to be careful about on this machine, all of them environmental and
-none of them a property of either patch:
-
-- **The reference working tree is CRLF.** D: is mounted through WSL, so the reference's files carry CRLF
-  while the repository's blobs are LF. A plain `git apply --check` against it fails on the context of
-  every hunk. The check that proves the patch correct is against a **clean LF export of the pinned
-  commit** (`git archive a43773e6 | tar -x`), which is byte-exact for that commit and reports exit 0 with
-  no output. The CRLF case is verified separately with `--ignore-whitespace`, and is *not* reported as
-  warning-free.
-- **File modes.** Applying to the Windows-mounted trees warns `has type 100755, expected 100644` for
-  every file, because the mount reports everything as executable. With `--ignore-whitespace` the check
-  reported 0 such warnings; without it, the direct `git apply` into the patched cohort emitted one per
-  touched file. Neither indicates a problem with the patch.
-- **Content comparison has to normalise CRLF**, or every file differs from the LF export for that reason
-  alone. `verify_patches.sh` compares SHA-256 of both sides with CR stripped, which still fails on any
-  real content difference.
-
-`scripts/check_gate3_integration.sh` counts the GHSA patch as an accounted-for divergence:
-
-```text
-  documented patches (wallet-mvp + ghsa-empty-proof): 13 entries
-  Gate 3 integration additions:                        8 entries
-  cohort build-script output:                        21 entries
-  no unexplained divergence
-ALL CHECKS PASSED
-```
+1. `ghost-gate-verifier::observe_and_authorize` consuming what the scenario now proves exists. The
+   evidence -- `proofs_accepted`, the burnt nonce, the `GhostGate.GG` receipt -- is read and asserted in
+   the scenario; wiring the verifier to it in a running relying-site process is the next unit of work.
+2. A relying site's four-step flow as a *product*: challenge issuance, session grant, expiry policy.
+3. The known limits of what this gate means, unchanged by any of the above: it proves control of a
+   qualifying amount at access time, not total balance, not identity, not Sybil resistance, and not
+   anything about holdings after access.
 
 ## Reproducing this
 
@@ -679,35 +627,61 @@ scripts/gg_test.sh test -p ghost-gate-tests --test gate_engine -- --test-threads
 # Phase 2, the transport
 scripts/stage_swagger_ui.sh                     # one-off: the indexer's swagger-ui build input
 scripts/ootle_e2e.sh -- --tags "@transfer"      # the cohort's own baseline: 3 scenarios, 48 steps
-scripts/ootle_e2e.sh -- --tags "@ghost_gate"    # the Ghost Gate scenario
+scripts/ootle_e2e.sh -- --tags "@ghost_gate"    # the Ghost Gate scenario: 22 steps, 22 passed
 
-# integrity: the cohort tree is v0.42.0 plus documented additions, and nothing else
-scripts/check_gate3_integration.sh
+# the backport's own regression tests, inside the cohort
+cd _ootle-v042-ghost-gate
+cargo --config 'build.target-dir="/home/pdark/gg-ootle-target"' test -p tari_engine --test access_rules
+cd -
+
+# integrity: both patches apply to the pinned commit, and the cohort tree carries nothing else
+scripts/verify_patches.sh            # each patch applies; the patched cohort matches the patched export
+scripts/check_gate3_integration.sh   # every difference from the pristine reference is accounted for
 ```
 
-Two things about the environment, both learned the hard way and both still true:
+Three things about the environment, all learned the hard way and all still true:
 
-- **The cucumber test binary takes ~20 minutes to link.** Any change under `integration_tests/` -- a
-  feature file included -- invalidates it, so scenario tweaks are expensive. Batch them.
-- **The machine is shared.** Another user's cargo build was running for much of this session; the link
-  is the memory-hungry step (about 4.4 GB resident with LTO), and one WSL VM restart killed a link
-  outright. The run that follows a successful link takes about four minutes.
+- **The cucumber test binary takes 20-40 minutes to link.** Any change under `integration_tests/` --
+  a feature file included -- invalidates it, so scenario tweaks are batched. Passing
+  `--config 'profile.test.package.integration_tests.debug=0'` keeps it around 20 minutes and much
+  lighter, at the cost of no debug info in that one crate's test binary.
+- **The machine is shared, and the host restarts without warning.** Another user's cargo build was
+  running for much of this session, and three WSL VM restarts killed in-flight links outright. Logs for
+  every run are under `/home/pdark/gg-logs/`.
+- **D: is CRLF.** The reference working tree does not match its own blobs by line endings, so
+  `git apply --check` against it needs `--ignore-whitespace`, and any content comparison against an LF
+  export has to normalise CR. `scripts/verify_patches.sh` does both and reports the caveats rather than
+  papering over them.
 
 ## The honest summary
 
-The architecture is sound and every component of it is verified against v0.42.0 source, including the
-load-bearing one ? that ordinary key-path wallet funds are authorised correctly even when spent from
-inside a custom template.
+Both halves of Gate 3 are now measured, and they are separate measurements.
 
-The walletd gap is closed by a small, auditable patch, and all three of its verifications pass: 17 SDK
-tests, 5 walletd handler tests driving the real handler against a real wallet, and now 30/30 in the
-engine suite against the same patched cohort the wallet comes from.
+**Consensus, in one process.** 30/30 in `gate_engine`, of which 28 are the unchanged Gate 2 suite and two
+are the seam: a statement built by an ordinary wallet's SQLite store, key manager and cipher seed, carrying
+a `minimum_value_promise` the caller chose, is accepted by `GhostGate::prove_access` under the engine and
+increments `proofs_accepted`; the same call one unit of promise short is refused. The cohort is
+`a43773e6` plus `docs/wallet-mvp.patch`, so the wallet and the engine are one compilation of the same
+crates.
 
-What is true as of 2026-10-04, stated at exactly the strength the evidence supports: **a statement built
-by an ordinary wallet, carrying a minimum value promise the caller chose, is accepted by consensus when
-it is spent into `GhostGate::prove_access`, and refused when the promise is one unit short.** Both
-directions are covered, in the same process, with a real keyring and a real SQLite store.
+**Transport, over a real network.** 22 steps in the cohort's own `integration_tests`, against a base node,
+validator, indexer, miner and wallet daemon: the wallet builds the promised statement over JSON-RPC, the
+proof transaction is declared with the UTXO it spends, the wallet signs the key path from its own lock
+without any key leaving the daemon, a validator executes and commits it (`Accept(2 up, 1 down)`), the
+public evidence -- the `GhostGate.GG` receipt decoding to a floor of 10000 over one input and the burnt
+nonce, `proofs_accepted() == 1`, `is_nonce_used(nonce) == true` -- is read back from committed state, and
+the same challenge replayed from a fresh statement is refused with `GG: challenge nonce has already been
+used`.
 
-What is not yet true: that a validator has accepted such a transaction over RPC, from a node, in a block.
-The engine test executes the transaction directly. A localnet run is a different claim about a
-different set of components, and it is reported separately when it exists.
+**Security.** The pinned cohort predates GHSA-pp4v-v773-9qxg, in which a zero-amount or empty proof
+satisfied `rule!(resource(X))`. The exploit was reproduced on this cohort -- an empty vault passed a
+resource rule and took 10 tokens -- and closed by a minimal backport whose upstream regression tests pass
+(48/48). Ghost Gate's threshold path never traverses that construct: the threshold is a bulletproof over
+`[minimum_value_promise, 2^64)` plus key-path input authorisation, not a possession rule, and the gate
+refuses non-key-path inputs before the engine could evaluate an `AccessRule` leaf. The seam is 30/30 both
+before and after the backport, which is the evidence for that claim.
+
+What is still not true, and was never claimed: that this proves total balance, identity, Sybil
+resistance, or anything about holdings after access. It proves that at the moment a validator committed
+that transaction, its signer controlled enough private tTARI to cover the gate's threshold -- and published
+no amount to do it.
