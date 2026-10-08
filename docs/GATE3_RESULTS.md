@@ -53,16 +53,18 @@ separate proofs, and both are needed.
 | Engine suite re-run against the patched cohort | **30 passed, 0 failed** (2026-10-04, gaming PC) |
 | Wallet-built statement accepted by a gate call | **passing** (same run; was "written, never compiled") |
 | Live localnet: validator + walletd, four-step flow, `COMMITTED` | **22 steps, 22 passed** (2026-10-07) |
+| `@transfer` baseline re-run on the backported cohort | 2 of 3 scenarios green; one pre-existing burn-claim epoch flake, see below |
 | Public chain evidence read back (receipt, count, burnt nonce) | **read back** |
 | Replay of the same challenge over RPC | **refused by consensus** |
 | GHSA-pp4v-v773-9qxg (empty proof as resource possession) | reconciled, backported, regression green |
 
-The 30/30 above is the **consensus** half of this gate and nothing more: the statement is built by a
-real wallet and executed by the real engine in one process. It says nothing about RPC, mempool
-admission or block production. Those are a separate claim, and they are made separately below.
+The 30/30 is the **consensus** half and nothing more: the statement is built by a real wallet and
+executed by the real engine in one process. It says nothing about RPC, mempool admission or block
+production. The 22/22 is the **transport** half, and it says nothing the consensus half does not: it runs
+the same code over a network rather than in one process. Both are needed, and neither substitutes for the
+other.
 
-Nothing below is green until a validator has accepted a transaction whose statement came out of a
-real wallet. Read the rest of this document as "the path is built and partly tested", not as a pass.
+The engine suite was re-run after the security backport, unchanged at 30 passed, 0 failed.
 
 ## What was wrong, and what the patch does about it
 
@@ -451,6 +453,26 @@ All three scenarios, including `Stealth transfer to account that does not previo
 base node, a validator, an indexer, a miner, a wallet daemon and a Minotari console wallet, started in
 process and driven over real RPC, mining blocks, claiming a base-layer burn and moving stealth tTARI.
 Everything the localnet half of this gate needs is therefore working here.
+
+**Re-run after the security backport, and what it showed.** The same command on the final cohort (patched
+MVP + GHSA backport + the Gate 3 additions) came back **3 scenarios (2 passed, 1 failed), 39 steps (38
+passed, 1 failed)**:
+
+| Scenario | Result |
+| --- | --- |
+| Transfer tokens to account that does not previously exist | **failed** at `I claim burn BURN_PROOF ...` |
+| Transfer tokens to existing account | passed, including its own burn claim |
+| Stealth transfer to account that does not previously exist | passed, including a real stealth transfer |
+
+The failure is `NotYetValid: block header not found for hash ... in an epoch before Epoch(3)` -- the same
+burn-claim epoch race this project hit four times while building the Ghost Gate scenario, and the reason
+`ghost_gate.feature` waits for `VN is past the epoch burn proof ... was mined in` before claiming. It is a
+timing sensitivity in the cohort's own scenario, not a regression: the identical claim step *passed* in
+scenario 2 of the same run, the stealth-transfer scenario passed outright, the same scenario passed 3/3 on
+the pre-backport cohort on 2026-10-04, and nothing in the backport is on the claim's path
+(`RuleRequirement::Resource` evaluation and two zero-amount guards). Recorded here rather than smoothed
+over: the honest summary is "the baseline was green before the backport, and green again after it apart
+from one known flake, which the Ghost Gate scenario works around explicitly".
 
 (The arguments go after a `--`: `cargo` parses `--tags` itself and refuses the command otherwise, which
 is why the script's own usage line was wrong until this run.)
