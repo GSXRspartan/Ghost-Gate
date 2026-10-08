@@ -1,5 +1,50 @@
 # Threat model
 
+## 0. What each backend actually asserts
+
+Ghost Gate has two backends with different evidence and different claims. Conflating them is the
+easiest way to make a false claim about this project, so the boundary is stated first.
+
+### Ootle backend — PROVEN
+
+> A wallet controlled qualifying input(s) for the resource the gate was configured with, and produced a
+> consensus-valid private statement attesting at least the configured threshold of that resource for
+> this one-time challenge. At the moment a validator committed that transaction.
+
+What it does **not** assert, for any gate, on any resource:
+
+| Not claimed | Why it cannot be |
+| --- | --- |
+| Total wallet balance | The proof covers the inputs it spent. A qualifying output worth 1,000,000 says nothing about the rest of the wallet. |
+| Identity, or that the prover is human | Nothing in a stealth key-path spend identifies a person. |
+| Uniqueness / Sybil resistance | One key can mint many sessions across many challenges. |
+| Continuous holding | The funds can be spent immediately after the proof commits. A session means "around login time". |
+| Ownership of every output in a wallet | Only the inputs named by the statement were under the signer's control. |
+| Future balance | A claim about the past, never the present. |
+| Immunity to credential sharing after issue | A session is a bearer token. Whoever holds it holds the door open until it expires. |
+
+Two further properties belong to the *mechanism*, not to any user:
+
+- **A proof does not prove the qualifying output belongs to the prover.** A stealth output is spendable
+  by whoever holds its spend key, and only the creator learns it. The gate requires the output be
+  key-*spendable*; it cannot require it be the caller's. See `docs/PRIVACY_MODEL.md`.
+- **The gate does not check the statement's resource, deliberately.** A stealth UTXO's address is
+  `(resource, commitment)` and the engine resolves spent inputs under the gate's own resource, so a
+  statement naming another resource cannot resolve. The gate leaves that to consensus rather than
+  duplicating it.
+
+### Native Minotari XTM backend — DESIGN ONLY
+
+Not implemented, not run, no claims. The design, the source audit, the route comparison and the two
+genuine blockers are in `docs/XTM_RESEARCH.md`. In summary: L1 already carries a consensus-enforced
+`minimum_value_promise` on a public, hash-committed output, which is the primitive the Ootle path needs
+and it exists natively today; but cross-output aggregation is not expressible with consensus-verifiable
+L1 primitives, and spend-key challenge signing exists in the library yet is not reachable over the
+wallet gRPC. The chosen route is an access-time self-transfer submitted by the bridge, which costs an L1
+transaction per access and would therefore be a fallback mode, not the default.
+
+## 1. Malicious prover
+
 Each row: the attack, what it costs, the mitigation, which layer enforces it, and what risk
 remains. "Template" means consensus; "Engine" means Ootle's own validation; "Verifier" means the
 relying site's code; "Wallet" means walletd.
@@ -323,6 +368,24 @@ cannot be. Anything a site decides is a usability matter, not a security matter.
 | **Residual** | None. |
 
 ---
+
+## 8b. What a relying site is required to do
+
+Consensus decides whether a proof *qualifies*. It does not decide whether a proof should open a door.
+That second decision is entirely the site's, and a site that skips any of the following converts a
+threshold proof into a weaker thing than it looks like.
+
+| Requirement | If skipped |
+| --- | --- |
+| **Generate cryptographically unpredictable nonces** | A predictable nonce lets an attacker pre-mint a statement for a challenge nobody asked for, and replay the gate's own answer to a victim. |
+| **Enforce an expiry, and answer challenges in the same epoch window the gate allows** | A challenge answered weeks later is a claim about the past. `docs/PRIVACY_MODEL.md` explains why the session TTL is deliberately longer than the challenge TTL, and why both are bounded. |
+| **Bind the challenge to gate, resource, threshold, network, site and session** | A proof minted for one gate becomes a key to another. The gate checks the first four; the last two are the site's alone. |
+| **Verify the committed result, never a submission response** | `transactions.submit` returning 200 means the node accepted the transaction for sequencing. It means nothing about whether a validator executed it, whether the template accepted it, or whether the nonce is burnt. Read the committed receipt and the gate's own state. `ghost-gate-verifier::observe_and_authorize` grants only on `Committed { accept: true }`. |
+| **Consume the challenge exactly once, and only on acceptance** | Two sessions from one proof. The gate's burnt-nonce state prevents this at consensus; a site that consumes on *failure* turns a user's mistake into a support ticket instead. |
+| **Issue short-lived sessions** | "Proved control at login" quietly becomes "is logged in", which is a different and much stronger claim. |
+| **Retain no unnecessary wallet metadata** | A site that stores the user's UTXO identifiers or transaction history has built a profile the product exists to avoid making easy. |
+| **Render the resource address, not a symbol** | A site showing `GHOSTTEST` while the gate watches `resource_...` is showing the wrong asset, and no consensus rule will catch it. |
+| **Say that the interaction is public** | The transaction, its timing and its committed floor are on chain. A UI that omits this misrepresents the product. |
 
 ## 9. Chain-level
 

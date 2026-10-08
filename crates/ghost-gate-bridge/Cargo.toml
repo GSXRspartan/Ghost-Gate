@@ -1,0 +1,25 @@
+[package]
+name = "ghost-gate-bridge"
+description = "Local Ghost Gate wallet bridge: the trusted local half between a relying site and walletd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+ghost-gate-core = { path = "../ghost-gate-core" }
+tari_template_lib_types = { workspace = true, features = ["std", "serde"] }
+tari_ootle_wallet_crypto = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
+# `net` and `io-util` are the only additions to the workspace's tokio feature set, and both are for
+# TcpListener and read/write. There is no web framework here on purpose: the security-relevant behaviour
+# is which request may do what, and that should be readable without tracing a framework's defaults.
+tokio = { workspace = true, features = ["net", "io-util"] }
+
+[dev-dependencies]
+tari_template_lib_types = { workspace = true, features = ["std", "serde"] }
