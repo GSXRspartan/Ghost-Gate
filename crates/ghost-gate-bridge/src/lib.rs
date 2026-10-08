@@ -52,7 +52,5 @@ pub use policy::{ProveRequest, ProofRefusal, validate_prove_request};
 pub use session::{ChallengeBook, IssuedChallenge, ProofJob, ProofStatus, PublicProof};
 pub use wallet::{CommitOutcome, InputChoice, StatementRequest, WalletChannel, WalletError, WalletStatus};
 
-use ghost_gate_core::Challenge;
-
 /// Server version, reported by `GET /health`.
 pub const BRIDGE_VERSION: &str = env!("CARGO_PKG_VERSION");

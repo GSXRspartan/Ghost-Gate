@@ -95,6 +95,9 @@ impl<'a> Route<'a> {
     /// A path that matches a shape but not this method is `NotFound` rather than a 405: there is no
     /// reason to tell an unpermitted caller which verbs a route accepts.
     pub fn resolve(method: &str, path: &'a str) -> Self {
+        // The query string is dropped here rather than at the parsing layer, so a caller that builds a
+        // Request by hand cannot smuggle one past a route.
+        let path = path.split('?').next().unwrap_or("");
         let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
         match (method, segments.as_slice()) {
             ("GET", ["health"]) => Route::Health,
@@ -119,8 +122,8 @@ impl<'a> Route<'a> {
 pub fn parse_request(raw: &str) -> Option<Request> {
     let mut lines = raw.split("\r\n");
     let request_line = lines.next()?;
+    // `GET /health HTTP/1.1` -- the method is the *first* token.
     let mut parts = request_line.split(' ');
-    let _version = parts.next()?;
     let method = parts.next()?;
     let target = parts.next()?;
 

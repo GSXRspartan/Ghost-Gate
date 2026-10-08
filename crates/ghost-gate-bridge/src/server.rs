@@ -139,9 +139,9 @@ impl<W: WalletChannel> Bridge<W> {
     /// value this bridge generates per challenge is bound to that challenge and to the browser that
     /// asked for it.
     fn issue_challenge(&mut self, id: &str) -> Response {
-        let Some(binding) = self.gates.get(id) else {
+        if self.gates.get(id).is_none() {
             return Response::error(404, "GG: no such gate");
-        };
+        }
         let session = random_nonce();
         let Some(issued) =
             self.gates
@@ -149,10 +149,21 @@ impl<W: WalletChannel> Bridge<W> {
         else {
             return Response::error(500, "GG: the challenge could not be recorded");
         };
+        // The challenge's own fields are named rather than serialised as a blob, so a relying site reads
+        // the binding it is about to rely on. `gate` and `resource` are addresses, not names.
         Response::json(
             200,
             &serde_json::json!({
-                "challenge": issued.challenge,
+                "challenge": serde_json::json!({
+                    "gate": issued.challenge.gate.to_string(),
+                    "resource": issued.challenge.resource.to_string(),
+                    "threshold": issued.challenge.threshold,
+                    "network": issued.challenge.network,
+                    "nonce": crate::policy::nonce_to_hex(&issued.challenge.nonce),
+                    "expires_epoch": issued.challenge.expires_epoch,
+                    "relying_site": hex::encode(issued.challenge.relying_site.as_slice()),
+                    "session_commitment": hex::encode(issued.challenge.session_commitment.as_slice()),
+                }),
                 "challenge_nonce": crate::policy::nonce_to_hex(&issued.challenge.nonce),
                 "session_commitment": hex::encode(&session),
                 "expires_at_unix": issued
@@ -198,7 +209,8 @@ impl<W: WalletChannel> Bridge<W> {
             },
         };
 
-        let job_id = hex::encode(random_nonce()[..8]);
+        let job_id_bytes = random_nonce();
+        let job_id = hex::encode(&job_id_bytes[..8]);
         let nonce = challenge.nonce.into_array();
         self.jobs.push(ProofJob {
             id: job_id.clone(),
@@ -326,7 +338,7 @@ impl<W: WalletChannel> Bridge<W> {
 /// cannot keep a socket open.
 pub async fn serve<W: WalletChannel + Send + 'static>(
     addr: &str,
-    mut bridge: Bridge<W>,
+    bridge: Bridge<W>,
 ) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     let bridge = Arc::new(tokio::sync::Mutex::new(bridge));
@@ -365,9 +377,11 @@ pub async fn serve<W: WalletChannel + Send + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gate_registry::GateBinding;
+    use crate::wallet::{CommitOutcome, InputChoice, StatementReply, WalletError, WalletStatus};
     use ghost_gate_core::network;
+    use tari_template_lib_types::stealth::StealthTransferStatement;
     use tari_template_lib_types::{ComponentAddress, MaxBytes, ObjectKey, ResourceAddress};
-    use crate::wallet::{CommitOutcome, InputChoice, StatementReply, WalletStatus};
 
     /// A stand-in for the wallet daemon.
     ///
@@ -411,7 +425,7 @@ mod tests {
     }
 
     impl WalletChannel for FakeWallet {
-        async fn status(&self) -> Result<WalletStatus, WalletError> {
+        async fn status(&mut self) -> Result<WalletStatus, WalletError> {
             if self.reachable {
                 Ok(self.status.clone())
             } else {
@@ -424,12 +438,16 @@ mod tests {
             if let Err(e) = &self.build_result {
                 return Err(WalletError::Refused(e.clone()));
             }
-            Err(WalletError::Refused("the fake does not build statements".into()))
+            Ok(StatementReply {
+                statement: minimal_statement(request.minimum_value_promise),
+                lock_id: "lock_fake".into(),
+                signer_count: 1,
+            })
         }
         async fn submit(
             &mut self,
             _gate: &str,
-            _statement: &tari_template_lib_types::StealthTransferStatement,
+            _statement: &StealthTransferStatement,
             _lock_id: &str,
         ) -> Result<String, WalletError> {
             self.submit_result.clone().map_err(WalletError::Refused)
@@ -449,6 +467,41 @@ mod tests {
             divisibility: 2,
             symbol: "GHOSTTEST".into(),
         }
+    }
+
+    /// A syntactically complete statement with one promise-bearing output and no inputs.
+    ///
+    /// Real bytes rather than a placeholder, so the accept and reject paths are exercised end to end in
+    /// the bridge's own terms. It is not a *valid* Ghost Gate proof -- consensus would refuse an empty
+    /// input set -- and nothing here claims otherwise: what is under test is the bridge's reaction to
+    /// what the network says, not the network's verdict.
+    fn minimal_statement(minimum_value_promise: u64) -> StealthTransferStatement {
+        use tari_crypto::keys::{PublicKey, SecretKey};
+        use tari_crypto::ristretto::{RistrettoPublicKey, RistrettoSecretKey};
+        use tari_ootle_wallet_crypto::{OutputWitness, StealthOutputWitness};
+        use tari_template_lib_types::crypto::{RistrettoPublicKeyBytes, UtxoTag};
+        use tari_template_lib_types::stealth::SpendAuthorization;
+        use tari_template_lib_types::{Amount, EncryptedData};
+
+        let out = StealthOutputWitness {
+            witness: OutputWitness {
+                amount: minimum_value_promise,
+                mask: RistrettoSecretKey::from(1u64),
+                sender_public_nonce: RistrettoPublicKey::from_secret_key(&RistrettoSecretKey::from(2u64)),
+                minimum_value_promise,
+                encrypted_data: EncryptedData::try_from(vec![0u8; EncryptedData::min_size()]).unwrap(),
+                resource_view_key: None,
+            },
+            auth: SpendAuthorization::Key(RistrettoPublicKeyBytes::default()),
+            tag: UtxoTag::new(0),
+        };
+        tari_ootle_wallet_crypto::stealth::create_transfer_statement(
+            vec![],
+            Amount::from(minimum_value_promise),
+            [&out],
+            None,
+        )
+        .expect("statement")
     }
 
     fn bridge(wallet: FakeWallet) -> Bridge<FakeWallet> {
@@ -558,13 +611,13 @@ mod tests {
     async fn the_wallet_is_asked_for_the_gates_resource_and_threshold_only() {
         let mut b = bridge(FakeWallet::new());
         let (nonce, session) = issue(&mut b).await;
-        // The fake refuses to build, which is fine: the point is what it was asked for.
-        let _ = b
+        let r = b
             .handle(&post(
                 "/gate/g1/prove",
                 serde_json::json!({"gate_id":"g1","challenge_nonce":nonce,"session_commitment":session}),
             ))
             .await;
+        assert_eq!(r.status, 202, "{}", r.body);
 
         assert_eq!(b.wallet.asked, vec![(binding().resource, binding().threshold)]);
         assert_eq!(
@@ -644,7 +697,7 @@ mod tests {
     #[tokio::test]
     async fn a_refused_proof_leaves_the_challenge_live() {
         let mut b = bridge(FakeWallet::new());
-        let (nonce, session) = issue(&mut b).await;
+        let (nonce, _session) = issue(&mut b).await;
         // Answer from the wrong session: refused, and the challenge survives so the real session can use it.
         let r = b
             .handle(&post(
@@ -710,7 +763,8 @@ mod tests {
                 serde_json::json!({"gate_id":"g1","challenge_nonce":nonce,"session_commitment":session}),
             ))
             .await;
-        let proof_id: serde_json::Value = serde_json::from_str(&submitted.body).unwrap()["proof_id"]
+        assert_eq!(submitted.status, 202, "{}", submitted.body);
+        let proof_id = serde_json::from_str::<serde_json::Value>(&submitted.body).unwrap()["proof_id"]
             .as_str()
             .unwrap()
             .to_string();

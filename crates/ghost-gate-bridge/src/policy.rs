@@ -22,14 +22,21 @@
 //! bridge to spend anything at all — the wallet picks the qualifying input, inside the gate's own
 //! resource, and the caller cannot influence which.
 
-use ghost_gate_core::Hash32;
 use serde::{Deserialize, Serialize};
+use tari_template_lib_types::Hash32;
 
 use crate::gate_registry::GateBinding;
 use crate::session::{BookError, ChallengeBook};
 
 /// What a browser asks for when it wants to prove access.
+///
+/// `deny_unknown_fields` is load-bearing rather than tidy. Without it, serde drops a field it does not
+/// know and the request proceeds -- so a caller that sends `amount`, `resource` or `utxos` believing it
+/// is steering the spend would get a `202` and no indication that its input was ignored. Refusing the
+/// request is the only honest answer: it cannot be satisfied, and saying so is better than accepting it
+/// silently.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProveRequest {
     /// The gate id, as the browser was told by `GET /gate/:id`.
     pub gate_id: String,
@@ -212,7 +219,7 @@ mod tests {
     #[test]
     fn an_already_answered_challenge_is_refused() {
         let mut book = book(1);
-        book.consume_on_acceptance(&[1u8; 32], &hex::decode(b"aa").unwrap()).unwrap();
+        book.consume_on_acceptance(&[1u8; 32], b"aa").unwrap();
         assert_eq!(
             validate_prove_request(&binding(), &book, &request(1)).unwrap_err(),
             ProofRefusal::AlreadyAnswered
@@ -235,29 +242,43 @@ mod tests {
     /// case where a stale challenge must not be redeemable at the new, lower bar.
     #[test]
     fn a_challenge_is_refused_once_the_gates_policy_moved() {
-        for (mutate, expected) in [
-            (
-                (|g: &mut GateBinding| g.address = ComponentAddress::new(ObjectKey::from_array([2u8; 32]))),
-                ProofRefusal::GateMismatch,
-            ),
-            (
-                (|g: &mut GateBinding| g.resource = ResourceAddress::new(ObjectKey::from_array([8u8; 32]))),
-                ProofRefusal::ResourceMismatch,
-            ),
-            (|g: &mut GateBinding| g.threshold = 1, ProofRefusal::ThresholdMismatch),
-            (|g: &mut GateBinding| g.network = ghost_gate_core::network::ESMERALDA, ProofRefusal::NetworkMismatch),
-            (
-                (|g: &mut GateBinding| g.relying_site = MaxBytes::new_checked(b"evil.example".to_vec()).unwrap()),
-                ProofRefusal::RelyingSiteMismatch,
-            ),
-        ] {
-            let mut gate = binding();
-            mutate(&mut gate);
-            assert_eq!(
-                validate_prove_request(&gate, &book(1), &request(1)).unwrap_err(),
-                expected
-            );
-        }
+        // Each mutation starts again from the registered binding, so a field is changed in isolation
+        // and one mismatch cannot mask the next.
+        let base = binding();
+        let mut gate = base.clone();
+        gate.address = ComponentAddress::new(ObjectKey::from_array([2u8; 32]));
+        assert_eq!(
+            validate_prove_request(&gate, &book(1), &request(1)).unwrap_err(),
+            ProofRefusal::GateMismatch
+        );
+
+        let mut gate = base.clone();
+        gate.resource = ResourceAddress::new(ObjectKey::from_array([8u8; 32]));
+        assert_eq!(
+            validate_prove_request(&gate, &book(1), &request(1)).unwrap_err(),
+            ProofRefusal::ResourceMismatch
+        );
+
+        let mut gate = base.clone();
+        gate.threshold = 1;
+        assert_eq!(
+            validate_prove_request(&gate, &book(1), &request(1)).unwrap_err(),
+            ProofRefusal::ThresholdMismatch
+        );
+
+        let mut gate = base.clone();
+        gate.network = ghost_gate_core::network::ESMERALDA;
+        assert_eq!(
+            validate_prove_request(&gate, &book(1), &request(1)).unwrap_err(),
+            ProofRefusal::NetworkMismatch
+        );
+
+        let mut gate = base.clone();
+        gate.relying_site = MaxBytes::new_checked(b"evil.example".to_vec()).unwrap();
+        assert_eq!(
+            validate_prove_request(&gate, &book(1), &request(1)).unwrap_err(),
+            ProofRefusal::RelyingSiteMismatch
+        );
     }
 
     #[test]
@@ -282,6 +303,26 @@ mod tests {
         }
         assert_eq!(book.live(), 1);
         assert_eq!(book.answered(), 0);
+    }
+
+    #[test]
+    fn an_unknown_field_is_refused_rather_than_ignored() {
+        // A caller who sends `amount` and gets a 202 would reasonably believe they had asked for an
+        // amount. Silence would be the worst possible answer.
+        for extra in [
+            r#""amount":1"#,
+            r#""resource":"resource_deadbeef""#,
+            r#""utxos":["utxo_a"]"#,
+            r#""destination":"x""#,
+            r#""minimum_value_promise":1"#,
+        ] {
+            let body = format!(r#"{{"gate_id":"g1","challenge_nonce":"{}",other}}"#, "ff".repeat(32));
+            let body = body.replacen("{}", &"ff".repeat(32), 1).replacen(",other", &format!(",{extra}"), 1);
+            assert!(
+                serde_json::from_str::<ProveRequest>(&body).is_err(),
+                "{extra} must not be accepted"
+            );
+        }
     }
 
     #[test]

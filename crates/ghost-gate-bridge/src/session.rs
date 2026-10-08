@@ -110,13 +110,6 @@ impl ChallengeBook {
         Ok(())
     }
 
-    /// Consumes a challenge, marking it answered for good.
-    pub fn consume(&mut self, nonce: &[u8; 32]) -> Result<IssuedChallenge, BookError> {
-        self.check_live(nonce, &[])?;
-        Ok(self.answered.entry(*nonce).or_insert_with(SystemTime::now));
-        Ok(self.entries.remove(nonce).expect("peeked above"))
-    }
-
     /// Consumes a challenge only after its proof has been *accepted*, and only if it belongs to the
     /// session that answered it.
     ///
@@ -213,7 +206,7 @@ pub fn now_unix() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tari_template_lib_types::{ComponentAddress, MaxBytes, ObjectKey, ResourceAddress};
+    use tari_template_lib_types::{ComponentAddress, Hash32, MaxBytes, ObjectKey, ResourceAddress};
 
     fn challenge(nonce: u8) -> Challenge {
         Challenge {
@@ -221,14 +214,12 @@ mod tests {
             resource: ResourceAddress::new(ObjectKey::from_array([7u8; 32])),
             threshold: 10_000,
             network: ghost_gate_core::network::LOCALNET,
-            nonce: Hash32Alias::from_array([nonce; 32]),
+            nonce: Hash32::from_array([nonce; 32]),
             expires_epoch: 1_000,
             relying_site: MaxBytes::new_checked(b"vip.example".to_vec()).unwrap(),
             session_commitment: MaxBytes::new_checked(b"session-1".to_vec()).unwrap(),
         }
     }
-
-    use ghost_gate_core::Hash32 as Hash32Alias;
 
     const TTL: Duration = Duration::from_secs(60);
 
@@ -250,8 +241,9 @@ mod tests {
         assert_eq!(book.answered(), 1);
         assert_eq!(
             book.consume_on_acceptance(&[1u8; 32], b"session-1").unwrap_err(),
-            BookError::Unknown,
-            "a second answer finds nothing"
+            BookError::Consumed,
+            "a second answer finds nothing, and is told it was already answered rather than \
+             that it does not exist -- the more useful of the two refusals"
         );
     }
 

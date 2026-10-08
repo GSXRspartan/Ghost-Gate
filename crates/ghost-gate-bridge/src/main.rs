@@ -13,8 +13,13 @@
 
 use std::process::ExitCode;
 
-use ghost_gate_bridge::{Bridge, GateBinding, GateRegistry, OriginPolicy};
-use ghost_gate_bridge::wallet::WalletChannel;
+use tari_template_lib_types::stealth::StealthTransferStatement;
+
+use ghost_gate_bridge::server::Bridge;
+use ghost_gate_bridge::wallet::{
+    CommitOutcome, StatementReply, WalletChannel, WalletError, WalletStatus,
+};
+use ghost_gate_bridge::{GateBinding, GateRegistry, OriginPolicy};
 
 fn main() -> ExitCode {
     let config = match Config::from_env() {
@@ -71,19 +76,30 @@ fn main() -> ExitCode {
     }
 }
 
+/// A wallet channel that is deliberately not connected.
+///
+/// Exists so the bridge can start, serve its public routes and refuse the rest with an honest reason,
+/// rather than not existing at all. Every method says the same thing, which is the truth: there is no
+/// wallet here.
 struct NoWallet;
+
 impl WalletChannel for NoWallet {
-    async fn status(&self) -> Result<ghost_gate_bridge::WalletStatus, ghost_gate_bridge::WalletError> {
-        Err(ghost_gate_bridge::WalletError::Unreachable("not configured".into()))
+    async fn status(&mut self) -> Result<WalletStatus, WalletError> {
+        Err(WalletError::Unreachable("no wallet daemon is connected to this build".into()))
     }
-    async fn build_statement(&self, _r: ghost_gate_bridge::StatementRequest) -> Result<ghost_gate_bridge::wallet::StatementReply, ghost_gate_bridge::WalletError> {
-        Err(ghost_gate_bridge::WalletError::Unreachable("not configured".into()))
+    async fn build_statement(&mut self, _request: ghost_gate_bridge::StatementRequest) -> Result<StatementReply, WalletError> {
+        Err(WalletError::Unreachable("no wallet daemon is connected to this build".into()))
     }
-    async fn submit(&self, _g: &str, _s: &tari_template_lib_types::StealthTransferStatement, _l: &str) -> Result<String, ghost_gate_bridge::WalletError> {
-        Err(ghost_gate_bridge::WalletError::Unreachable("not configured".into()))
+    async fn submit(
+        &mut self,
+        _gate: &str,
+        _statement: &StealthTransferStatement,
+        _lock_id: &str,
+    ) -> Result<String, WalletError> {
+        Err(WalletError::Unreachable("no wallet daemon is connected to this build".into()))
     }
-    async fn wait(&self, _t: &str, _d: std::time::Duration) -> Result<ghost_gate_bridge::CommitOutcome, ghost_gate_bridge::WalletError> {
-        Err(ghost_gate_bridge::WalletError::Unreachable("not configured".into()))
+    async fn wait(&mut self, _transaction_id: &str, _timeout: std::time::Duration) -> Result<CommitOutcome, WalletError> {
+        Err(WalletError::Unreachable("no wallet daemon is connected to this build".into()))
     }
 }
 

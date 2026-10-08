@@ -130,8 +130,6 @@ fn harness() -> TemplateTest {
 struct Funds {
     resource: ResourceAddress,
     mask: RistrettoSecretKey,
-    /// The mask seed `fund` used, so the matching spend key can be re-derived to sign.
-    seed: u64,
 }
 
 /// Creates a stealth fungible resource with `divisibility` decimal places, minted as one
@@ -196,11 +194,7 @@ fn fund(test: &mut TemplateTest, asset: &Asset, amount: u64, seed: u64) -> Funds
         .as_resource_address()
         .unwrap();
 
-    Funds {
-        resource,
-        mask,
-        seed,
-    }
+    Funds { resource, mask }
 }
 
 /// Deploys a gate over `resource`. Named so repeated deployments in one test do not collide.

@@ -20,8 +20,8 @@
 //! on every proof request, so a challenge minted elsewhere -- or edited in transit -- does not become a
 //! proof here.
 
-use ghost_gate_core::{Challenge, ResourceAddress, network};
-use tari_template_lib_types::{ComponentAddress, Hash32, MaxBytes};
+use ghost_gate_core::{Challenge, network};
+use tari_template_lib_types::{ComponentAddress, Hash32, MaxBytes, ResourceAddress};
 
 use crate::session::{ChallengeBook, IssuedChallenge};
 
@@ -172,8 +172,12 @@ pub struct PublicGate {
 }
 
 /// Copies a session commitment into the bounded form the challenge carries.
+///
+/// `None` for anything over the limit, which the caller turns into "no challenge issued". A session
+/// commitment that does not fit is refused rather than truncated: truncating two different sessions to
+/// the same prefix would bind a proof to the wrong one.
 fn max_bytes(value: &[u8]) -> Option<MaxBytes<64>> {
-    MaxBytes::new_checked(value.to_vec()).ok()
+    MaxBytes::new_checked(value.to_vec())
 }
 
 #[cfg(test)]

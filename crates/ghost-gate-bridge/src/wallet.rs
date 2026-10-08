@@ -28,9 +28,9 @@
 
 use std::time::Duration;
 
-use ghost_gate_core::ResourceAddress;
 use serde::{Deserialize, Serialize};
-use tari_template_lib_types::{Amount, StealthTransferStatement};
+use tari_template_lib_types::{Amount, ResourceAddress};
+use tari_template_lib_types::stealth::StealthTransferStatement;
 
 /// What the bridge knows about the wallet without asking anything sensitive.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,138 +132,39 @@ pub enum WalletError {
 /// Native `async fn` in a trait: this is never used as a trait object, and the alternative — boxing
 /// futures — would add a dependency and a layer of indirection to satisfy a constraint that does not
 /// apply.
+/// `&mut self` rather than `&self`: a wallet client carries connection state, and the bridge serves
+/// one connection at a time, so there is nothing to gain from interior mutability and a plain `&mut`
+/// says what the concurrency actually is.
+///
+/// Native `async fn` in a trait is allowed deliberately. This trait is never used as a trait object --
+/// `Bridge<W>` is generic over it -- so the usual reason to fall back to boxed futures does not apply,
+/// and `async_trait` would be a dependency bought to silence a lint.
+#[allow(async_fn_in_trait)]
 pub trait WalletChannel {
     /// Whether a wallet is reachable and configured, without asking it anything sensitive.
-    async fn status(&self) -> Result<WalletStatus, WalletError>;
+    async fn status(&mut self) -> Result<WalletStatus, WalletError>;
 
     /// Asks the wallet to build a proof statement. The wallet locks its inputs and returns a lock id.
-    async fn build_statement(&self, request: StatementRequest) -> Result<StatementReply, WalletError>;
+    async fn build_statement(&mut self, request: StatementRequest) -> Result<StatementReply, WalletError>;
 
     /// Submits the proof transaction, passing the lock so the wallet derives the signers itself.
-    async fn submit(&self, gate: &str, statement: &StealthTransferStatement, lock_id: &str)
-    -> Result<String, WalletError>;
+    async fn submit(
+        &mut self,
+        gate: &str,
+        statement: &StealthTransferStatement,
+        lock_id: &str,
+    ) -> Result<String, WalletError>;
 
     /// Waits for a submitted transaction and reports what the network committed.
-    async fn wait(&self, transaction_id: &str, timeout: Duration) -> Result<CommitOutcome, WalletError>;
+    async fn wait(&mut self, transaction_id: &str, timeout: Duration) -> Result<CommitOutcome, WalletError>;
 }
 
-/// The production channel: the real `walletd` JSON-RPC client.
-///
-/// Nothing here reaches into the wallet's store, its keyring or its SQLite database. Every call is an
-/// authenticated RPC, and the credentials live in the daemon's own auth, not in this process.
-#[cfg(feature = "walletd")]
-pub mod daemon {
-    use super::{CommitOutcome, InputChoice, StatementReply, StatementRequest, WalletChannel, WalletError, WalletStatus};
-    use std::time::Duration;
-
-    use ghost_gate_core::ResourceAddress;
-    use tari_ootle_walletd_client::{
-        WalletDaemonClient,
-        types::{
-            AccountsCreateStealthTransferStatementRequest, InputSelection, TransactionSubmitRequest,
-            TransactionWaitResultRequest, TransferOutput, TransferStatementRequest,
-        },
-    };
-
-    /// A channel to a wallet daemon over authenticated JSON-RPC.
-    pub struct WalletDaemonChannel {
-        client: WalletDaemonClient,
-    }
-
-    impl WalletDaemonChannel {
-        /// Connects to a wallet daemon, obtaining a JWT the way the daemon's own auth intends.
-        pub async fn connect(jwt: &str, base_url: &str) -> Result<Self, WalletError> {
-            let client = WalletDaemonClient::new(base_url, jwt)
-                .await
-                .map_err(|e| WalletError::Unreachable(e.to_string()))?;
-            Ok(Self { client })
-        }
-    }
-
-    impl WalletChannel for WalletDaemonChannel {
-        async fn status(&self) -> Result<WalletStatus, WalletError> {
-            let account = self
-                .client
-                .accounts_get_default()
-                .await
-                .map_err(|e| WalletError::Unreachable(e.to_string()))?;
-            Ok(WalletStatus {
-                reachable: true,
-                has_default_account: true,
-                network: 0,
-                network_name: String::new(),
-            })
-        }
-
-        async fn build_statement(&self, request: StatementRequest) -> Result<StatementReply, WalletError> {
-            let account = self
-                .client
-                .accounts_get_default()
-                .await
-                .map_err(|e| WalletError::Refused(e.to_string()))?
-                .account;
-
-            let selection = match request.selection {
-                InputChoice::WalletSelected => InputSelection::FromBucket {
-                    revealed_amount: request.input_revealed,
-                },
-                InputChoice::Named(addresses) => InputSelection::Specific {
-                    utxo_addresses: addresses,
-                },
-            };
-
-            let response = self
-                .client
-                .accounts_create_stealth_transfer_statement(AccountsCreateStealthTransferStatementRequest {
-                    requests: vec![TransferStatementRequest {
-                        sender_account: Default::default(),
-                        resource_address: request.resource,
-                        input_selection: selection,
-                        outputs: vec![TransferOutput {
-                            // The output goes back to the proving account. The caller cannot choose a
-                            // destination, so a proof can never also be a payment.
-                            address: account.address.clone(),
-                            revealed_amount: tari_template_lib_types::Amount::zero(),
-                            blinded_amount: 0,
-                            memo: None,
-                            pay_to: tari_ootle_wallet_crypto::pay_to::PayTo::StealthPublicKey,
-                            minimum_value_promise: request.minimum_value_promise,
-                        }],
-                    }],
-                })
-                .await
-                .map_err(|e| WalletError::Refused(e.to_string()))?;
-
-            let statement = response
-                .statements
-                .into_iter()
-                .next()
-                .ok_or_else(|| WalletError::Refused("the wallet returned no statement".into()))?;
-            let signer_count = response.utxo_signers.len();
-            Ok(StatementReply {
-                statement,
-                lock_id: response.lock_id,
-                signer_count,
-            })
-        }
-
-        async fn submit(
-            &self,
-            gate: &str,
-            statement: &tari_template_lib_types::StealthTransferStatement,
-            lock_id: &str,
-        ) -> Result<String, WalletError> {
-            let _ = (gate, statement, lock_id);
-            Err(WalletError::Refused(
-                "submission is wired per-deployment; see docs/GATE4_RESULTS.md".into(),
-            ))
-        }
-
-        async fn wait(&self, _transaction_id: &str, _timeout: Duration) -> Result<CommitOutcome, WalletError> {
-            Err(WalletError::Unreachable("not wired".into()))
-        }
-    }
-}
+// NOTE ON THE PRODUCTION CHANNEL
+// --------------------------
+// There is deliberately no walletd implementation in this file. One was written and removed: it could
+// not be run in this environment, and shipping signing code that has never been executed is exactly the
+// failure mode this project has avoided elsewhere. `WalletChannel` is the seam a real implementation
+// fills, and `docs/GATE4_RESULTS.md` records the channel as NOT WIRED rather than implying otherwise.
 
 #[cfg(test)]
 mod tests {
