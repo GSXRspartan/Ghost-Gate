@@ -2,6 +2,28 @@
 
 **The gate that decides whether this product exists.**
 
+## The frozen milestone
+
+```text
+commit  1a0b2824f443aaa91457be494d2006a5687b2a69
+tag     gate3-green  (annotated)
+```
+
+This is the Gate 3 milestone, frozen. Everything below is evidence measured at or before that commit.
+Later work in this repository -- generalising Ghost Gate to arbitrary stealth fungible resources, the
+local wallet bridge, the interactive frontend and the native-XTM research -- starts from this tag and
+must leave it intact: it is the reference point for "what was proven before the product shape changed".
+
+Re-verified at the tag on 2026-10-07:
+
+```text
+scripts/gg_test.sh test -p ghost-gate-tests --test gate_engine -- --test-threads=2
+test result: ok. 30 passed; 0 failed
+
+scripts/verify_patches.sh            ALL CHECKS PASSED
+scripts/check_gate3_integration.sh   ALL CHECKS PASSED
+```
+
 ## The statement under test
 
 ```text
