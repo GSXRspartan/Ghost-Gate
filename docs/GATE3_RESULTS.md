@@ -2,6 +2,96 @@
 
 **The gate that decides whether this product exists.**
 
+## Generalisation re-measurement, 2026-10-07
+
+The `@ghost_gate` scenario was re-run after the Gate 4 generalisation commit (`b69e34a`), on the same
+cohort, with the same harness, and now covers **two scenarios**:
+
+```text
+scripts/ootle_e2e.sh -- --tags "@ghost_gate"
+
+[Summary]
+1 feature
+2 scenarios (2 passed)
+48 steps (48 passed)
+```
+
+| Scenario | What it proves |
+| --- | --- |
+| A wallet proves control of native tTARI to a gate, and cannot prove it twice | the control case: the cohort's own native stealth resource, gate read back on chain, receipt, replay refused |
+| A wallet proves control of a resource created on chain to a gate over that resource | the generalisation claim: a resource **created in the scenario**, with a caller-chosen symbol and divisibility, backing a gate exactly as native tTARI does |
+
+### The second resource, as the network reported it
+
+```text
+created stealth resource resource_5161236c4a402a14303a92562737748f0cd122fa42e3831aec7f32c6fca44fc7
+    (GHOSTTEST, divisibility 2) held by component_510245845d18b031fce6f5a1ec9f22329cba92c4a978106d0f48dce152e7e588
+
+account ACCOUNT funded with 400000 of GHOSTTEST into
+    utxo_5161236c4a402a14303a92562737748f0cd122fa42e3831aec7f32c6fca44fc7_2c713522a4aaf79f2b219d869b5033d3d71d63c0537e5e0bbed2d717d8b2a67e:0
+
+ghost gate deployed at component_f222f57006413994f7161a77f999105a2f9edd1446700c4c80b796a1c79ffa01
+    over GHOSTTEST (resource_5161236c…44fc7), threshold 10000
+```
+
+The validator's block transaction executor, for the committed proof:
+
+```text
+Transaction 29262bbfdd28c25a6804b3fc69664452dae6477f73ae4220c0c27de4d0907e83 executed in 10.82ms.
+  Accept(2 up, 1 down)
+the committed proof emitted 3 event(s): ["std.vault.pay_fee", "GhostGate.GG", "std.component.updated"]
+receipt read back from the committed event:
+  ProofReceipt { attested_minimum: 10000, input_count: 1, challenge_nonce: Hash32([67, 67, …]) }
+```
+
+`Accept`, not a submission response: a validator executed that transaction and included it. Two up and
+one down — the gate's component state and the qualifying output in, the spent UTXO out.
+
+**The receipt is the whole privacy claim, and it is unchanged by the resource being user-created.** The
+raw threshold was `10000`, which on a divisibility-2 asset is *fifty whole GHOSTTEST*. The amount
+actually proven over was `400000` raw units — *four hundred whole GHOSTTEST*. The receipt reports
+`attested_minimum: 10000` and `input_count: 1`; the real amount appears nowhere in it. A user-created
+asset discloses no more than native tTARI does, which is the thing a "created on chain" claim could
+easily have got wrong.
+
+Gate state, read by calling its accessors on chain:
+
+```text
+the ghost gate GATE2 reports GHOSTTEST as its resource
+the ghost gate GATE2 reports divisibility 2
+the ghost gate GATE2 reports 1 proofs accepted
+the ghost gate GATE2 reports the nonce of challenge CHALLENGE2 as burnt
+```
+
+The first two are new steps added for this phase. They matter because they show the gate returns the
+**resource address** it was configured with and the **divisibility it read off chain**, rather than a
+name or a caller-supplied figure — and that a divisibility of 2, unlike tTARI's 6, changes nothing about
+the threshold comparison.
+
+And the replay, from a fresh statement, sharing nothing but the nonce:
+
+```text
+Transaction 87f113c4bd81f782737c26548385e95804c8fd84b19e8212b72dec08ef22eb09 executed in 13.34ms.
+  AcceptFee(2 up, 1 down), Reject Execution failure (TemplateError): At instruction #1:
+  Template error: GG: challenge nonce has already been used
+```
+
+### Two bugs this found, both mine and both real
+
+1. **`DanglingResources: 1 dangling address allocations remain after transaction execution`** on the
+   resource-creation step. The faucet's `new_resource` derives its own address with `.create()` and
+   takes no allocation argument, so the `allocate_component_address` the step issued was never
+   consumed. Only `GhostGate::new` takes an allocation, because *its* address has to be predictable to
+   the relying site.
+2. **`no resource was recorded under GHOSTTEST`** on the funding step. The resource and the faucet
+   component were recorded under each other's names, so the asset lookup found a component where it
+   expected a resource.
+
+Neither was caught by a type checker, and neither would have been caught by the engine suite. They are
+recorded because they are the cost of adding a scenario to a harness whose steps are string-matched
+against a feature file, and because the first run's failure mode (`DanglingResources`, after the resource
+had already been created) would have been easy to misread as a consensus problem.
+
 ## The frozen milestone
 
 ```text
