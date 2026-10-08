@@ -13,7 +13,16 @@
 //! behind that commitment is proven to lie in `[minimum_value_promise, 2^64)` by the aggregated
 //! bulletproof. That is a proof of control of *at least* X, never of an exact amount.
 //!
-//! What is NOT proven, and cannot be: that the qualifying output belongs to the prover. A stealth
+//! # Which resources a gate can watch
+//!
+//! Any **stealth fungible** Ootle resource, identified by its resource address. tTARI is one
+//! instance of that class, not a special case: the gate never reads a token symbol, a token name or a
+//! divisibility, and a resource created by any user works exactly as native tTARI does. What the gate
+//! requires is the property that produces the proof -- a per-output hidden value with a public lower
+//! bound -- and that exists only for [`ResourceClass::StealthFungible`]. Public and confidential
+//! fungible resources and non-fungibles are refused at construction, by name.
+//!
+//! # What is NOT proven, and cannot be: that the qualifying output belongs to the prover. A stealth
 //! output is spendable by whoever holds its spend key, and only the creator learns that key. The
 //! gate can require the output be *key-spendable*; it cannot require it be *the caller's*. See
 //! `docs/PRIVACY_MODEL.md`.
@@ -43,15 +52,38 @@ pub const MAX_RELYING_SITE_LEN: usize = 64;
 /// Longest accepted session commitment, in bytes.
 pub const MAX_SESSION_COMMITMENT_LEN: usize = 64;
 
-/// Network byte identifying Tari's live testnet cohort.
+/// The Ootle network byte for each cohort.
 ///
-/// Ootle's `Network` enum starts at `Esmeralda = 0` for mainnet and continues through the testnet
-/// cohorts; `Next` is the value a freshly built transaction carries and is what a template sees for
-/// a transaction that has not been pinned to a specific cohort. Recorded rather than assumed: a
-/// template has no host call that reports the network, so the network binding is enforced by the
-/// validator admitting the transaction at all, and by this constant only checking that the prover
-/// and the gate agree. See `docs/V042_SOURCE_TRACE.md`, finding 31.
-pub const NETWORK_BYTE: u8 = 0;
+/// Transcribed from `ootle_network::Network` (`#[repr(u8)]`, `as_byte()` is `self as u8`) in the
+/// pinned v0.42.0 cohort, `crates/ootle_network/src/lib.rs`. Deliberately spelled out rather than
+/// taken from the crate: this crate compiles to WASM inside a template, and a *named* constant is
+/// checked by a reader against the enum, where a bare `0` is not.
+///
+/// ```text
+/// MainNet    = 0x00        StageNet   = 0x01        NextNet = 0x02
+/// LocalNet   = 0x10        Igor       = 0x24        Esmeralda = 0x26
+/// ```
+pub mod network {
+    pub const MAINNET: u8 = 0x00;
+    pub const STAGENET: u8 = 0x01;
+    pub const NEXTNET: u8 = 0x02;
+    pub const LOCALNET: u8 = 0x10;
+    pub const IGOR: u8 = 0x24;
+    /// The current public testnet cohort, and the SDK's `#[default]`.
+    pub const ESMERALDA: u8 = 0x26;
+
+    /// Every cohort byte Ghost Gate will accept as a plausible network binding.
+    ///
+    /// An unrecognised byte is still comparable -- the gate stores whatever the deploying site chose
+    /// -- so this is a sanity list for callers, not a gate rule.
+    pub const ALL: [u8; 6] = [MAINNET, STAGENET, NEXTNET, LOCALNET, IGOR, ESMERALDA];
+
+    /// Whether `byte` names a cohort in [`ALL`].
+    pub const fn is_known(byte: u8) -> bool {
+        byte == MAINNET || byte == STAGENET || byte == NEXTNET || byte == LOCALNET || byte == IGOR ||
+            byte == ESMERALDA
+    }
+}
 
 /// The relying site's one-shot challenge.
 ///
@@ -106,6 +138,60 @@ impl Challenge {
     }
 }
 
+/// The class of an Ootle resource, as a gate needs to reason about it.
+///
+/// Ghost Gate's guarantee is produced by a stealth bulletproof over
+/// `[minimum_value_promise, 2^64)`. Only a **stealth** resource has such a proof to produce, so
+/// only a stealth resource can be denominated in a threshold. The other three classes are named
+/// here so a gate can refuse them *at construction* with a specific reason rather than accept a
+/// configuration that can never be satisfied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceClass {
+    /// Balance is public. A threshold can be proven with a plain balance check, but the balance
+    /// would be visible, which is the opposite of the product.
+    PublicFungible,
+    /// Balance is hidden inside vaults, revealed per-output with its own proof. Not a stealth
+    /// output: there is no per-output `minimum_value_promise` to pin a floor to.
+    ConfidentialFungible,
+    /// Individually identifiable and indivisible. There is no amount to threshold.
+    NonFungible,
+    /// Per-output hidden value with a public `minimum_value_promise` and an aggregated bulletproof.
+    /// The only class Ghost Gate supports.
+    StealthFungible,
+}
+
+impl ResourceClass {
+    /// Whether Ghost Gate can prove a threshold in this class.
+    pub const fn is_supported(self) -> bool {
+        matches!(self, Self::StealthFungible)
+    }
+
+    /// A short, stable name for the class, used in refusal messages.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PublicFungible => "public fungible",
+            Self::ConfidentialFungible => "confidential fungible",
+            Self::NonFungible => "non-fungible",
+            Self::StealthFungible => "stealth fungible",
+        }
+    }
+}
+
+/// What a gate records about the resource it watches, read from chain at construction.
+///
+/// `divisibility` is **presentation only**. It is recorded so a relying site can render
+/// `1,000,000 GHOSTTEST` instead of `1000000`, and it never enters a comparison. The consensus
+/// comparison is `attested_minimum >= threshold` on raw units, which is correct for a divisibility
+/// of 0 and of 18 alike. Keeping the two apart is what stops a rounding error in a UI from becoming
+/// a gate that accepts the wrong amount.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceProfile {
+    /// Which class of resource this is.
+    pub class: ResourceClass,
+    /// Decimal places the resource's smallest unit is divisible into. Display only.
+    pub divisibility: u8,
+}
+
 /// A gate's immutable policy, fixed at construction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, CborLen)]
 pub struct GatePolicy {
@@ -118,6 +204,63 @@ pub struct GatePolicy {
     /// Whether the gate is currently accepting proofs.
     #[n(2)]
     pub open: bool,
+    /// Chain identity this gate is bound to.
+    ///
+    /// Per-gate rather than a compile-time constant, because the same template is published on every
+    /// cohort: a gate deployed on LocalNet must bind to LocalNet and a gate deployed on Esmeralda to
+    /// Esmeralda, and one baked-in byte cannot be both.
+    ///
+    /// What this still does **not** prove: a template has no host call that reports the network, so
+    /// this is a self-consistency check between the deploying site and the prover's challenge, not
+    /// an attestation of which chain executed. The real network binding is that the validator
+    /// admitted the transaction at all. See `docs/V042_SOURCE_TRACE.md`, finding 31.
+    #[n(3)]
+    pub network: u8,
+}
+
+/// Everything a gate is configured with at construction.
+///
+/// The generalized constructor shape. A gate binds to a *resource address* and a *threshold*, not to
+/// a token: the resource address is the security identity, and the symbol and name beside it are
+/// presentation the gate never reads. Amounts are `u64` in the resource's own smallest unit -- never
+/// floating point, because a threshold that has been through a float is not a threshold any more.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateParams {
+    /// The resource the threshold is denominated in. Authority, not a display string.
+    pub resource: ResourceAddress,
+    /// The minimum hidden value, in the resource's smallest unit, a proof must carry.
+    pub threshold: u64,
+    /// Opaque relying-site identity. The gate only compares it.
+    pub relying_site: MaxBytes<MAX_RELYING_SITE_LEN>,
+    /// Opaque browser-session commitment. The gate only compares it.
+    pub session_commitment: MaxBytes<MAX_SESSION_COMMITMENT_LEN>,
+    /// Chain identity this gate is bound to. See [`network`] for the byte values.
+    pub network: u8,
+}
+
+impl GateParams {
+    /// Validates the configuration and produces the policy to store.
+    ///
+    /// The two refusals here are the ones that would otherwise produce a gate that looks deployed
+    /// and can never do anything useful:
+    /// - a threshold of zero, which every statement trivially clears;
+    /// - a resource class with no per-output `minimum_value_promise`, which has no proof to verify.
+    pub fn into_policy(self, profile: &ResourceProfile) -> Result<GatePolicy, GateError> {
+        if self.threshold == 0 {
+            return Err(GateError::ThresholdNotPositive);
+        }
+        if !profile.class.is_supported() {
+            return Err(GateError::UnsupportedResource {
+                class: profile.class,
+            });
+        }
+        Ok(GatePolicy {
+            resource: self.resource,
+            threshold: self.threshold,
+            open: true,
+            network: self.network,
+        })
+    }
 }
 
 /// Everything a gate learned from a single accepted proof.
@@ -144,6 +287,10 @@ pub struct ProofReceipt {
 /// relying site without either re-implementing the rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GateError {
+    /// The gate was configured with a threshold of zero.
+    ThresholdNotPositive,
+    /// The gate was configured over a resource class with no per-output minimum value promise.
+    UnsupportedResource { class: ResourceClass },
     /// The gate is not accepting proofs.
     GateClosed,
     /// The challenge names a different gate.
@@ -188,6 +335,8 @@ impl GateError {
     /// A stable, human-readable reason, used as the template's panic message.
     pub const fn reason(self) -> &'static str {
         match self {
+            Self::ThresholdNotPositive => "GG: threshold must be positive",
+            Self::UnsupportedResource { .. } => "GG: a gate can only be denominated in a stealth fungible resource",
             Self::GateClosed => "GG: gate is not accepting proofs",
             Self::WrongGate => "GG: challenge is for a different gate",
             Self::WrongResource => "GG: challenge resource does not match gate policy",
@@ -213,6 +362,9 @@ impl GateError {
 impl core::fmt::Display for GateError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::UnsupportedResource { class } => {
+                write!(f, "{} (resource class: {})", self.reason(), class.as_str())
+            },
             Self::BelowThreshold { attested, required } => {
                 write!(f, "{} (attested {attested}, required {required})", self.reason())
             },
@@ -244,8 +396,6 @@ pub struct GateContext<'a> {
     pub self_address: ComponentAddress,
     /// The consensus epoch the transaction is executing in.
     pub current_epoch: u64,
-    /// The network byte the challenge must carry.
-    pub current_network: u8,
     /// The relying-site identifier configured at gate construction.
     pub relying_site: &'a [u8],
     /// The browser-session commitment configured at gate construction.
@@ -274,7 +424,7 @@ pub fn check_challenge(
     if challenge.threshold != policy.threshold {
         return Err(GateError::ThresholdMismatch);
     }
-    if challenge.network != ctx.current_network {
+    if challenge.network != policy.network {
         return Err(GateError::NetworkMismatch);
     }
     if challenge.relying_site.as_slice() != ctx.relying_site {
@@ -425,12 +575,16 @@ mod tests {
 
     const RESOURCE: ResourceAddress = ResourceAddress::new(ObjectKey::from_array([7u8; ObjectKey::LENGTH]));
 
+    /// The cohort these tests pretend to run on. Any cohort works, because the point of the tests is
+    /// that the gate compares the challenge against *its own* configured byte.
+    const NETWORK: u8 = network::LOCALNET;
+
     fn challenge() -> Challenge {
         Challenge {
             gate: ComponentAddress::new(ObjectKey::from_array([1u8; ObjectKey::LENGTH])),
             resource: RESOURCE,
             threshold: 10_000,
-            network: NETWORK_BYTE,
+            network: NETWORK,
             nonce: Hash32::zero(),
             expires_epoch: 100,
             relying_site: MaxBytes::new_checked(b"vip.example".to_vec()).unwrap(),
@@ -443,6 +597,7 @@ mod tests {
             resource: RESOURCE,
             threshold: 10_000,
             open: true,
+            network: NETWORK,
         }
     }
 
@@ -450,7 +605,6 @@ mod tests {
         GateContext {
             self_address: ComponentAddress::new(ObjectKey::from_array([1u8; ObjectKey::LENGTH])),
             current_epoch: 1,
-            current_network: NETWORK_BYTE,
             relying_site: b"vip.example",
             session_commitment: b"session-1",
         }
@@ -482,7 +636,7 @@ mod tests {
         assert_ne!(base, mutated.commitment(), "threshold");
 
         let mut mutated = challenge();
-        mutated.network = NETWORK_BYTE.wrapping_add(1);
+        mutated.network = NETWORK.wrapping_add(1);
         assert_ne!(base, mutated.commitment(), "network");
 
         let mut mutated = challenge();
@@ -552,10 +706,14 @@ mod tests {
 
     #[test]
     fn wrong_network_is_refused() {
-        let mut ctx = ctx();
-        ctx.current_network = NETWORK_BYTE.wrapping_add(1);
+        // The gate is bound to the network it was deployed for, so a challenge minted for another
+        // cohort cannot be redeemed here.
+        let mut policy = policy();
+        policy.network = network::LOCALNET;
+        let mut challenge = challenge();
+        challenge.network = network::ESMERALDA;
         assert_eq!(
-            check_challenge(&policy(), &challenge(), &ctx, false),
+            check_challenge(&policy, &challenge, &ctx(), false),
             Err(GateError::NetworkMismatch)
         );
     }
@@ -597,5 +755,111 @@ mod tests {
         .to_string();
         assert!(text.contains("4000"), "{text}");
         assert!(text.contains("10000"), "{text}");
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // General resources
+    // -----------------------------------------------------------------------------------------
+
+    fn params() -> GateParams {
+        GateParams {
+            resource: RESOURCE,
+            threshold: 10_000,
+            relying_site: MaxBytes::new_checked(b"vip.example".to_vec()).unwrap(),
+            session_commitment: MaxBytes::new_checked(b"session-1".to_vec()).unwrap(),
+            network: NETWORK,
+        }
+    }
+
+    fn profile(class: ResourceClass, divisibility: u8) -> ResourceProfile {
+        ResourceProfile { class, divisibility }
+    }
+
+    #[test]
+    fn only_the_stealth_fungible_class_is_supported() {
+        assert!(ResourceClass::StealthFungible.is_supported());
+        assert!(!ResourceClass::PublicFungible.is_supported());
+        assert!(!ResourceClass::ConfidentialFungible.is_supported());
+        assert!(!ResourceClass::NonFungible.is_supported());
+    }
+
+    #[test]
+    fn any_stealth_fungible_resource_can_back_a_gate() {
+        // Divisibility is a presentation property. Three resources with three different
+        // divisibilities produce three identical gates, because nothing in the comparison uses it.
+        for divisibility in [0u8, 2, 6, 18] {
+            let policy = params()
+                .into_policy(&profile(ResourceClass::StealthFungible, divisibility))
+                .expect("a stealth fungible resource is supported at any divisibility");
+            assert_eq!(policy.threshold, 10_000);
+        }
+    }
+
+    #[test]
+    fn an_unsupported_resource_class_is_refused_at_construction() {
+        for class in [
+            ResourceClass::PublicFungible,
+            ResourceClass::ConfidentialFungible,
+            ResourceClass::NonFungible,
+        ] {
+            assert_eq!(
+                params().into_policy(&profile(class, 6)),
+                Err(GateError::UnsupportedResource { class }),
+                "{} must not be able to back a gate",
+                class.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn a_zero_threshold_is_refused() {
+        let mut params = params();
+        params.threshold = 0;
+        assert_eq!(
+            params.into_policy(&profile(ResourceClass::StealthFungible, 6)),
+            Err(GateError::ThresholdNotPositive)
+        );
+    }
+
+    #[test]
+    fn the_policy_records_the_network_it_was_built_for() {
+        let policy = GateParams { network: network::ESMERALDA, ..params() }
+            .into_policy(&profile(ResourceClass::StealthFungible, 6))
+            .expect("supported resource");
+        assert_eq!(policy.network, network::ESMERALDA);
+
+        // And a gate built for one cohort refuses another cohort's challenge.
+        let mut challenge = challenge();
+        challenge.network = network::LOCALNET;
+        assert_eq!(
+            check_challenge(&policy, &challenge, &ctx(), false),
+            Err(GateError::NetworkMismatch)
+        );
+    }
+
+    #[test]
+    fn the_unsupported_class_refusal_names_the_class() {
+        let text = GateError::UnsupportedResource {
+            class: ResourceClass::NonFungible,
+        }
+        .to_string();
+        assert!(text.contains("non-fungible"), "{text}");
+        assert!(text.contains("stealth fungible"), "{text}");
+    }
+
+    #[test]
+    fn the_cohort_bytes_match_the_ootle_network_enum() {
+        // Transcribed from ootle_network::Network in the pinned cohort. If the cohort ever renumbers,
+        // this is the line that tells us rather than the one that silently ships.
+        assert_eq!(network::MAINNET, 0x00);
+        assert_eq!(network::STAGENET, 0x01);
+        assert_eq!(network::NEXTNET, 0x02);
+        assert_eq!(network::LOCALNET, 0x10);
+        assert_eq!(network::IGOR, 0x24);
+        assert_eq!(network::ESMERALDA, 0x26);
+        assert!(network::is_known(network::ESMERALDA));
+        assert!(!network::is_known(0x03));
+        // Distinct, so `wrong_network_is_refused` cannot accidentally pass on equal bytes.
+        assert_ne!(network::ESMERALDA, network::LOCALNET);
     }
 }

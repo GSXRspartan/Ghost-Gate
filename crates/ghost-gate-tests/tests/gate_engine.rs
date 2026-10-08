@@ -6,7 +6,7 @@
 //! Every case here runs through `tari_engine` via `TemplateTest`. A rule proven only in
 //! `ghost-gate-core`'s unit tests is a rule nobody has checked against consensus yet.
 
-use ghost_gate_core::{Challenge, GateContext, NETWORK_BYTE, ProofReceipt, qualify};
+use ghost_gate_core::{Challenge, GateContext, ProofReceipt, network, qualify};
 use ootle_byte_type::{FromByteType, ToByteType};
 use tari_crypto::{
     keys::{PublicKey, SecretKey},
@@ -55,10 +55,10 @@ const SESSION: &[u8] = b"session-1";
 /// `#[n(i)]` struct as an array indexed by field number:
 ///
 /// ```text
-/// $.0 policy   $.1 relying_site   $.2 session_commitment
-/// $.3 burnt_nonces   $.4 proofs_accepted
+/// $.0 policy   $.1 divisibility   $.2 relying_site   $.3 session_commitment
+/// $.4 burnt_nonces   $.5 proofs_accepted
 /// ```
-const GATE_PROOFS_ACCEPTED_PATH: &str = "$.4";
+const GATE_PROOFS_ACCEPTED_PATH: &str = "$.5";
 
 /// The epoch tests execute in. The bootstrap leaves the virtual substate at 0, which would make an
 /// "expired" challenge impossible to express, since expiry compares `current_epoch > expires_epoch`.
@@ -76,9 +76,19 @@ fn session_id() -> MaxBytes<64> {
 }
 const THRESHOLD: u64 = 10_000;
 
-/// The threshold in microtari is 10,000 tTARI's smallest unit would be 10_000_000; the test uses a
-/// smaller figure so amounts stay readable. One tTARI is a million microtari.
-const TARI: u64 = 1_000_000;
+/// The Ootle cohort the engine tests execute in.
+///
+/// The gate binds to the network it is deployed for, so this is a constructor argument rather than a
+/// constant baked into the template: the same WASM is published on every cohort and each deployment
+/// names its own.
+const NETWORK: u8 = network::LOCALNET;
+
+/// Decimal places of the resource this file's gates watch.
+///
+/// The cohort's own native stealth tTARI has divisibility 6. Matching it here is a convenience, not
+/// a requirement: nothing in the gate reads divisibility, and `cross_resource.rs` proves that by
+/// driving gates over resources whose divisibility differs from this one and from each other.
+const TEST_DIVISIBILITY: u8 = 6;
 
 /// What the wallet owns when it proves access. Comfortably above the threshold, so the only thing
 /// separating acceptance from refusal is the promise, not the balance.
@@ -155,7 +165,7 @@ let total: u64 = amounts.iter().sum();
             .call_function(
                 faucet_addr,
                 "new",
-                args!["GGTEST".to_string(), Amount::from(total), statement],
+                args!["GGTEST".to_string(), TEST_DIVISIBILITY, Amount::from(total), statement],
             )
             .build_and_seal(test.secret_key()),
         vec![],
@@ -227,7 +237,7 @@ fn deploy_gate_named(test: &mut TemplateTest, name: &str, resource: ResourceAddr
             .call_function(
                 template_addr,
                 "new",
-                args![Workspace(name), resource, threshold, site_id(), session_id()],
+                args![Workspace(name), resource, threshold, site_id(), session_id(), NETWORK],
             )
             .build_and_seal(test.secret_key()),
         vec![],
@@ -247,7 +257,7 @@ fn challenge_for(gate: ComponentAddress, resource: ResourceAddress, threshold: u
         gate,
         resource,
         threshold,
-        network: NETWORK_BYTE,
+        network: NETWORK,
         nonce: Hash32::from_array([7u8; 32]),
         expires_epoch: 1_000,
         relying_site: site_id(),
@@ -659,7 +669,7 @@ fn a_challenge_for_another_network_is_refused() {
     let funds = fund(&mut test, &account_key, &[30_000], &[]);
     let gate = deploy_gate(&mut test, funds.resource, THRESHOLD);
     let mut challenge = challenge_for(gate, funds.resource, THRESHOLD);
-    challenge.network = NETWORK_BYTE.wrapping_add(1);
+    challenge.network = network::ESMERALDA;
 
     let input_sk = derive_input_spend_key(&account_key, 0);
     let reason = test.execute_expect_failure(
@@ -1094,11 +1104,11 @@ fn the_shared_rules_agree_with_the_template() {
         resource: funds.resource,
         threshold: THRESHOLD,
         open: true,
+        network: NETWORK,
     };
     let ctx = GateContext {
         self_address: gate,
         current_epoch: TEST_EPOCH,
-        current_network: NETWORK_BYTE,
         relying_site: RELYING_SITE,
         session_commitment: SESSION,
     };
@@ -1128,12 +1138,21 @@ fn the_shared_rules_agree_with_the_template() {
     ));
 }
 
-/// One tTARI is a million microtari, so the README's "= 10,000 tTARI" is 10^10 microtari.
+/// The gate's threshold is a raw amount in the resource's own smallest unit, and it stays that way.
+///
+/// This replaces an earlier test that asserted the README's arithmetic. That test was the bug: it
+/// re-derived `10,000 tTARI = 10^10 microtari` while the deployed threshold was the raw integer
+/// `10_000`, so the document and the chain disagreed by 10^6 and the test blessed the disagreement.
+/// Consensus compares raw integers; only a screen divides. See `docs/RESOURCE_SUPPORT.md`.
 #[test]
-fn the_documented_example_is_consistent() {
-    assert_eq!(TARI, 1_000_000);
-    assert_eq!(10_000u64 * TARI, 10_000_000_000, "10,000 tTARI in microtari");
-    assert!(THRESHOLD < TARI, "the test threshold is a sub-tTARI figure, kept readable");
+fn the_threshold_is_a_raw_amount_not_a_display_figure() {
+    // The chain holds 10_000. With this resource's divisibility that renders as 0.010000 units --
+    // which is the whole point of never letting a formatted string near a threshold.
+    assert_eq!(THRESHOLD, 10_000);
+    assert_eq!(
+        ghost_gate_verifier::display::format_amount(THRESHOLD, TEST_DIVISIBILITY),
+        "0.010000"
+    );
 }
 
 /// The document's receipt shape matches what the shared rules emit.
@@ -1145,6 +1164,7 @@ fn the_receipt_has_exactly_three_fields() {
         resource: ResourceAddress::new(ObjectKey::from_array([7u8; ObjectKey::LENGTH])),
         threshold: THRESHOLD,
         open: true,
+        network: NETWORK,
     };
     let challenge = challenge_for(
         ComponentAddress::new(ObjectKey::from_array([1u8; ObjectKey::LENGTH])),
@@ -1154,7 +1174,6 @@ fn the_receipt_has_exactly_three_fields() {
     let ctx = GateContext {
         self_address: challenge.gate,
         current_epoch: 1,
-        current_network: NETWORK_BYTE,
         relying_site: RELYING_SITE,
         session_commitment: SESSION,
     };

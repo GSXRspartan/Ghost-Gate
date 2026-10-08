@@ -12,6 +12,9 @@ publish = false
 
 [dev-dependencies]
 ghost-gate-core = { path = "../ghost-gate-core" }
+# The off-chain relying-side crate, used here for its `display` module: the tests assert that a
+# threshold renders from raw units and divisibility without either entering a consensus rule.
+ghost-gate-verifier = { path = "../ghost-gate-verifier" }
 tari_template_test_tooling = { workspace = true }
 tari_engine_types = { workspace = true }
 tari_ootle_transaction = { workspace = true }

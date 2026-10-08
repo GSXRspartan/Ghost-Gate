@@ -5,8 +5,12 @@
 > Prove you control enough without revealing exactly how much.
 
 Ghost Gate is a private threshold access system for [Tari Ootle](https://github.com/tari-project/tari-ootle).
-It lets a user prove control of at least a configured amount of private Tari at access time, without
-revealing the exact amount.
+It lets a user prove control of at least a configured amount of a **supported Ootle stealth fungible
+resource** at access time, without revealing the exact amount.
+
+tTARI is one such resource, not a special case. A gate binds to a **resource address** and a **raw
+integer threshold**; it never reads a token symbol, a token name or a divisibility. Any stealth
+fungible resource works, including one a user created themselves. See `docs/RESOURCE_SUPPORT.md`.
 
 ```text
 GHOST GATE
@@ -14,7 +18,8 @@ GHOST GATE
 VIP Vault
 
 Requirement:
-≥ 10,000 tTARI
+≥ 1,000,000 GHOSTTEST
+  resource_230e244ddc1b61fe8803d1c4d77df336b7a0b1e0e795739894b49d4de358a006
 
 [ PROVE ACCESS ]
 
@@ -24,6 +29,9 @@ QUALIFIED ✓
 Exact balance:
 NOT DISCLOSED
 ```
+
+The number on screen is the raw threshold formatted with the resource's own divisibility. Consensus
+compares the raw integer; only a display divides.
 
 The threshold is enforced **inside an Ootle template**, under consensus. A relying site cannot
 reinterpret the cryptography: if a proof is accepted, every validator that executed the transaction
@@ -45,11 +53,15 @@ the October 2026 Spooky Secrets build contest; nothing predates the theme announ
 | Area | State | Where |
 |---|---|---|
 | MVP binding: the promise is covered by the range proof | PROVEN | `docs/GATE1_RESULTS.md` |
-| Statement-shape rules (no revealed amounts, one output, key-spendable, balance proof) | PROVEN | `docs/GATE2_RESULTS.md` |
-| Challenge binding, single-use, replay refusal | PROVEN (off-chain) | `ghost-gate-verifier` tests |
-| Template enforcement under the engine | IN PROGRESS | `docs/GATE2_RESULTS.md` |
-| Ordinary wallet funds through the component | NOT PROVEN | `docs/GATE3_RESULTS.md` |
-| Live network submission | NOT ATTEMPTED | `docs/GATE0_RESULTS.md` |
+| Statement-shape rules (no revealed amounts, one output, key-spendable, balance proof) | PROVEN | `gate_engine.rs` |
+| Template enforcement under the engine | PROVEN | `gate_engine.rs`, 30/30 |
+| Ordinary wallet funds through the component | PROVEN | `gate_engine.rs`, `a_wallet_built_statement_satisfies_the_gate` |
+| Live network submission, validator-committed, replay refused | PROVEN | `docs/GATE3_RESULTS.md`, `@ghost_gate` |
+| Any stealth fungible resource, any divisibility | PROVEN | `cross_resource.rs`, `@ghost_gate` scenario 2 |
+| Unsupported resource classes refused by name | PROVEN | `cross_resource.rs` |
+| GHSA-pp4v-v773-9qxg reconciled and backported | PROVEN | `docs/GATE3_RESULTS.md`, 48/48 |
+| Local wallet bridge, interactive frontend | see `docs/GATE4_RESULTS.md` |
+| Native Minotari XTM backend, no Ootle burn | research only — see `docs/XTM_RESEARCH.md` |
 
 `PROVEN` means a test in this repository demonstrates it. It never means simulated.
 
@@ -127,6 +139,8 @@ obstacles that were hit rather than anticipated.
 ```text
 ghost-gate/
 ├── templates/ghost_gate/                    the on-chain template
+├── templates/ghost_gate_faucet/             test fixture: creates stealth resources and outputs
+├── templates/ghost_gate_other_classes/       test fixture: creates the resource classes we refuse
 ├── crates/
 │   ├── ghost-gate-core/                     qualification rules shared by template and verifier
 │   ├── ghost-gate-wallet/                   wallet-side statement assembly

@@ -22,7 +22,10 @@
 
 use tari_template_lib::prelude::*;
 
-use ghost_gate_core::{Challenge, GateContext, GatePolicy, MARK, NETWORK_BYTE, ProofReceipt, qualify};
+use ghost_gate_core::{
+    Challenge, GateContext, GateParams, GatePolicy, MARK, ProofReceipt, ResourceClass, ResourceProfile,
+    qualify,
+};
 
 /// The Ghost Gate component.
 #[template]
@@ -33,8 +36,13 @@ mod template {
 
     /// A private threshold access gate.
     pub struct GhostGate {
-        /// Immutable policy: which resource, what threshold, and the relying site this gate serves.
+        /// Immutable policy: which resource, what threshold, and which chain this gate serves.
         policy: GatePolicy,
+        /// Decimal places of the gate's resource. **Presentation only.** Stored so a relying site can
+        /// render `1,000,000 GHOSTTEST` without a second lookup, and read by no rule: the
+        /// consensus comparison is `attested_minimum >= threshold` on raw units, which is the same
+        /// comparison whether the asset has 0 decimal places or 18.
+        divisibility: u8,
         /// Opaque identifier of the relying site this gate serves. A challenge naming a different
         /// site is refused, so a proof cannot be redeemed elsewhere.
         relying_site: MaxBytes<64>,
@@ -50,11 +58,25 @@ mod template {
     }
 
     impl GhostGate {
-        /// Creates a gate for `resource` requiring at least `threshold` of its hidden value.
+        /// Creates a gate requiring at least `threshold` of `resource`'s hidden value.
+        ///
+        /// `resource` is any **stealth fungible** resource, named by address. Native tTARI is one
+        /// such resource; a resource created by any user is another, and the gate cannot tell the
+        /// difference because it never looks at a symbol or a name. The resource's own chain state
+        /// decides whether it qualifies: a public fungible, a confidential fungible or an NFT is
+        /// refused here, by name, because none of them has a per-output `minimum_value_promise` and
+        /// so none of them has a proof for this gate to verify.
+        ///
+        /// `threshold` is a raw amount in the resource's own smallest unit. No floating point ever
+        /// touches it.
         ///
         /// `allocation` is allocated by the caller. A component address derived inside the template
         /// collides across two deployments in the same transaction sequence, and a relying site
         /// running several gates needs distinct, predictable addresses anyway.
+        ///
+        /// `network` is the Ootle cohort this gate is deployed on, as its byte (see
+        /// `ghost_gate_core::network`). It binds a challenge to one chain. It is a self-consistency
+        /// check rather than an attestation: a template has no host call that reports the network.
         ///
         /// `relying_site` and `session_commitment` are opaque to the gate: it only compares them.
         /// They exist so a challenge is bound to one site and one browser session.
@@ -64,16 +86,34 @@ mod template {
             threshold: u64,
             relying_site: MaxBytes<64>,
             session_commitment: MaxBytes<64>,
+            network: u8,
         ) -> Component<Self> {
-            if threshold == 0 {
-                panic!("GG: threshold must be positive");
+            // Read the resource from chain before deciding anything about it. This is the only
+            // place the gate looks at a resource: the address is the identity, and the chain's
+            // record of that address is what says whether the class can carry a threshold proof.
+            let info = ResourceManager::get(resource).resource_info();
+
+            let policy = GateParams {
+                resource,
+                threshold,
+                relying_site: relying_site.clone(),
+                session_commitment: session_commitment.clone(),
+                network,
             }
-            Component::new(Self {
-                policy: GatePolicy {
-                    resource,
-                    threshold,
-                    open: true,
+            .into_policy(&ResourceProfile {
+                class: match info.resource_type {
+                    ResourceType::Fungible => ResourceClass::PublicFungible,
+                    ResourceType::Confidential => ResourceClass::ConfidentialFungible,
+                    ResourceType::NonFungible => ResourceClass::NonFungible,
+                    ResourceType::Stealth => ResourceClass::StealthFungible,
                 },
+                divisibility: info.divisibility,
+            })
+            .unwrap_or_else(|e| panic!("{e}"));
+
+            Component::new(Self {
+                policy,
+                divisibility: info.divisibility,
                 relying_site,
                 session_commitment,
                 burnt_nonces: BTreeMap::new(),
@@ -112,10 +152,6 @@ mod template {
                 &GateContext {
                     self_address: CallerContext::current_component_address(),
                     current_epoch: epoch,
-                    // A template has no host call that reports the network, so the transaction's own
-                    // network byte is the only value available. The relying site pins it to the
-                    // cohort it deployed against; see docs/V042_SOURCE_TRACE.md finding 31.
-                    current_network: NETWORK_BYTE,
                     relying_site: self.relying_site.as_slice(),
                     session_commitment: self.session_commitment.as_slice(),
                 },
@@ -160,8 +196,30 @@ mod template {
         }
 
         /// The resource the threshold is denominated in.
+        ///
+        /// The security identity of the asset. A relying site resolves display names from this
+        /// address and must never from a symbol a caller supplied.
         pub fn resource(&self) -> ResourceAddress {
             self.policy.resource
+        }
+
+        /// Decimal places of the gate's resource, for rendering only.
+        ///
+        /// No rule reads this. It is exposed so a UI can format the threshold as a person would write
+        /// it without a second chain round-trip, and so a *mismatch* between the site and the gate is
+        /// detectable rather than silently rounding.
+        pub fn divisibility(&self) -> u8 {
+            self.divisibility
+        }
+
+        /// The Ootle cohort byte this gate is bound to.
+        pub fn network(&self) -> u8 {
+            self.policy.network
+        }
+
+        /// Whether the gate is currently accepting proofs.
+        pub fn is_open(&self) -> bool {
+            self.policy.open
         }
 
         /// How many proofs this gate has accepted.

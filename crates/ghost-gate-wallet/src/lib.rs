@@ -77,9 +77,15 @@ pub struct ProofRequest {
 
 impl ProofRequest {
     /// Rejects a request the wallet cannot honestly fulfil.
+    ///
+    /// Every comparison is on raw units of the gate's own resource. The wallet never sees a symbol,
+    /// a name or a display amount, because none of them can decide whether this statement qualifies.
     pub fn validate(&self, policy: &GatePolicy) -> Result<(), AssembleError> {
         if self.inputs.is_empty() {
             return Err(AssembleError::NoInputs);
+        }
+        if self.resource != policy.resource {
+            return Err(AssembleError::RequestResourceMismatch);
         }
         let total: u64 = self
             .inputs
@@ -100,6 +106,12 @@ impl ProofRequest {
         if self.challenge.threshold != policy.threshold {
             return Err(AssembleError::ChallengeThresholdMismatch);
         }
+        if self.challenge.network != policy.network {
+            return Err(AssembleError::NetworkMismatch {
+                challenge: self.challenge.network,
+                gate: policy.network,
+            });
+        }
         Ok(())
     }
 }
@@ -112,10 +124,14 @@ pub enum AssembleError {
     InsufficientFunds { available: u64, required: u64 },
     #[error("GG: output value {value} is below the gate threshold {threshold}")]
     OutputBelowThreshold { value: u64, threshold: u64 },
+    #[error("GG: the proof request names a different resource than the gate")]
+    RequestResourceMismatch,
     #[error("GG: challenge names a different resource than the gate")]
     ChallengeResourceMismatch,
     #[error("GG: challenge names a different threshold than the gate")]
     ChallengeThresholdMismatch,
+    #[error("GG: challenge names network {challenge} but the gate is bound to {gate}")]
+    NetworkMismatch { challenge: u8, gate: u8 },
     #[error("GG: crypto failure while assembling the proof: {0}")]
     Crypto(String),
 }
@@ -257,17 +273,21 @@ pub fn absent_revealed_receiver() -> Option<RistrettoPublicKeyBytes> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ghost_gate_core::{GatePolicy, NETWORK_BYTE};
+    use ghost_gate_core::network;
     use tari_template_lib_types::{ComponentAddress, Hash32, MaxBytes, ObjectKey};
 
     const RESOURCE: ResourceAddress = ResourceAddress::new(ObjectKey::from_array([7u8; ObjectKey::LENGTH]));
     const GATE: ComponentAddress = ComponentAddress::new(ObjectKey::from_array([1u8; ObjectKey::LENGTH]));
+
+    /// The cohort these fixtures pretend to run on.
+    const NETWORK: u8 = network::LOCALNET;
 
     fn policy() -> GatePolicy {
         GatePolicy {
             resource: RESOURCE,
             threshold: 10_000,
             open: true,
+            network: NETWORK,
         }
     }
 
@@ -277,7 +297,7 @@ mod tests {
                 gate: GATE,
                 resource: RESOURCE,
                 threshold: 10_000,
-                network: NETWORK_BYTE,
+                network: network::LOCALNET,
                 nonce: Hash32::from_array([5u8; 32]),
                 expires_epoch: 1_000,
                 relying_site: MaxBytes::new_checked(b"vip.example".to_vec()).unwrap(),
@@ -418,5 +438,70 @@ mod tests {
         assert_eq!(statement.outputs_statement.outputs.len(), 1);
         assert!(statement.balance_proof.is_some());
         assert!(statement.covenant_claims.is_empty(), "key-path inputs join no covenant partition");
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // The wallet is resource- and network-agnostic: same code, any stealth fungible gate
+    // -----------------------------------------------------------------------------------------
+
+    /// A second resource address, standing in for a different user-created asset.
+    const OTHER_RESOURCE: ResourceAddress =
+        ResourceAddress::new(ObjectKey::from_array([8u8; ObjectKey::LENGTH]));
+
+    #[test]
+    fn the_same_assembler_serves_a_second_resource() {
+        // Nothing in the assembly path names a resource: the same request shape, pointed at a
+        // different gate over a different resource, produces a statement carrying that gate's
+        // threshold.
+        let other_policy = GatePolicy { resource: OTHER_RESOURCE, ..policy() };
+        let mut request = request(40_000, 40_000);
+        request.resource = OTHER_RESOURCE;
+        request.challenge.resource = OTHER_RESOURCE;
+
+        let statement = assemble_proof_statement(&request, &other_policy).unwrap();
+        assert_eq!(
+            statement.outputs_statement.outputs[0]
+                .output
+                .minimum_value_promise,
+            other_policy.threshold,
+            "the promise is the second gate's own threshold, not a constant"
+        );
+    }
+
+    #[test]
+    fn a_request_naming_another_resource_is_refused() {
+        // A wallet holding plenty of one asset must not be talked into building a statement for a
+        // gate over a different one.
+        let mut request = request(25_000, 25_000);
+        request.resource = OTHER_RESOURCE;
+        assert_eq!(
+            assemble_proof_statement(&request, &policy()).unwrap_err(),
+            AssembleError::RequestResourceMismatch
+        );
+    }
+
+    #[test]
+    fn a_challenge_naming_another_resource_is_refused() {
+        let mut request = request(25_000, 25_000);
+        request.challenge.resource = OTHER_RESOURCE;
+        assert_eq!(
+            assemble_proof_statement(&request, &policy()).unwrap_err(),
+            AssembleError::ChallengeResourceMismatch
+        );
+    }
+
+    #[test]
+    fn a_challenge_for_another_network_is_refused() {
+        // The gate is bound to one cohort. A challenge minted for another is not redeemable here, and
+        // the wallet refuses it before building anything rather than leaving consensus to refuse it.
+        let mut request = request(25_000, 25_000);
+        request.challenge.network = network::ESMERALDA;
+        assert_eq!(
+            assemble_proof_statement(&request, &policy()).unwrap_err(),
+            AssembleError::NetworkMismatch {
+                challenge: network::ESMERALDA,
+                gate: network::LOCALNET,
+            }
+        );
     }
 }

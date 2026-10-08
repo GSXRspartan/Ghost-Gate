@@ -30,9 +30,21 @@ mod faucet {
     impl GhostGateFaucet {
         /// Creates a stealth resource with `initial_supply` and converts the mint into the
         /// stealth outputs described by `mint`.
-        pub fn new(symbol: String, initial_supply: Amount, mint: StealthTransferStatement) -> Component<Self> {
+        ///
+        /// `symbol` and `divisibility` are presentation. The resource *address* is what a gate binds
+        /// to and the only thing any of these tests treats as identity; the two are exposed here so a
+        /// test can build a second asset that differs from the first in the ways a real user-created
+        /// asset differs -- a different symbol and a different number of decimal places -- and so
+        /// prove the gate is unaffected by either.
+        pub fn new(
+            symbol: String,
+            divisibility: u8,
+            initial_supply: Amount,
+            mint: StealthTransferStatement,
+        ) -> Component<Self> {
             let bucket = ResourceBuilder::stealth()
                 .with_token_symbol(symbol)
+                .with_divisibility(divisibility)
                 .mintable(rule!(allow_all), OWNER)
                 .withdrawable(rule!(allow_all), OWNER)
                 .initial_supply(initial_supply);
@@ -46,6 +58,30 @@ mod faucet {
             Component::new(Self {
                 manager: resource_address.into(),
                 supply_vault: Vault::from_bucket(revealed),
+            })
+            .with_access_rules(AccessRules::allow_all())
+            .create()
+        }
+
+        /// Creates the resource alone, holding `initial_supply` without minting it into any stealth
+        /// output.
+        ///
+        /// `new` cannot be used when the outputs have to be built by a wallet rather than by the
+        /// test: a stealth output's tag is derived by its *sender* from the resource address, and the
+        /// resource address does not exist until this faucet has executed. So a wallet-funded asset
+        /// needs the resource created first and the outputs minted afterwards, which is `this` then
+        /// [`GhostGateFaucet::mint`].
+        pub fn new_resource(symbol: String, divisibility: u8, initial_supply: Amount) -> Component<Self> {
+            let bucket = ResourceBuilder::stealth()
+                .with_token_symbol(symbol)
+                .with_divisibility(divisibility)
+                .mintable(rule!(allow_all), OWNER)
+                .withdrawable(rule!(allow_all), OWNER)
+                .initial_supply(initial_supply);
+            let resource_address = bucket.resource_address();
+            Component::new(Self {
+                manager: resource_address.into(),
+                supply_vault: Vault::from_bucket(bucket),
             })
             .with_access_rules(AccessRules::allow_all())
             .create()
@@ -68,6 +104,16 @@ mod faucet {
 
         pub fn resource(&self) -> ResourceAddress {
             self.manager.resource_address()
+        }
+
+        /// The resource's decimal places, as recorded on chain.
+        pub fn divisibility(&self) -> u8 {
+            self.manager.divisibility()
+        }
+
+        /// Which class of resource this faucet created, as recorded on chain.
+        pub fn resource_type(&self) -> ResourceType {
+            self.manager.resource_type()
         }
     }
 }

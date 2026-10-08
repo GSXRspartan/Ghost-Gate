@@ -6,7 +6,7 @@
 # on a real localnet means adding files to the cohort tree. Those additions are vendored copies plus three
 # edits, and this script is what keeps that honest:
 #
-#   1. the template's src/lib.rs is byte-identical to ghost-gate/templates/ghost_gate/src/lib.rs
+#   1. both vendored templates' src/lib.rs are byte-identical to their ghost-gate/templates originals
 #   2. the qualification rules are byte-identical to ghost-gate/crates/ghost-gate-core/src/lib.rs
 #   3. the patched cohort differs from the pristine reference in exactly three accounted-for ways:
 #        - the files the two documented patches touch: docs/wallet-mvp.patch and
@@ -50,6 +50,7 @@ while IFS=: read -r src dst; do
   fi
 done <<EOF
 $REPO/templates/ghost_gate/src/lib.rs:$COHORT/integration_tests/src/templates/ghost_gate/src/lib.rs
+$REPO/templates/ghost_gate_faucet/src/lib.rs:$COHORT/integration_tests/src/templates/ghost_gate_faucet/src/lib.rs
 $REPO/crates/ghost-gate-core/src/lib.rs:$COHORT/integration_tests/src/ghost_gate_core/src/lib.rs
 EOF
 
@@ -78,7 +79,7 @@ is_gate3_entry() {
   case "$1" in
     Files\ *"/integration_tests/Cargo.toml"* | Files\ *"/integration_tests/src/lib.rs"* | Files\ *"/integration_tests/tests/steps/mod.rs"*) return 0 ;;
     Files\ *"/Cargo.lock"*) return 0 ;; # the cohort lockfile gains the vendored core as a path package
-    Only\ in\ *"/integration_tests/src: ghost_gate_core"* | Only\ in\ *"/integration_tests/src/templates: ghost_gate"* | Only\ in\ *"/integration_tests/tests/steps: ghost_gate.rs"* | Only\ in\ *"/integration_tests/tests/features: ghost_gate.feature"*) return 0 ;;
+    Only\ in\ *"/integration_tests/src: ghost_gate_core"* | Only\ in\ *"/integration_tests/src/templates: ghost_gate"* | Only\ in\ *"/integration_tests/src/templates: ghost_gate_faucet"* | Only\ in\ *"/integration_tests/tests/steps: ghost_gate.rs"* | Only\ in\ *"/integration_tests/tests/features: ghost_gate.feature"*) return 0 ;;
     *) return 1 ;;
   esac
 }

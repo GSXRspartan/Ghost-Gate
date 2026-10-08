@@ -144,9 +144,19 @@ cannot be. Anything a site decides is a usability matter, not a security matter.
 |---|---|
 | **Attack** | Claim a different network. |
 | **Consequence** | A mainnet proof used for a testnet gate, or the reverse. |
-| **Mitigation** | The challenge's network byte is compared against a constant. |
+| **Mitigation** | The challenge's network byte is compared against the byte the gate was deployed for, as a constructor argument rather than a compile-time constant. |
 | **Layer** | Template — partially. |
 | **Residual** | **Real gap.** No template can observe the network (`V042_SOURCE_TRACE.md` finding 31). This catches a prover and gate *disagreeing*; it cannot catch a transaction admitted on the wrong chain. The validator is the layer that actually enforces this, and it is outside Ghost Gate. |
+
+---
+
+| | |
+|---|---|
+| **Attack** | Redeem a proof at a gate over a different asset, using funds from an asset you hold. |
+| **Consequence** | Holding 1 token of a worthless asset satisfies a gate demanding 1,000,000 tTARI. |
+| **Mitigation** | None is needed in the gate, and none is attempted there. A stealth UTXO's on-chain address is `(resource, commitment)`, and the engine resolves every spent input under the *gate's* resource address, so a first-asset output submitted to a second-asset gate resolves to a UTXO that does not exist. The gate never inspects the statement's resource, and deliberately so. |
+| **Layer** | Ootle engine. |
+| **Residual** | None for the threshold itself. A relying site that displays a threshold against the wrong resource would confuse a user without weakening consensus — so a site must read `GhostGate::resource` from chain, and never from a caller-supplied symbol. Covered by `cross_resource.rs::a_statement_spending_another_resource_is_refused_even_when_the_challenge_agrees`. |
 
 ---
 

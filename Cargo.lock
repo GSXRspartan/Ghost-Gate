@@ -1744,6 +1744,7 @@ name = "ghost-gate-tests"
 version = "0.1.0"
 dependencies = [
  "ghost-gate-core",
+ "ghost-gate-verifier",
  "hex",
  "ootle-network",
  "ootle_byte_type",

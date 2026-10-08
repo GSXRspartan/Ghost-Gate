@@ -151,12 +151,22 @@ accept.
 
 ## Cross-network binding is weaker than intended
 
-`ghost_gate_core::NETWORK_BYTE` is a constant, compared against the challenge's network field. A
-template has no host call that reports the network
+The gate stores the network byte it was deployed for (`GhostGate::new`'s `network` argument) and
+compares the challenge's network byte against it. A template has no host call that reports the network
 (`docs/V042_SOURCE_TRACE.md` finding 31), so this catches a *prover and gate disagreeing* about the
 network and nothing more.
 
 Detecting a transaction admitted on the wrong chain belongs to the validator, outside Ghost Gate's
-reach. The V1 statement is "this challenge and this gate agree on the network byte", not "this
-transaction was validated on network X". Recorded as a residual risk in
-`docs/THREAT_MODEL.md`.
+reach. The statement is "this challenge and this gate agree on the network byte", not "this transaction
+was validated on network X". Recorded as a residual risk in `docs/THREAT_MODEL.md`.
+
+**What changed from a single constant, and why it matters.** An earlier revision compared against a
+compile-time `NETWORK_BYTE`. That constant was wrong: it was `0`, which in Ootle's `Network` enum is
+`MainNet`, while its own doc comment claimed it named the Esmeralda testnet (`0x26`). Nothing caught it
+because both sides of every comparison used the same wrong value, so every test passed. The same
+template WASM is published on every cohort, so a single baked-in byte cannot be correct for more than
+one of them. Each deployment now names its own cohort at construction, and
+`ghost_gate_core::network` names each byte explicitly so a reader can check it against the enum.
+
+The weakness described above is unchanged and is not fixed by this: it was never the constant that
+limited the check, it was the absence of an observable network.

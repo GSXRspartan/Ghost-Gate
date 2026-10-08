@@ -7,7 +7,7 @@
 //! rule proven here is the rule consensus applies.
 
 use ghost_gate_core::{
-    Challenge, GateContext, GateError, GatePolicy, NETWORK_BYTE, ProofReceipt, find_qualifying_output, qualify,
+    Challenge, GateContext, GateError, GatePolicy, ProofReceipt, network, qualify,
 };
 use ootle_byte_type::ToByteType;
 use tari_crypto::{
@@ -27,11 +27,15 @@ const RESOURCE: ResourceAddress = ResourceAddress::new(ObjectKey::from_array([7u
 const GATE: ComponentAddress = ComponentAddress::new(ObjectKey::from_array([1u8; ObjectKey::LENGTH]));
 const THRESHOLD: u64 = 10_000;
 
+/// The cohort these fixtures pretend to run on.
+const NETWORK: u8 = network::LOCALNET;
+
 fn policy() -> GatePolicy {
     GatePolicy {
         resource: RESOURCE,
         threshold: THRESHOLD,
         open: true,
+        network: NETWORK,
     }
 }
 
@@ -40,7 +44,7 @@ fn challenge() -> Challenge {
         gate: GATE,
         resource: RESOURCE,
         threshold: THRESHOLD,
-        network: NETWORK_BYTE,
+        network: NETWORK,
         nonce: Hash32::from_array([42u8; 32]),
         expires_epoch: 1_000,
         relying_site: MaxBytes::new_checked(b"vip.example".to_vec()).unwrap(),
@@ -52,7 +56,6 @@ fn ctx() -> GateContext<'static> {
     GateContext {
         self_address: GATE,
         current_epoch: 5,
-        current_network: NETWORK_BYTE,
         relying_site: b"vip.example",
         session_commitment: b"session-1",
     }
@@ -144,12 +147,20 @@ fn mutating_mvp_after_proof_breaks_validation() {
 }
 
 /// MVP > value cannot even be constructed: the wallet refuses before any proof is made.
+///
+/// The SDK reports this as `Err`, not a panic, and names the conflict in the proof constructor's own
+/// words. Matching on "minimum value is larger than value" rather than on a field name is deliberate:
+/// the caller asked for a promise, and the reason it gets back is about promises and values, not about
+/// a struct field it never passed.
 #[test]
 fn mvp_above_value_is_refused_at_construction() {
     let out = output(100, 101);
     let err = stealth::create_outputs_statement([&out], None).unwrap_err();
     let text = err.to_string().to_lowercase();
-    assert!(text.contains("minimum_value_promise"), "{text}");
+    assert!(
+        text.contains("minimum value is larger than value"),
+        "the refusal must say the promise exceeds the value, got: {text}"
+    );
 }
 
 /// Many fragmented inputs are one proof, not many. The receipt counts them but the gate accepts a
@@ -236,15 +247,22 @@ fn revealed_output_is_refused() {
 }
 
 /// Two outputs means "which one was the proof" has two answers. Refuse rather than pick.
+///
+/// Each output clears the threshold on its own, so nothing but the ambiguity rule can refuse this.
+/// That forces the amounts: a promise may not exceed its own value, and with nothing revealed the
+/// outputs must sum to the inputs, so two qualifying outputs need at least `2 * THRESHOLD` between
+/// them. A smaller pair could not promise what it holds, and would be refused for being below the
+/// threshold instead — which would make this test pass without ever reaching the rule it names.
 #[test]
 fn ambiguous_multiple_outputs_are_refused() {
-    let a = output(6_000, 6_000);
-    let b = output(6_000, 6_000);
+    let a = output(THRESHOLD, THRESHOLD);
+    let b = output(THRESHOLD, THRESHOLD);
     let input_mask = RistrettoSecretKey::random(&mut rand::rng());
+    let total = 2 * THRESHOLD;
     let statement = stealth::create_transfer_statement(
         [StealthInputWitness::new(MaskAndValue {
             mask: input_mask,
-            value: 12_000,
+            value: total,
         })],
         Amount::zero(),
         [&a, &b],
@@ -252,8 +270,8 @@ fn ambiguous_multiple_outputs_are_refused() {
     )
     .unwrap();
 
-    // Both outputs meet the threshold on their own, so nothing but the ambiguity rule can refuse it.
     assert!(a.witness.minimum_value_promise >= THRESHOLD);
+    assert!(b.witness.minimum_value_promise >= THRESHOLD);
     assert_eq!(
         qualify(&policy(), &challenge(), &statement, &ctx(), false),
         Err(GateError::TooManyOutputs)

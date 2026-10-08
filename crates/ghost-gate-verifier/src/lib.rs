@@ -12,13 +12,24 @@
 //! - one-time consumption, so a committed proof yields exactly one session;
 //! - finality gating, so a pending or rejected transaction yields nothing;
 //! - short-lived sessions whose meaning is "the user proved control around login time", not "the
-//!   user holds funds now".
+//!   user holds funds now";
+//! - resource *presentation*: rendering a raw amount with the resource's own divisibility.
+//!
+//! # Presentation lives here, not in the gate
+//!
+//! Formatting a threshold as `1,000,000 GHOSTTEST` needs the resource's divisibility and its symbol.
+//! Neither belongs in a consensus rule, and neither is trustworthy input: a symbol is chosen by whoever
+//! created the resource, and a site that let a caller name the token would let a caller name the asset.
+//! So [`display`] renders from the *address*, the divisibility the gate read off chain, and a symbol
+//! the site resolved itself -- and everything it produces is for a human, never for a comparison.
 
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ghost_gate_core::Challenge;
 use sha2::{Digest, Sha256};
+
+pub mod display;
 
 /// How long a prover has to produce a proof after being issued a challenge.
 pub const DEFAULT_CHALLENGE_TTL: Duration = Duration::from_secs(180);
@@ -237,7 +248,7 @@ pub fn now_unix() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ghost_gate_core::NETWORK_BYTE;
+    use ghost_gate_core::network;
     use tari_template_lib_types::{ComponentAddress, Hash32, MaxBytes, ObjectKey, ResourceAddress};
 
     const RESOURCE: ResourceAddress = ResourceAddress::new(ObjectKey::from_array([7u8; ObjectKey::LENGTH]));
@@ -248,7 +259,7 @@ mod tests {
             gate: GATE,
             resource: RESOURCE,
             threshold: 10_000,
-            network: NETWORK_BYTE,
+            network: network::LOCALNET,
             nonce: Hash32::from_array([nonce; 32]),
             expires_epoch: 1_000,
             relying_site: MaxBytes::new_checked(b"vip.example".to_vec()).unwrap(),
