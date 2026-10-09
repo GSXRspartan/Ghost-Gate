@@ -220,13 +220,19 @@ impl<W: WalletChannel> Bridge<W> {
             started_at: std::time::SystemTime::now(),
         });
 
-        // Ask the wallet for a statement in the *gate's* resource, promising the *gate's* threshold.
-        // Neither value came from the caller.
+        // An empty `Named` rather than `WalletSelected`. `Named(vec![])` is the honest encoding of what
+        // this request actually says: no input was specified, and the resource and promise are the
+        // gate's. The adapter fills the gap by qualifying the gate resource's own unspent outputs inside
+        // the local bridge, so no UTXO identifier ever comes from the caller.
+        //
+        // `WalletSelected` is refused by the adapter and must not be constructed here. It is unusable
+        // because the engine resolves a spent input under the gate's resource and refuses a transaction
+        // that does not declare every substate it spends -- see `wallet::InputChoice`.
         let statement = StatementRequest {
             resource: gate.resource,
             input_revealed: tari_template_lib_types::Amount::from(gate.threshold),
             minimum_value_promise: gate.threshold,
-            selection: crate::wallet::InputChoice::WalletSelected,
+            selection: crate::wallet::InputChoice::Named(Vec::new()),
         };
 
         let reply = match self.wallet.build_statement(statement).await {
@@ -241,7 +247,12 @@ impl<W: WalletChannel> Bridge<W> {
 
         match self
             .wallet
-            .submit(&gate.address.to_string(), &reply.statement, &reply.lock_id)
+            .submit(
+                &gate.address.to_string(),
+                &challenge,
+                &reply.statement,
+                &reply.lock_id,
+            )
             .await
         {
             Ok(transaction_id) => {
@@ -399,6 +410,8 @@ mod tests {
         /// Every selection strategy the bridge used.
         selections: Vec<InputChoice>,
         reachable: bool,
+        /// Every gate the bridge asked to submit, with the challenge nonce that was submitted.
+        submitted: Vec<(String, [u8; 32])>,
     }
 
     impl FakeWallet {
@@ -420,6 +433,7 @@ mod tests {
                 asked: Vec::new(),
                 selections: Vec::new(),
                 reachable: true,
+                submitted: Vec::new(),
             }
         }
     }
@@ -434,7 +448,7 @@ mod tests {
         }
         async fn build_statement(&mut self, request: StatementRequest) -> Result<StatementReply, WalletError> {
             self.asked.push((request.resource, request.minimum_value_promise));
-            self.selections.push(request.selection);
+            self.selections.push(request.selection.clone());
             if let Err(e) = &self.build_result {
                 return Err(WalletError::Refused(e.clone()));
             }
@@ -446,10 +460,14 @@ mod tests {
         }
         async fn submit(
             &mut self,
-            _gate: &str,
+            gate: &str,
+            challenge: &ghost_gate_core::Challenge,
             _statement: &StealthTransferStatement,
             _lock_id: &str,
         ) -> Result<String, WalletError> {
+            // Recorded so a test can assert the nonce the bridge submitted is the one it issued: a
+            // proof of some *other* challenge would be the failure worth catching here.
+            self.submitted.push((gate.to_string(), challenge.nonce.into_array())); // `gate` is `&str`.
             self.submit_result.clone().map_err(WalletError::Refused)
         }
         async fn wait(&mut self, _transaction_id: &str, _timeout: Duration) -> Result<CommitOutcome, WalletError> {
@@ -620,11 +638,186 @@ mod tests {
         assert_eq!(r.status, 202, "{}", r.body);
 
         assert_eq!(b.wallet.asked, vec![(binding().resource, binding().threshold)]);
+        // `Named(vec![])`, not `WalletSelected`: an empty named set means "no input was specified",
+        // which is what a request body can actually say, and the adapter fills it in by qualifying the
+        // gate resource's own unspent outputs locally. Nothing named here came from the caller.
         assert_eq!(
             b.wallet.selections,
-            vec![InputChoice::WalletSelected],
-            "input selection stays with the wallet; the site is not told what it chose"
+            vec![InputChoice::Named(vec![])],
+            "the request carries no UTXO and no destination: an empty Named means the adapter picks an \
+             input of the gate's own resource itself, locally"
         );
+    }
+
+    #[tokio::test]
+    async fn a_wallet_that_will_not_build_a_statement_reports_a_failed_job_not_an_error() {
+        // The fail-closed path end to end. A channel that declines to build a statement must not take
+        // the bridge down, and must not report a proof id that looks like progress -- the job is
+        // `Failed` and carries the reason, so a site cannot mistake a refusal for a pending proof. This
+        // is the route a real `WalletDaemonChannel` takes when it refuses `WalletSelected`, when no
+        // output of the gate's resource meets the threshold, or when the wallet is unreachable.
+        let mut wallet = FakeWallet::new();
+        wallet.build_result = Err("wallet-chosen inputs are not supported".into());
+        let mut b = bridge(wallet);
+        let (nonce, session) = issue(&mut b).await;
+
+        let r = b
+            .handle(&post(
+                "/gate/g1/prove",
+                serde_json::json!({"gate_id":"g1","challenge_nonce":nonce,"session_commitment":session}),
+            ))
+            .await;
+
+        // 202, not 5xx: the user was not proven to hold enough. Saying so leaks nothing they did not
+        // already know.
+        assert_eq!(r.status, 202, "{}", r.body);
+        let id = serde_json::from_str::<serde_json::Value>(&r.body).unwrap()["proof_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let status = b
+            .handle(&get(&format!("/proof/{id}/status")))
+            .await;
+        let body = status.body;
+        assert!(
+            body.contains("wallet-chosen inputs are not supported"),
+            "the refusal reason must reach the status route: {body}"
+        );
+        assert!(
+            b.wallet.submitted.is_empty(),
+            "nothing may be submitted once the wallet declined to build a statement"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_server_never_constructs_the_unsupported_wallet_selected_path() {
+        // `WalletSelected` is refused by the adapter, so the server must never ask for it. Asserted on
+        // every selection the bridge actually sends rather than by reading the code, so re-introducing
+        // the unusable path fails a policy test instead of shipping transactions consensus rejects.
+        let mut b = bridge(FakeWallet::new());
+        let (nonce, session) = issue(&mut b).await;
+        let r = b
+            .handle(&post(
+                "/gate/g1/prove",
+                serde_json::json!({"gate_id":"g1","challenge_nonce":nonce,"session_commitment":session}),
+            ))
+            .await;
+        assert_eq!(r.status, 202, "{}", r.body);
+
+        assert!(
+            !b.wallet
+                .selections
+                .iter()
+                .any(|s| *s == InputChoice::WalletSelected),
+            "the server must not request wallet-chosen inputs: {:?}",
+            b.wallet.selections
+        );
+        // And nothing the caller sent turned into a named input.
+        assert!(
+            b.wallet
+                .selections
+                .iter()
+                .all(|s| matches!(s, InputChoice::Named(v) if v.is_empty())),
+            "no input may be named from a request: {:?}",
+            b.wallet.selections
+        );
+    }
+
+    #[tokio::test]
+    async fn the_nonce_submitted_is_the_nonce_the_bridge_issued() {
+        // A proof must answer the challenge it was issued for. If the bridge ever submitted a different
+        // nonce, the gate would refuse it, but the failure would be at consensus rather than here -- so
+        // it is checked at the boundary.
+        let mut b = bridge(FakeWallet::new());
+        let (nonce, session) = issue(&mut b).await;
+        let r = b
+            .handle(&post(
+                "/gate/g1/prove",
+                serde_json::json!({"gate_id":"g1","challenge_nonce":nonce,"session_commitment":session}),
+            ))
+            .await;
+        assert_eq!(r.status, 202, "{}", r.body);
+
+        let expected = hex::decode(&nonce).expect("hex nonce");
+        assert_eq!(b.wallet.submitted.len(), 1, "{:?}", b.wallet.submitted);
+        let (gate, submitted_nonce) = &b.wallet.submitted[0];
+        assert_eq!(gate, &binding().address.to_string());
+        assert_eq!(
+            submitted_nonce.as_slice(),
+            expected.as_slice(),
+            "the submitted challenge must be the one issued"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_route_can_return_a_utxo_identifier() {
+        // The relying-site privacy requirement, asserted over every route rather than over one of them.
+        // A UTXO address in any response body would let a site correlate the prover's holdings, so this
+        // walks all eight routes -- including a completed proof and a rejection -- and requires that no
+        // body carries a `utxo_` prefix anywhere.
+        let mut b = bridge(FakeWallet::new());
+        let (nonce, session) = issue(&mut b).await;
+
+        let mut bodies: Vec<(String, String)> = Vec::new();
+        for path in [
+            "/health",
+            "/wallet/status",
+            "/gate/g1",
+            "/gate/other",
+            "/nonsense",
+        ] {
+            bodies.push((path.to_string(), b.handle(&get(path)).await.body));
+        }
+
+        // A challenge response.
+        bodies.push((
+            "/gate/g1/challenge".to_string(),
+            b.handle(&post("/gate/g1/challenge", serde_json::json!({})))
+                .await
+                .body,
+        ));
+
+        // A proof attempt that fails, and one that reaches the wallet and is submitted.
+        bodies.push((
+            "/gate/g1/prove (refused)".to_string(),
+            b.handle(&post(
+                "/gate/g1/prove",
+                serde_json::json!({"gate_id":"g1","challenge_nonce":"00","session_commitment":session}),
+            ))
+            .await
+            .body,
+        ));
+
+        let accepted = b
+            .handle(&post(
+                "/gate/g1/prove",
+                serde_json::json!({"gate_id":"g1","challenge_nonce":nonce,"session_commitment":session}),
+            ))
+            .await;
+        let proof_id = serde_json::from_str::<serde_json::Value>(&accepted.body).unwrap()["proof_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        // Poll to completion so the accepted receipt -- the one response a site actually cares about --
+        // is included in the sweep, not just the pending one.
+        for _ in 0..20 {
+            let status = b.handle(&get(&format!("/proof/{proof_id}/status"))).await;
+            if status.body.contains("\"accepted\"") || status.body.contains("\"rejected\"") {
+                break;
+            }
+        }
+        bodies.push((
+            format!("/proof/{proof_id}/status"),
+            b.handle(&get(&format!("/proof/{proof_id}/status"))).await.body,
+        ));
+
+        for (path, body) in &bodies {
+            assert!(
+                !body.contains("utxo_"),
+                "{path} returned a UTXO identifier: {body}"
+            );
+        }
     }
 
     #[tokio::test]

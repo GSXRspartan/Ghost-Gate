@@ -756,6 +756,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "cookie"
+version = "0.18.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a373e3602691c3cdea496d2f0ee5935151e6168fe87739483c463db1b2f2f87"
+dependencies = [
+ "percent-encoding",
+ "time",
+ "version_check",
+]
+
+[[package]]
+name = "cookie_store"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15b2c103cf610ec6cae3da84a766285b42fd16aad564758459e6ecf128c75206"
+dependencies = [
+ "cookie",
+ "document-features",
+ "idna",
+ "log",
+ "publicsuffix",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "time",
+ "url",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1334,6 +1363,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "780955b8b195a21ab8e4ac6b60dd1dbdcec1dc6c51c0617964b08c81785e12c9"
 
 [[package]]
+name = "document-features"
+version = "0.2.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d4b8a88685455ed29a21542a33abd9cb6510b6b129abadabdcef0f4c55bc8f61"
+dependencies = [
+ "litrs",
+]
+
+[[package]]
 name = "downcast-rs"
 version = "2.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1811,6 +1849,22 @@ dependencies = [
  "tari_ootle_wallet_crypto",
  "tari_template_lib_types",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "ghost-gate-walletd"
+version = "0.1.0"
+dependencies = [
+ "ghost-gate-bridge",
+ "ghost-gate-core",
+ "hex",
+ "rand 0.10.3",
+ "tari_ootle_transaction",
+ "tari_ootle_wallet_sdk",
+ "tari_ootle_walletd_client",
+ "tari_template_lib_types",
+ "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]
@@ -2584,6 +2638,12 @@ name = "litemap"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
+
+[[package]]
+name = "litrs"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "lock_api"
@@ -3414,6 +3474,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "psl-types"
+version = "2.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac"
+
+[[package]]
 name = "ptr_meta"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3431,6 +3497,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
+]
+
+[[package]]
+name = "publicsuffix"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f42ea446cab60335f76979ec15e12619a2165b5ae2c12166bef27d283a9fadf"
+dependencies = [
+ "idna",
+ "psl-types",
 ]
 
 [[package]]
@@ -3739,6 +3815,8 @@ checksum = "16a1cfa75cc186dd73d5818e510e042e40927bccc9c236b061cea97e1eb08029"
 dependencies = [
  "base64 0.23.1",
  "bytes",
+ "cookie",
+ "cookie_store",
  "encoding_rs",
  "futures-core",
  "futures-util",
@@ -4985,6 +5063,31 @@ dependencies = [
  "tari_utilities",
  "time",
  "webauthn-rs",
+]
+
+[[package]]
+name = "tari_ootle_walletd_client"
+version = "0.44.0"
+dependencies = [
+ "hex",
+ "ootle_serde",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tari_crypto",
+ "tari_engine_types",
+ "tari_ootle_address",
+ "tari_ootle_common_types",
+ "tari_ootle_template_metadata",
+ "tari_ootle_transaction",
+ "tari_ootle_wallet_sdk",
+ "tari_template_abi",
+ "tari_template_lib_types",
+ "thiserror 2.0.21",
+ "time",
+ "url",
+ "webauthn-rs-proto",
+ "zeroize",
 ]
 
 [[package]]

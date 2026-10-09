@@ -10,16 +10,22 @@
 //! - it requires at least one permitted browser origin, because a bridge that permits none is a bridge
 //!   no page can use and one that permits everything is the thing this design exists to prevent;
 //! - it does not start without a gate to serve.
+//!
+//! # The wallet
+//!
+//! If `GG_WALLETD_ENDPOINT` is set, the process connects to that wallet daemon and proofs can be
+//! completed. If it is not, the bridge runs with a channel that refuses every wallet operation with an
+//! honest reason, and the public routes still work. The difference is stated on stderr at startup rather
+//! than left to be discovered by a failed proof.
 
 use std::process::ExitCode;
-
-use tari_template_lib_types::stealth::StealthTransferStatement;
 
 use ghost_gate_bridge::server::Bridge;
 use ghost_gate_bridge::wallet::{
     CommitOutcome, StatementReply, WalletChannel, WalletError, WalletStatus,
 };
 use ghost_gate_bridge::{GateBinding, GateRegistry, OriginPolicy};
+use tari_template_lib_types::stealth::StealthTransferStatement;
 
 fn main() -> ExitCode {
     let config = match Config::from_env() {
@@ -50,13 +56,46 @@ fn main() -> ExitCode {
         "  permitted origins: {}",
         config.origins.allowed().collect::<Vec<_>>().join(", ")
     );
-    // Stated plainly rather than discovered later: the wallet channel below is not connected to a live
-    // walletd, so /wallet/status reports unavailable and a prove request cannot reach a wallet. The
-    // policy in front of it is real and tested; the transport is DESIGN_ONLY. See docs/GATE4_RESULTS.md.
-    eprintln!(
-        "  note: no wallet daemon is connected; /wallet/status will report unavailable and a proof \
-         request cannot be completed. The gate metadata and challenge routes are live."
-    );
+
+    // Connect the wallet before announcing anything, so the startup line below is a report of what is
+    // true rather than an intention.
+    let mut wallet = match std::env::var("GG_WALLETD_ENDPOINT") {
+        Ok(endpoint) if !endpoint.trim().is_empty() => {
+            let network = config
+                .gates
+                .first()
+                .map(|(_, b)| b.network)
+                .unwrap_or(ghost_gate_core::network::LOCALNET);
+            match ghost_gate_walletd::WalletDaemonChannel::connect(
+                &endpoint,
+                network,
+                fee_ceiling(),
+                max_epoch(),
+            ) {
+                Ok(channel) => {
+                    println!("  wallet daemon: {endpoint} (network byte {network})");
+                    AnyWallet::Live(channel)
+                },
+                Err(e) => {
+                    // Refusing to start is the honest response: a bridge that has been told where its
+                    // wallet is and cannot reach it should not serve proofs that cannot complete.
+                    eprintln!("ghost-gate-bridge: cannot connect to the wallet at {endpoint}: {e}");
+                    return ExitCode::FAILURE;
+                },
+            }
+        },
+        _ => {
+            // Stated plainly rather than discovered later: there is no wallet here, so /wallet/status
+            // reports unavailable and a prove request cannot be completed. The gate metadata and
+            // challenge routes are live. See docs/GATE4_RESULTS.md.
+            eprintln!(
+                "  note: GG_WALLETD_ENDPOINT is not set, so no wallet daemon is connected; \
+                 /wallet/status will report unavailable and a proof request cannot be completed. \
+                 The gate metadata and challenge routes are live."
+            );
+            AnyWallet::Absent(NoWallet)
+        },
+    };
 
     let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
         Ok(rt) => rt,
@@ -66,13 +105,106 @@ fn main() -> ExitCode {
         },
     };
 
-    let bridge = Bridge::new(registry, NoWallet, config.origins);
+    // Probed once at startup, so a misconfigured network is visible immediately rather than at the first
+    // proof. A failure here is not fatal: the wallet routes report it per-request, and the public routes
+    // do not depend on it.
+    match runtime.block_on(wallet.status()) {
+        Ok(status) => {
+            println!(
+                "  wallet status: reachable={} default_account={} network={} ({})",
+                status.reachable, status.has_default_account, status.network, status.network_name
+            );
+            let gate_network = config.gates.first().map(|(_, b)| b.network);
+            if Some(status.network) != gate_network {
+                eprintln!(
+                    "  warning: the wallet is on network {} but the gate is bound to a different one; \
+                     proofs will be refused until these agree.",
+                    status.network
+                );
+            }
+        },
+        Err(e) => eprintln!("  warning: the wallet did not answer a status probe ({e}); proofs will fail until it does."),
+    }
+
+    let bridge = Bridge::new(registry, wallet, config.origins);
     match runtime.block_on(ghost_gate_bridge::server::serve(&config.bind, bridge)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("ghost-gate-bridge: {e}");
             ExitCode::FAILURE
         },
+    }
+}
+
+/// The fee ceiling offered for a proof transaction.
+///
+/// An upper bound, not a target: the prover pays the difference back. Sized well above a localnet proof's
+/// real cost so a proof is never refused for want of fee headroom, and overridable because a mainnet fee
+/// ceiling would not be the same number.
+fn fee_ceiling() -> u64 {
+    std::env::var("GG_MAX_FEE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100_000)
+}
+
+/// The last epoch in which a proof transaction may be sequenced.
+///
+/// Clamped to each challenge's own `expires_epoch` before a transaction is built, so this is only ever
+/// the outer bound.
+fn max_epoch() -> u64 {
+    std::env::var("GG_MAX_EPOCH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100)
+}
+
+/// Which wallet the bridge is using, chosen once at startup.
+///
+/// An enum rather than a `Box<dyn WalletChannel>` because `WalletChannel` has native `async fn`
+/// methods, which makes it deliberately not object-safe: `Bridge<W>` is generic over `W` precisely so
+/// no boxing or `async_trait` is needed. Dispatching on two known variants keeps that property instead
+/// of undoing it to hold one runtime choice.
+enum AnyWallet {
+    /// A connected wallet daemon, in the `ghost-gate-walletd` crate.
+    Live(ghost_gate_walletd::WalletDaemonChannel),
+    /// No wallet configured.
+    Absent(NoWallet),
+}
+
+impl WalletChannel for AnyWallet {
+    async fn status(&mut self) -> Result<WalletStatus, WalletError> {
+        match self {
+            Self::Live(w) => w.status().await,
+            Self::Absent(w) => w.status().await,
+        }
+    }
+    async fn build_statement(
+        &mut self,
+        request: ghost_gate_bridge::StatementRequest,
+    ) -> Result<StatementReply, WalletError> {
+        match self {
+            Self::Live(w) => w.build_statement(request).await,
+            Self::Absent(w) => w.build_statement(request).await,
+        }
+    }
+    async fn submit(
+        &mut self,
+        gate: &str,
+        challenge: &ghost_gate_core::Challenge,
+        statement: &StealthTransferStatement,
+        lock_id: &str,
+    ) -> Result<String, WalletError> {
+        match self {
+            Self::Live(w) => w.submit(gate, challenge, statement, lock_id).await,
+            Self::Absent(w) => w.submit(gate, challenge, statement, lock_id).await,
+        }
+    }
+    async fn wait(&mut self, transaction_id: &str, timeout: std::time::Duration) -> Result<CommitOutcome, WalletError> {
+        match self {
+            Self::Live(w) => w.wait(transaction_id, timeout).await,
+            Self::Absent(w) => w.wait(transaction_id, timeout).await,
+        }
     }
 }
 
@@ -93,6 +225,7 @@ impl WalletChannel for NoWallet {
     async fn submit(
         &mut self,
         _gate: &str,
+        _challenge: &ghost_gate_core::Challenge,
         _statement: &StealthTransferStatement,
         _lock_id: &str,
     ) -> Result<String, WalletError> {

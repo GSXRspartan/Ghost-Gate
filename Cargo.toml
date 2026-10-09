@@ -6,6 +6,7 @@ members = [
     "crates/ghost-gate-wallet",
     "crates/ghost-gate-bridge",
     "crates/ghost-gate-tests",
+    "crates/ghost-gate-walletd",
 ]
 # The template is its own workspace: it builds for wasm32-unknown-unknown with a
 # different feature set and must not join the native build graph.

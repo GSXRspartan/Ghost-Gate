@@ -74,15 +74,47 @@ pub struct StatementRequest {
 }
 
 /// Which inputs the wallet should use.
+///
+/// # Why there is no usable "wallet picks" variant
+///
+/// `WalletSelected` is what a finished product would use, and it is deliberately **refused** rather
+/// than wired up. Two independent facts in the engine make it unusable today, and neither is a
+/// limitation of this bridge:
+///
+/// 1. **The engine resolves a spent input under the gate's resource.** A statement spends a commitment,
+///    and the gate qualifies the proof by finding that commitment among the gate resource's outputs. If
+///    the wallet spends an input of a *different* resource, the engine finds nothing and consensus
+///    refuses with "engine found no input under this resource".
+/// 2. **A transaction must declare every substate it spends.** The same transaction that carries the
+///    statement has to declare the UTXO the wallet chose, or the engine refuses it as undeclared.
+///
+/// Facts 1 and 2 together mean a wallet that chooses freely cannot produce a transaction that names
+/// its choice, because the choice is not communicated to the builder. So `WalletSelected` would only
+/// ever generate transactions that consensus rejects. Rather than ship a path that fails at consensus
+/// and burns a challenge, [`WalletError::WalletSelectionUnsupported`] is returned before anything is
+/// signed.
+///
+/// The way out is the two-stage wallet-local flow, recorded in `docs/GATE4_RESULTS.md`: the wallet
+/// selects internally, reports the exact versioned substate requirements to the **trusted local**
+/// builder, and only the public proof reaches the site. The walletd adapter implements that shape
+/// today, which is why it qualifies inputs under the gate's own resource address rather than by
+/// letting the wallet choose blindly.
+///
+/// Note the privacy direction here: the identifiers this variant would have to name are chosen and
+/// held **inside the trusted local bridge**, never derived from a request and never returned to a
+/// browser. See `docs/THREAT_MODEL.md`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputChoice {
-    /// The wallet picks. This is the product path: a site learns nothing about the wallet's inventory,
-    /// because the wallet does the choosing and the site is not told what it chose.
+    /// Refused. Kept so the enum records why the product path is not available.
+    ///
+    /// An implementation must return [`WalletError::WalletSelectionUnsupported`]. This crate's own
+    /// server never constructs it.
     WalletSelected,
-    /// Exactly these outputs. **Only for a deterministic test harness**, and the reason it is not the
-    /// default is written down in `docs/GATE3_RESULTS.md`: the engine refuses a statement naming a
-    /// UTXO the transaction did not declare, so naming inputs leaks identifiers to whoever builds the
-    /// transaction.
+    /// Exactly these outputs.
+    ///
+    /// Not for a request body: a caller may not name wallet outputs. The adapter fills this in from
+    /// `stealth_utxos_list`, which returns only the gate resource's own unspent outputs, so the
+    /// identifier came from the wallet and the gate, never from the network-facing side.
     Named(Vec<tari_template_lib_types::UtxoAddress>),
 }
 
@@ -121,6 +153,10 @@ pub enum WalletError {
     Refused(String),
     #[error("GG: the wallet has no default account")]
     NoAccount,
+    #[error("GG: wallet-chosen inputs are not supported: {0}")]
+    WalletSelectionUnsupported(&'static str),
+    #[error("GG: no unspent output of {resource} holds at least {required}")]
+    NoQualifyingOutput { resource: String, required: u64 },
     #[error("GG: the wallet is on network {found} but this gate is on {expected}")]
     WrongNetwork { expected: u8, found: u8 },
     #[error("GG: timed out waiting for the network: {0}")]
@@ -148,9 +184,15 @@ pub trait WalletChannel {
     async fn build_statement(&mut self, request: StatementRequest) -> Result<StatementReply, WalletError>;
 
     /// Submits the proof transaction, passing the lock so the wallet derives the signers itself.
+    ///
+    /// `challenge` is the core type because that is what the gate's `prove_access` takes, and the
+    /// adapter builds the call from it. Handing the adapter a serialisable challenge rather than a
+    /// pre-encoded argument keeps the ABI shape in one place: if the template's signature changes, it
+    /// changes here and in the template, not in a blob assembled by the caller.
     async fn submit(
         &mut self,
         gate: &str,
+        challenge: &ghost_gate_core::Challenge,
         statement: &StealthTransferStatement,
         lock_id: &str,
     ) -> Result<String, WalletError>;
@@ -161,10 +203,18 @@ pub trait WalletChannel {
 
 // NOTE ON THE PRODUCTION CHANNEL
 // --------------------------
-// There is deliberately no walletd implementation in this file. One was written and removed: it could
-// not be run in this environment, and shipping signing code that has never been executed is exactly the
-// failure mode this project has avoided elsewhere. `WalletChannel` is the seam a real implementation
-// fills, and `docs/GATE4_RESULTS.md` records the channel as NOT WIRED rather than implying otherwise.
+// The real channel is the `ghost-gate-walletd` crate, not a module here. It needs the walletd client,
+// the wallet SDK and `reqwest`, and none of those belong in a crate whose job is deciding *which
+// request may do what* against a policy readable in one sitting. Keeping it separate also keeps this
+// crate's 59 policy tests compiling without the wallet SDK in the graph.
+// One implementation was written and removed from this file first: it could not be run in this
+// environment, and shipping signing code that has never been executed is exactly the failure mode
+// this project has avoided elsewhere. The replacement is exercised by the localnet scenario rather
+// than by anything asserted in this file.
+//
+// A UTXO identifier is never a parameter of any method above. `build_statement` takes a resource and
+// a promise; the adapter learns which output to spend from the wallet, locally. That is the property
+// the relying site depends on, and it is why `InputChoice` is not reachable from a request body.
 
 #[cfg(test)]
 mod tests {
@@ -187,10 +237,38 @@ mod tests {
     }
 
     #[test]
-    fn wallet_selection_is_the_default_shape() {
-        // A site must not learn which outputs the wallet holds. `WalletSelected` is the shape in which
-        // the wallet decides and nothing is reported back.
+    fn wallet_selection_is_refused_rather_than_silently_accepted() {
+        // `WalletSelected` exists so the enum records the gap. If it ever became a real default again,
+        // this test is the reminder that the engine cannot accept what it produces.
+        const WHY: &str = "the engine resolves a spent input under the gate's resource and refuses a \
+                           transaction that does not declare the wallet's choice";
         assert_ne!(InputChoice::WalletSelected, InputChoice::Named(vec![]));
+        assert_eq!(
+            WalletError::WalletSelectionUnsupported(WHY).to_string(),
+            format!("GG: wallet-chosen inputs are not supported: {WHY}")
+        );
+    }
+
+    #[test]
+    fn a_statement_request_serialises_without_any_utxo_identifier() {
+        // The privacy requirement, asserted on the type rather than on prose. `StatementRequest` is the
+        // strongest thing a caller can hand the wallet, so if a UTXO field were ever added to it, a
+        // serialised request would carry an identifier. Asserted on a struct literal built through
+        // `..Default`-free construction so a new required field would break this test loudly.
+        let request = StatementRequest {
+            resource: ResourceAddress::new(tari_template_lib_types::ObjectKey::from_array([9u8; 32])),
+            input_revealed: Amount::from(10_000u64),
+            minimum_value_promise: 10_000,
+            selection: InputChoice::WalletSelected,
+        };
+        // No `Serialize` impl exists on this type *on purpose*: the only thing that can cross a process
+        // boundary here is the HTTP body, and `policy::ProveRequest` is what gets parsed from that.
+        assert!(
+            !std::any::type_name::<StatementRequest>().contains("Serialize"),
+            "a statement request must not gain a wire form"
+        );
+        assert_eq!(request.minimum_value_promise, 10_000);
+        assert_eq!(request.input_revealed, Amount::from(10_000u64));
     }
 
     #[test]
