@@ -367,6 +367,14 @@ cannot be. Anything a site decides is a usability matter, not a security matter.
 | **Layer** | Template. |
 | **Residual** | None. |
 
+| | |
+|---|---|
+| **Attack** | A chain observer correlates a prover's proofs by which UTXO each one spent. |
+| **Consequence** | Repeated access to a site becomes a linkable pattern, even though each proof is individually unlinkable to a balance. |
+| **Mitigation** | *Not* addressed by this design, and stated rather than glossed: a stealth output's **address** is `(resource, commitment)`, so the output spent by a proof is public on chain. The adapter spends the **smallest** qualifying output, which limits how much is consolidated, but that is a heuristic about the shape of the disclosure — it is not a guarantee. A proof that spends a fresh output each time would be stronger and requires wallet-side UTXO management this project does not have. |
+| **Layer** | Protocol, not bridge. |
+| **Residual** | Present and documented. The privacy claim this project makes is narrower and specific: **the relying site** cannot learn which output was spent, what it was worth, or what else the wallet holds. No UTXO identifier crosses the bridge API in either direction, asserted by a test over all eight routes. |
+
 ---
 
 ## 8b. What a relying site is required to do
@@ -445,5 +453,18 @@ threshold proof into a weaker thing than it looks like.
    boundary — the single-use guarantee is the on-chain burn — but it should be replaced before
    anyone treats a challenge commitment as tamper-evident. The type is named so nobody mistakes it
    for a cryptographic hash.
-6. **Gate 3 is not green.** Ordinary-wallet integration is the gate that decides whether this
-   product exists, and it has not been demonstrated end to end.
+6. **Gate 3 is green, but the live wallet path is unrun.** `@ghost_gate` passes on localnet
+   (2 scenarios, 48 steps). The bridge's `WalletChannel` implementation
+   (`crates/ghost-gate-walletd`) compiles and is unit-tested, but **no proof has been completed
+   against a live `walletd`**, because this environment has none to point at. Gate 4's manual
+   six-case flow is therefore still unperformed. See `docs/GATE4_RESULTS.md`.
+7. **Wallet-selected inputs are refused, not implemented.** `InputChoice::WalletSelected` returns
+   `WalletSelectionUnsupported` before any wallet call, because the engine resolves a spent input
+   under the gate's resource and refuses a transaction that does not declare every substate it
+   spends — so a freely-chosen input cannot be built into a valid transaction. The adapter instead
+   qualifies the gate resource's own unspent outputs locally, which keeps every identifier inside
+   the local bridge. The missing capability is a wallet-side RPC that reports the inputs it *would*
+   select without building a statement; that is a wallet change, not a protocol change. No engine
+   check is weakened to close this gap.
+8. **Output-reuse correlation is a residual risk, not a solved one.** See §8: the output a proof
+   spends is public on chain, and the "smallest qualifying output" strategy is a heuristic.

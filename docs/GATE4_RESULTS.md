@@ -1,6 +1,6 @@
 # Gate 4 — real wallet UX
 
-## Verdict: PARTIAL — the bridge and the page exist and the policy is proven; the live wallet channel is not wired
+## Verdict: PARTIAL — the wallet channel is implemented, but no proof has been completed against a live walletd
 
 Gate 4 asks whether a user can understand what they are approving. It is deliberately sequenced last
 because it cannot be answered honestly until Gate 3 is green: without a wallet that can build a Ghost
@@ -8,15 +8,18 @@ Gate transaction, there is nothing for a user to approve.
 
 | Piece | State |
 | --- | --- |
-| The local bridge's security policy (gate registry, one-use challenges, request validation, origin allowlist) | **PROVEN**, unit- and integration-tested |
+| The local bridge's security policy (gate registry, one-use challenges, request validation, origin allowlist) | **PROVEN**, 64 tests |
 | The bridge's HTTP surface, including the routes that do *not* exist | **PROVEN**, tested |
+| No UTXO identifier can cross the API in either direction | **PROVEN**, a test sweeps all eight routes |
 | The demo page, and the privacy boundary expressed as an API surface | **PROVEN** by construction; not run against a wallet |
-| The bridge's `WalletChannel` implementation against a live `walletd` | **NOT WIRED** — see below |
+| The `WalletChannel` implementation against `walletd` (`crates/ghost-gate-walletd`) | **IMPLEMENTED**, compiles clean, 4 tests; drives the same JSON-RPC surface the localnet scenario drove |
+| A completed proof, end to end, against a live `walletd` | **NOT PERFORMED** — this environment has no walletd to run one against |
+| The manual human test (six cases) | **NOT PERFORMED**, for the same reason |
 | What a user sees on the *wallet's* approval screen | **NOT ASSESSED** — unchanged from the original analysis below |
 
-The honest one-line summary: everything that decides whether a website can spend from someone's wallet
-is built and tested; the part that talks to a wallet is not connected, and the manual end-to-end flow a
-developer would want is therefore **blocked on that one piece**.
+The honest one-line summary: the adapter exists, refuses the one input strategy that cannot work, and
+keeps every wallet identifier inside the local process — but nothing has yet proved it against a live
+daemon, so the manual flow is still **blocked on a walletd to run against**, not on missing code.
 
 ## The requirement
 
@@ -159,34 +162,104 @@ Three things make it structural rather than a promise:
 2. **`PublicProof` has eight fields**, none of which can hold a key, a mask, a balance, a decrypted
    value or a UTXO identifier. A test asserts the exact serialised JSON.
 3. **The resource and threshold the wallet is asked for come from the registry**, not the request. A
-   test asserts the fake wallet was asked for `(gate.resource, gate.threshold)` and that
-   `InputChoice::WalletSelected` was used, so input selection stays with the wallet and the site is not
-   told what it chose.
+   test asserts the fake wallet was asked for `(gate.resource, gate.threshold)` and that the selection
+   sent was `InputChoice::Named(vec![])` — an empty named set, which is how a request body expresses
+   "no input specified". A second test asserts the server *never* constructs
+   `InputChoice::WalletSelected` and never names a non-empty input, so nothing from the caller can
+   become a UTXO.
 
-Four server tests each attempt to add an `amount`, `utxos`, `destination` or `resource` to a prove
-request; all four are refused and the wallet is asserted **not** to have been called.
+Two further properties are asserted rather than described:
 
-### What is not wired, and why it is stated plainly
+- **No route can return a UTXO identifier.** One test walks all eight routes — including a refused
+  request, a pending proof and an *accepted* proof — and requires that no response body contains a
+  `utxo_` prefix. A regression fails there rather than in review.
+- **A request naming a UTXO is rejected by name.** `ProveRequest` is `deny_unknown_fields`, so
+  `{"utxo_address": "utxo_deadbeef"}` comes back as `unknown field \`utxo_address\`, expected one of
+  \`gate_id\`, \`challenge_nonce\`, \`session_commitment\``.
 
-`wallet::WalletChannel` is a trait. `server.rs` is written against it and is fully exercised by
-`tests/server.rs` through a fake. The production implementation, which would speak real `walletd`
-JSON-RPC, is **not implemented**:
+Five server tests each attempt to add an `amount`, `utxos`, `destination`, `resource` or `threshold` to
+a prove request; all five are refused and the wallet is asserted **not** to have been called.
 
-- `main.rs` wires a `NoWallet` channel that returns `WalletError::Unreachable`. The process starts,
-  serves `/health`, `/gate/:id` and `/gate/:id/challenge`, and prints a note to stderr saying so.
-- The fake in the tests is a stand-in for an *external service*, which is a legitimate thing to fake —
-  the bridge's policy is what is under test, not consensus. The consensus claim belongs to the
-  `@ghost_gate` localnet scenario and to `gate_engine.rs`.
+### The live channel
 
-So the manual flow
+`crates/ghost-gate-walletd` implements `WalletChannel` against a running `walletd`. It is a separate
+crate because it needs the walletd client, the wallet SDK and the transaction builder: keeping those
+out of `ghost-gate-bridge` is what lets the bridge's 64 policy tests compile without the SDK in the
+graph. The bridge process moved into that crate as its binary, because a binary needs both sides and
+the dependency runs bridge → walletd; the binary is still called `ghost-gate-bridge`, so nothing that
+invokes it changes.
+
+The adapter drives the same JSON-RPC surface the localnet scenario drove rather than a
+re-description of it:
+
+```text
+stealth_utxos_list                    -> candidates: the gate resource's own unspent outputs
+accounts_create_stealth_transfer_statement
+                                      -> a statement spending exactly one of them, with the gate's
+                                         threshold as the output's minimum_value_promise
+submit_transaction (under the lock)   -> the wallet derives the stealth signers itself
+wait_transaction_result               -> consensus's verdict
+```
+
+One detail makes this cheap: the `StealthTransferStatement` the client returns is the *same*
+`tari_template_lib_types` type the trait already used, so there is no conversion layer on the
+boundary. And the attested minimum and input count are decoded from the committed `ProofReceipt`,
+which `ghost-gate-core` declares and derives bor's `Decode` for — nameable even though the template
+itself is WASM, and a compile error rather than a silent zero if the template's return type changes.
+
+Startup is honest about what is connected: with `GG_WALLETD_ENDPOINT` unset the process serves its
+public routes and prints that proofs cannot be completed; with it set but nothing listening, it prints
+the connection error and a warning, and every wallet route reports the failure per request.
+
+**What is still not proven.** No proof has been completed against a live walletd. This environment runs
+the cohort's cucumber harness, which starts its own wallet in-process, so the adapter is exercised by
+that scenario's RPC shape and by four unit tests — not by a completed manual run. The manual flow
 
 ```text
 start Ootle -> start walletd -> start bridge -> open browser -> connect -> load gate
 -> request challenge -> approve -> submit -> observe -> ACCESS GRANTED -> replay -> refused
 ```
 
-runs **as far as "challenge issued" and then stops**, because there is no wallet to answer it. Claiming
-that flow as working would be the single most dishonest thing this document could do.
+has therefore not been observed end to end. Claiming otherwise would be the single most dishonest
+thing this document could do.
+
+### Why wallet-chosen inputs are refused rather than wired up
+
+`InputChoice::WalletSelected` is what a finished product would use: the wallet picks, the site learns
+nothing. It cannot be implemented today, and the reason is the engine rather than this bridge:
+
+1. **A spent input is resolved under the gate's resource.** The gate qualifies a proof by finding the
+   statement's commitment among that resource's outputs. If the wallet spends an input of a different
+   resource, the engine finds nothing and consensus refuses.
+2. **A transaction must declare every substate it spends.** The same transaction that carries the
+   statement has to declare the UTXO the wallet chose.
+
+Together these mean a wallet that chooses freely cannot produce a transaction that *names* its choice,
+because the choice is never communicated to the builder. Every such proof would be refused at
+consensus, after burning the inputs and the challenge. So the adapter returns
+`WalletError::WalletSelectionUnsupported` **before any wallet call** — asserted through the real
+adapter against an unreachable wallet, which distinguishes "refused the selection" from "could not
+reach the wallet". No engine check is weakened to make the path work.
+
+What the adapter does instead is the two-stage shape, locally:
+
+1. the wallet selects qualifying outputs internally, via `stealth_utxos_list` on the **gate's**
+   resource address;
+2. the exact selected output's versioned requirement goes to the **trusted local** builder, which
+   declares it as a transaction input;
+3. the wallet signs and submits under its own lock;
+4. the relying site receives only `attested_minimum`, `input_count` and a transaction id.
+
+Steps 1–4 are what the code does today, except that the selection is made by the adapter rather than by
+a separate wallet-side planning call. The missing capability is narrow and worth naming precisely: a
+wallet-side RPC that returns the inputs it *would* choose for a statement, without building one, so the
+choosing and the declaring are done by the wallet rather than by the bridge re-deriving it.
+`stealth_utxos_list` is the closest thing present, and it hands the decision to the caller. Adding it
+means a wallet-side selection endpoint, not a protocol change.
+
+This is a **local bridge** property, not a privacy claim about the chain: which output was spent is
+visible on chain to anyone who reads it, and picking the smallest qualifying output is a heuristic
+about what that reveals, not a guarantee. See `docs/THREAT_MODEL.md`.
 
 ### Why the demo page is served by the bridge
 
@@ -207,9 +280,10 @@ the wallet channel exists.
 
 ## The manual human test
 
-`docs/MANUAL_TEST.md` lists the six cases that must pass. **None of them has been performed**, because
-every one of them needs a reachable wallet. The list is kept, and the honest status is that it is
-unrun.
+`docs/MANUAL_TEST.md` lists the six cases that must pass. **None of them has been performed.** The
+blocker is no longer missing code — it is that this environment has no standalone `walletd` to point
+`GG_WALLETD_ENDPOINT` at; the cohort's harness starts its wallet in-process instead. The list is kept,
+and the honest status is that it is unrun.
 
 ## Open
 
