@@ -54,8 +54,8 @@ depends on already exists on L1, natively, today.
 Four domain-separated signing methods exist on `TransactionKeyManagerInterface`:
 
 ```rust
-// tari_transaction_key_manager/src/key_manager/interface.rs:236-259
-fn sign_message_with_spend_key(&self, message: &[u8], sender_offset_key: Option<&CompressedPublicKey>)
+// tari_transaction_key_manager-6.0.1-pre.2/src/legacy_key_manager/wrapper.rs:226,431,440,449
+fn sign_message_with_spend_key(&self, message: &[u8], sender_offset_pub_key: Option<&CompressedPublicKey>)
     -> Result<WalletMessageSchnorrSignature, KeyManagerError>;
 fn sign_script_message(&self, private_key_id: &TariKeyId, challenge: &[u8]) -> ...;
 fn sign_script_message_with_spend_key(&self, message: &[u8], ...) -> ...;
@@ -78,10 +78,43 @@ That would be enough to prove "I control this output's spend key" without any tr
 rpc SignMessage (SignMessageRequest) returns (SignMessageResponse);
 ```
 
-**UNRESOLVED, and deliberately left unresolved:** the gRPC service implementation crate
-(`tari_wallet_grpc`) is not vendored on this machine, so the claim above rests on the proto's own doc
-comment. It was not confirmed in code. If that RPC can be made to use the spend key, this changes
-materially, and it is worth chasing upstream before anyone commits to a conclusion.
+**RESOLVED, from source, on 2026-10-08.** The gRPC service implementation is inside
+`minotari_console_wallet`, which *is* vendored in the cargo registry. The handler is:
+
+```rust
+// minotari_console_wallet-6.0.1-pre.2/src/grpc/wallet_grpc_server.rs:3043
+async fn sign_message(&self, request: Request<SignMessageRequest>) -> Result<Response<SignMessageResponse>, Status> {
+    let message = request.into_inner();
+    let secret = self.wallet.node_identity.secret_key().clone();
+    let signature = SignatureWithDomain::<WalletMessageSigningDomain>::sign(&secret, message_str.as_bytes(), &mut rand::rng())
+        .map_err(|e| Status::internal(format!("Failed to sign message: {e}")))?;
+    ...
+}
+```
+
+The handler signs with `node_identity.secret_key()` and with nothing else. There is no request field,
+flag, key-index or variant that selects a spend key. The proto's doc comment was accurate.
+
+Two consequences, and they settle the XTM question:
+
+1. **A zero-transaction native-XTM proof is not reachable through the wallet's gRPC surface.** A
+   relying site cannot ask a Minotari wallet to sign a challenge with an output's spend key, so it
+   cannot obtain "I control this ≥ X output" without a transaction.
+2. **The primitive is nevertheless present inside the wallet.**
+   `Wallet::sign_message(&mut self, secret: &PrivateKey, message: &str)` at
+   `minotari_wallet-6.0.1-pre.2/src/wallet.rs:466` takes the secret key as a parameter and performs
+   the same domain-separated signature. So a *future* wallet build that exposed a spend-key variant
+   would be a small change, and the domain separation is already right. This is a wallet-surface
+   question, not a cryptography question.
+
+For contrast, the same crate already calls the spend-key version internally, for its own purposes:
+
+```rust
+// minotari_console_wallet-6.0.1-pre.2/src/automation/commands.rs:2913
+let signature = key_manager_service.sign_message_with_spend_key(&commitment_bytes, sender_offset)?;
+```
+
+so the call exists and is exercised — it is simply not exposed over gRPC.
 
 ### Fees do not leak the amount
 
@@ -92,20 +125,44 @@ leaked through `fee / fee_per_gram`. On the code read, it does not. Worth re-che
 
 ### The blocker: no cross-output aggregation
 
-`sum_commitments` exists (`aggregate_body_internal_validator.rs:320-331`) and is used for balance
-checking, but **no aggregate commitment is ever published as a proof-bearing object.** The key manager
-only ever builds one-commitment proofs:
+The **crypto** library can aggregate. `ExtendedRangeProofService::construct_extended_proof` takes a
+`Vec<ExtendedWitness>` and its own doc comment says the proof "may be aggregated":
 
 ```rust
-// tari_transaction_key_manager/src/key_manager/manager.rs:975
-.construct_extended_proof(vec![extended_witness], None)   // a ONE-element vector
+// tari_crypto-0.23.4/src/extended_range_proof.rs:48-60
+/// Constructs a new extended range proof, which may be aggregated, for the given set(s) of secret key(s) value(s)
+/// and minimum value promise(s).
+fn construct_extended_proof(
+    &self,
+    extended_witnesses: Vec<ExtendedWitness<Self::K>>,
+    seed_nonce: Option<Self::K>,
+) -> Result<Self::Proof, RangeProofError>;
 ```
 
-and `RANGE_PROOF_AGGREGATION_FACTOR` is `1` (`tari_common_types/src/types/mod.rs:79`). Despite the
-name, `batch_verify_range_proofs` batch-*verifies* independent proofs; it does not aggregate them.
+The **key manager** cannot reach it. Every range-proof path the wallet has goes through one signature,
+which takes a single commitment mask and a single value:
 
-So "prove I control ≥ X across several native UTXOs" in one statement is **not** expressible with
-consensus-verifiable L1 primitives. It would need a genuinely new proof protocol.
+```rust
+// tari_transaction_key_manager-6.0.1-pre.2/src/legacy_key_manager/inner.rs:447
+pub fn construct_range_proof(
+    &self,
+    commitment_mask_key_id: &TariKeyId,   // one mask
+    value: u64,                            // one value
+    min_value: u64,                        // one promise
+) -> Result<RangeProof, KeyManagerError>
+```
+
+and `construct_extended_proof` is not called anywhere in the vendored key-manager crate. So a prover
+cannot aggregate several of its own outputs into one L1-consensus-verifiable statement through the
+wallet, and "prove I control ≥ X across several native UTXOs" is **not** expressible today. It would
+need a new key-manager entry point and new consensus acceptance, which is new protocol work.
+
+Two supporting details, both verified:
+
+- `RANGE_PROOF_AGGREGATION_FACTOR: usize = 1` (`tari_common_types-6.0.1-pre.2/src/types/mod.rs:79`).
+- `sum_commitments` exists for balance checking
+  (`aggregate_body_internal_validator.rs`), but no aggregate commitment is ever published as a
+  proof-bearing object.
 
 ### Two more gaps
 
@@ -157,6 +214,10 @@ transaction and the site only ever receives a transaction id and a committed out
 **Route A, with the bridge submitting.** One L1 self-transfer at access time, carrying an output with
 `minimum_value_promise >= X`, submitted by the local bridge and never handed to the relying site.
 
+Route A was chosen before the `SignMessage` question was resolved, and it survives the answer. The
+answer removed the only route that would have beaten it — see the "one change that would make a
+transaction-free proof possible" section above — rather than invalidating it.
+
 Why this one:
 
 1. **It needs no new cryptography.** It uses `create_pay_to_self_transaction`
@@ -184,23 +245,50 @@ Ootle path and is why this is a *fallback backend*, not the default.
 | **PROVEN** | Fees in this version are value-independent, so a fee cannot leak the amount. |
 | **PROTOTYPE** | Nothing yet. See below. |
 | **DESIGN ONLY** | The full XTM backend: access-time self-transfer, gate-side nonce binding, session issuance on the L1 path, and the bridge's `WalletChannel` implementation against Minotari's gRPC. |
-| **DESIGN ONLY** | Whether `SignMessage` can be made to use the spend key. Unresolved and explicitly not guessed. |
-| **BLOCKED** | **Route B.** Cross-output aggregation is not expressible with consensus-verifiable L1 primitives today (`construct_extended_proof(vec![one_witness])`, `RANGE_PROOF_AGGREGATION_FACTOR = 1`). It would require a new proof protocol, which this project will not invent. |
+| **BLOCKED** | **A zero-transaction native-XTM proof.** The wallet gRPC signs challenges with the node identity key and offers no spend-key variant (`wallet_grpc_server.rs:3054`, resolved from source above). This closes the most attractive option: an external prover cannot obtain "I control this ≥ X output" without a transaction. |
+| **BLOCKED** | **Route B.** Cross-output aggregation is unreachable from the wallet: every L1 range-proof path goes through `construct_range_proof(mask_id, value, min_value)` — one commitment — and `construct_extended_proof` is never called by the key manager (`RANGE_PROOF_AGGREGATION_FACTOR = 1`). Reaching it needs a new key-manager entry point *and* new consensus acceptance, which is new protocol work this project will not invent. |
 | **BLOCKED** | **Route D.** No HTLC or hashlock predicate exists in TariScript. The opcodes to hand-build one do exist (`HashSha256` `op_codes.rs:244`, `CheckSigVerify` `:257`, `CheckHeightVerify` `:147`), but nothing in the codebase writes one and there is no evidence such a script passes consensus. Writing one would be unaudited new protocol work in consensus-critical code. |
 
 ## Why no prototype was built
 
-A prototype would need a live Minotari node and a wallet with funds, neither of which is available in
-this environment, and the shape it would take is not yet decided by anything that has been verified:
-the ownership half of Route A depends on the unresolved `SignMessage` question. Building a harness
-around an unresolved primitive and calling it progress would be exactly the kind of rounding-up this
-project has avoided so far.
+The question this document set out to answer — can a native-XTM threshold proof avoid a transaction —
+is now answered, and the answer is no on the current wallet surface. The only remaining route is A, and
+A's cost is structural rather than incidental: it is one L1 transaction and one L1 fee per access, by
+construction, because the transaction is what proves current control.
 
-The next concrete step is small and specific: **read `tari_wallet_grpc`'s `SignMessage` handler**, which
-was not vendored here. If it uses the node identity key, Route A is confirmed viable as a
-transaction-per-access backend and the design can be written down properly. If a spend-key variant is
-addable, a *zero-transaction* native-XTM proof becomes possible and is a much better product than
-anything else on this page.
+So the prototype that would have been built is a prototype of Route A, which requires a live Minotari
+node and a funded wallet. Neither exists in this environment: the localnet harness here is Ootle (an L2
+that consumes Minotari), and it starts no Minotari base node. Building one, funding it, and waiting for
+confirmations is a multi-day environment task, not a code task.
+
+That is a **BLOCKED-on-environment** state rather than an idea that was rejected, and it is recorded
+that way rather than as progress. Writing a harness that constructs the transaction but cannot submit
+it would demonstrate the builder, not the proof.
+
+What *is* verified about Route A, from source:
+
+```rust
+// minotari_wallet-6.0.1-pre.2/src/output_manager_service/handle.rs:1233
+pub async fn create_pay_to_self_transaction(
+    &mut self, amount: MicroMinotari, utxo_selection: UtxoSelectionCriteria,
+    output_features: OutputFeatures, fee_per_gram: MicroMinotari,
+    lock_height: Option<u64>, payment_id: MemoField,
+    minimum_value_promise: MicroMinotari,          // <- the field the gate needs
+) -> Result<(MicroMinotari, Transaction, TxId), OutputManagerError>
+```
+
+The threshold-bearing output is constructible by the wallet today, with an explicit promise, and the
+resulting transaction carries a consensus-verifiable `minimum_value_promise`. The design is not blocked
+on primitives; it is blocked on having somewhere to run it.
+
+## The one change that would make a transaction-free proof possible
+
+Expose a spend-key variant of `SignMessage` over the wallet gRPC — the call already exists inside the
+wallet (`commands.rs:2913` calls `sign_message_with_spend_key` for its own automation), the domain
+separation is already correct, and the verifier would be a signature check against the output's public
+spend key. With that one RPC, Route A collapses to zero transactions per access and the native-XTM
+backend becomes strictly better than the Ootle path. It is a small, well-scoped change to a wallet
+surface — and it is upstream work, not something this project should fork to obtain.
 
 ## What is NOT claimed for native XTM, at all
 
@@ -208,6 +296,9 @@ anything else on this page.
 - That no Ootle burn is needed *in practice*. Route A burns no Ootle value, but it does require an L1
   transaction per access, and the base-layer burn flow the Ootle path already uses remains the cheaper
   option for a user who has L1 XTM to burn.
+- That a transaction-free native-XTM proof is impossible in principle. It is impossible **on the current
+  wallet gRPC surface**, which is a wallet limitation rather than a protocol one, and the change that
+  would lift it is identified above.
 - Any privacy property beyond "the output's committed minimum is public and its value is not". The
   metadata an L1 transaction reveals — that a transaction of some size happened, its fee, its
   confirmation time — is public, and no design on this page hides it.
