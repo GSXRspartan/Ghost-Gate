@@ -16,6 +16,11 @@ scripts/ootle_e2e.sh -- --tags "@ghost_gate"
 48 steps (48 passed)
 ```
 
+**Final confirmation run.** The same command was re-run after the Gate 4 wallet work, from the tree at
+`5d92ae9`, and returned the identical verdict above: `2 scenarios (2 passed)`, `48 steps (48 passed)`,
+ending in `Done.` The generalisation claim is therefore not resting on a single run — the second resource
+scenario (`GHOSTTEST`, divisibility 2, threshold 10000) passed again on a fresh build.
+
 | Scenario | What it proves |
 | --- | --- |
 | A wallet proves control of native tTARI to a gate, and cannot prove it twice | the control case: the cohort's own native stealth resource, gate read back on chain, receipt, replay refused |
