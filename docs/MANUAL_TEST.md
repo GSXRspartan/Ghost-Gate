@@ -1,30 +1,49 @@
 # Manual human test — Ghost Gate
 
-**Status: NOT PERFORMED.** Every case below needs a reachable `walletd`, and the bridge's wallet channel
-is not wired (see `docs/GATE4_RESULTS.md`). This list is kept so the flow is defined before it is
+**Status: NOT PERFORMED.** The wallet channel is implemented (`crates/ghost-gate-walletd`) and the
+bridge connects to it, but no case below has been run: this environment has no standalone `walletd` to
+point `GG_WALLETD_ENDPOINT` at, because the cohort's harness starts its wallet in-process instead. The
+blocker is an environment, not missing code. This list is kept so the flow is defined before it is
 attempted, and so nobody later reports it as done on the strength of the code existing.
 
 ## Preconditions
 
 ```bash
-# 1. The cohort, with the Gate 3 patches and the Gate 4 vendored templates.
-export CARGO_TARGET_DIR_UNUSED=1   # not needed; scripts/ootle_e2e.sh passes --config itself
-
-# 2. A localnet: base node, validator, indexer, miner. The cohort's integration_tests harness starts
+# 1. A localnet: base node, validator, indexer, miner. The cohort's integration_tests harness starts
 #    these in process and is the easiest way to get a full stack.
 scripts/ootle_e2e.sh -- --tags "@ghost_gate"
 
-# 3. walletd, on 127.0.0.1:5100 by default.
+# 2. A standalone walletd for the same network. This is the piece the harness does not give you: it
+#    starts its wallet inside the test process rather than listening on a port.
 
-# 4. The bridge, with at least one gate and at least one permitted origin. Both are refused at startup
-#    if missing, because a bridge with no origin allowlist is the thing this design exists to prevent.
+# 3. The bridge, with at least one gate, at least one permitted origin, and the wallet endpoint.
+#    The bind address and the origin list are both refused at startup if wrong, because a bridge with
+#    no origin allowlist is the thing this design exists to prevent.
 GG_BRIDGE_GATES='g1=component_<hex>:resource_<hex>:<raw threshold>:<divisibility>:<symbol>' \
 GG_BRIDGE_ORIGINS='http://127.0.0.1:7799' \
 GG_BRIDGE_BIND='127.0.0.1:7799' \
-cargo run -p ghost-gate-bridge
+GG_WALLETD_ENDPOINT='http://127.0.0.1:5100/walletd' \
+GG_MAX_FEE=100000 GG_MAX_EPOCH=100 \
+cargo run -p ghost-gate-walletd --bin ghost-gate-bridge
 
-# 5. Open http://127.0.0.1:7799 in the same browser.
+# 4. Open http://127.0.0.1:7799 in the same browser.
 ```
+
+The startup banner is the first thing to check. It must show a wallet line, not the "no wallet daemon is
+connected" note:
+
+```text
+  wallet daemon: http://127.0.0.1:5100/walletd (network byte 16)
+  wallet status: reachable=true default_account=true network=16 (localnet)
+```
+
+If `network=` disagrees with the byte in the gate spec, proofs will be refused until they agree, and
+that is deliberate — a proof submitted to the wrong chain would be a valid transaction in the wrong
+place.
+
+The resource and threshold come from the gate's own on-chain state. Take them from the `@ghost_gate`
+scenario's output rather than inventing them: `GG_BRIDGE_GATES` needs a resource **address**, and a
+symbol in that field is refused at startup by design.
 
 ## The cases
 
@@ -51,6 +70,16 @@ cargo run -p ghost-gate-bridge
 - A page on an origin **not** in `GG_BRIDGE_ORIGINS` gets `403` on every route, including `/health`.
 - `GET /wallet/balance`, `GET /wallet/utxos` and `GET /gate/:id/keys` return `404`.
 - A prove request carrying an extra `amount` or `utxos` field is refused and never reaches the wallet.
+- A prove request carrying `utxo_address` is refused **by name**:
+  `unknown field \`utxo_address\`, expected one of \`gate_id\`, \`challenge_nonce\`, \`session_commitment\``.
+
+## Case 2 has a second form worth running
+
+Case 2 assumes the wallet holds *less* than the threshold, so the adapter finds no qualifying output and
+returns `GG: no unspent output of <resource> holds at least <n>` before any statement is built. Run the
+variant where the wallet holds a qualifying output **of a different resource**: the adapter will find
+nothing for the *gate's* resource and refuse the same way. Neither path may reach consensus, and
+neither may name a UTXO in its error.
 
 ## The question this test is really asking
 
