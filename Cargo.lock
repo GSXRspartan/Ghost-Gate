@@ -1773,6 +1773,7 @@ dependencies = [
 name = "ghost-gate-bridge"
 version = "0.1.0"
 dependencies = [
+ "blake2 0.10.6",
  "ghost-gate-core",
  "hex",
  "rand 0.10.3",
@@ -1859,6 +1860,8 @@ dependencies = [
  "ghost-gate-core",
  "hex",
  "rand 0.10.3",
+ "tari_engine_types",
+ "tari_indexer_client",
  "tari_ootle_transaction",
  "tari_ootle_wallet_sdk",
  "tari_ootle_walletd_client",

@@ -29,8 +29,8 @@
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tari_template_lib_types::{Amount, ResourceAddress};
 use tari_template_lib_types::stealth::StealthTransferStatement;
+use tari_template_lib_types::{Amount, ResourceAddress};
 
 /// What the bridge knows about the wallet without asking anything sensitive.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -181,7 +181,10 @@ pub trait WalletChannel {
     async fn status(&mut self) -> Result<WalletStatus, WalletError>;
 
     /// Asks the wallet to build a proof statement. The wallet locks its inputs and returns a lock id.
-    async fn build_statement(&mut self, request: StatementRequest) -> Result<StatementReply, WalletError>;
+    async fn build_statement(
+        &mut self,
+        request: StatementRequest,
+    ) -> Result<StatementReply, WalletError>;
 
     /// Submits the proof transaction, passing the lock so the wallet derives the signers itself.
     ///
@@ -198,7 +201,11 @@ pub trait WalletChannel {
     ) -> Result<String, WalletError>;
 
     /// Waits for a submitted transaction and reports what the network committed.
-    async fn wait(&mut self, transaction_id: &str, timeout: Duration) -> Result<CommitOutcome, WalletError>;
+    async fn wait(
+        &mut self,
+        transaction_id: &str,
+        timeout: Duration,
+    ) -> Result<CommitOutcome, WalletError>;
 }
 
 // NOTE ON THE PRODUCTION CHANNEL
@@ -232,8 +239,14 @@ mod tests {
         }))
         .unwrap();
         assert!(json.contains("resource_"), "{json}");
-        assert!(!json.contains("address"), "no destination may appear in a statement request: {json}");
-        assert!(!json.contains("utxo"), "no input may appear in a statement request: {json}");
+        assert!(
+            !json.contains("address"),
+            "no destination may appear in a statement request: {json}"
+        );
+        assert!(
+            !json.contains("utxo"),
+            "no input may appear in a statement request: {json}"
+        );
     }
 
     #[test]
@@ -256,7 +269,9 @@ mod tests {
         // serialised request would carry an identifier. Asserted on a struct literal built through
         // `..Default`-free construction so a new required field would break this test loudly.
         let request = StatementRequest {
-            resource: ResourceAddress::new(tari_template_lib_types::ObjectKey::from_array([9u8; 32])),
+            resource: ResourceAddress::new(tari_template_lib_types::ObjectKey::from_array(
+                [9u8; 32],
+            )),
             input_revealed: Amount::from(10_000u64),
             minimum_value_promise: 10_000,
             selection: InputChoice::WalletSelected,
@@ -276,7 +291,9 @@ mod tests {
         let s = WalletStatus::unreachable();
         assert!(!s.reachable);
         assert!(!s.has_default_account);
-        assert_eq!(WalletError::Unreachable("connection refused".into()).to_string(),
-                   "GG: the wallet daemon is not reachable: connection refused");
+        assert_eq!(
+            WalletError::Unreachable("connection refused".into()).to_string(),
+            "GG: the wallet daemon is not reachable: connection refused"
+        );
     }
 }

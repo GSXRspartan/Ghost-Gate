@@ -237,7 +237,10 @@ mod tests {
         let mut r = GateRegistry::new();
         let mut b = binding();
         b.threshold = 0;
-        assert_eq!(r.register("bad", b), Err(GateRegistrationError::ZeroThreshold));
+        assert_eq!(
+            r.register("bad", b),
+            Err(GateRegistrationError::ZeroThreshold)
+        );
     }
 
     #[test]
@@ -255,9 +258,16 @@ mod tests {
     fn two_fresh_challenges_differ() {
         let r = registry();
         let mut book = ChallengeBook::new();
-        let a = r.issue_challenge("g1", &mut book, b"s", std::time::Duration::from_secs(60)).unwrap();
-        let b = r.issue_challenge("g1", &mut book, b"s", std::time::Duration::from_secs(60)).unwrap();
-        assert_ne!(a.challenge.nonce, b.challenge.nonce, "each challenge needs its own nonce");
+        let a = r
+            .issue_challenge("g1", &mut book, b"s", std::time::Duration::from_secs(60))
+            .unwrap();
+        let b = r
+            .issue_challenge("g1", &mut book, b"s", std::time::Duration::from_secs(60))
+            .unwrap();
+        assert_ne!(
+            a.challenge.nonce, b.challenge.nonce,
+            "each challenge needs its own nonce"
+        );
         assert_eq!(a.challenge.gate, binding().address);
         assert_eq!(a.challenge.resource, binding().resource);
         assert_eq!(a.challenge.threshold, binding().threshold);
@@ -268,9 +278,10 @@ mod tests {
     fn a_challenge_cannot_be_issued_for_an_unregistered_gate() {
         let r = registry();
         let mut book = ChallengeBook::new();
-        assert!(r
-            .issue_challenge("nope", &mut book, b"s", std::time::Duration::from_secs(60))
-            .is_none());
+        assert!(
+            r.issue_challenge("nope", &mut book, b"s", std::time::Duration::from_secs(60))
+                .is_none()
+        );
         assert_eq!(book.live(), 0, "and nothing is left behind in the book");
     }
 }

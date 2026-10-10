@@ -316,8 +316,15 @@ mod tests {
             r#""destination":"x""#,
             r#""minimum_value_promise":1"#,
         ] {
-            let body = format!(r#"{{"gate_id":"g1","challenge_nonce":"{}",other}}"#, "ff".repeat(32));
-            let body = body.replacen("{}", &"ff".repeat(32), 1).replacen(",other", &format!(",{extra}"), 1);
+            let body = format!(
+                r#"{{"gate_id":"g1","challenge_nonce":"{}",other}}"#,
+                "ff".repeat(32)
+            );
+            let body = body.replacen("{}", &"ff".repeat(32), 1).replacen(
+                ",other",
+                &format!(",{extra}"),
+                1,
+            );
             assert!(
                 serde_json::from_str::<ProveRequest>(&body).is_err(),
                 "{extra} must not be accepted"
@@ -336,8 +343,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(
-            json,
-            r#"{"gate_id":"g1","challenge_nonce":"ff","session_commitment":"aa"}"#,
+            json, r#"{"gate_id":"g1","challenge_nonce":"ff","session_commitment":"aa"}"#,
             "the prove request must serialise to exactly these three fields"
         );
     }
@@ -352,6 +358,9 @@ mod tests {
         assert_eq!(issued.challenge.resource, gate.resource);
         assert_eq!(issued.challenge.threshold, gate.threshold);
         assert_eq!(issued.challenge.network, gate.network);
-        assert_eq!(issued.challenge.relying_site.as_slice(), gate.relying_site.as_slice());
+        assert_eq!(
+            issued.challenge.relying_site.as_slice(),
+            gate.relying_site.as_slice()
+        );
     }
 }

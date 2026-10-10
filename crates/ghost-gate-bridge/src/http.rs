@@ -52,7 +52,10 @@ impl Response {
         // Serialising our own types cannot fail; a failure here would mean a type with a map key that is
         // not a string, which serde_json reports rather than panicking.
         let body = serde_json::to_string(value).unwrap_or_else(|e| {
-            format!("{{\"error\":\"response could not be serialised: {}\"}}", e.to_string().replace('"', "'"))
+            format!(
+                "{{\"error\":\"response could not be serialised: {}\"}}",
+                e.to_string().replace('"', "'")
+            )
         });
         Self {
             status,
@@ -77,6 +80,8 @@ pub enum Route<'a> {
     Challenge(&'a str),
     /// `POST /gate/:id/prove`
     Prove(&'a str),
+    /// `POST /gate/:id/credential` — the credential proof mode (browser wallets).
+    Credential(&'a str),
     /// `GET /proof/:id/status`
     ProofStatus(&'a str),
     /// A file from the bridge's own static directory: `GET /`, `/app.css`, `/app.js`.
@@ -105,6 +110,7 @@ impl<'a> Route<'a> {
             ("GET", ["gate", id]) => Route::Gate(id),
             ("POST", ["gate", id, "challenge"]) => Route::Challenge(id),
             ("POST", ["gate", id, "prove"]) => Route::Prove(id),
+            ("POST", ["gate", id, "credential"]) => Route::Credential(id),
             ("GET", ["proof", id, "status"]) => Route::ProofStatus(id),
             ("GET", []) => Route::Asset("index.html"),
             ("GET", ["index.html"]) => Route::Asset("index.html"),
@@ -194,9 +200,19 @@ mod tests {
         assert_eq!(Route::resolve("GET", "/health"), Route::Health);
         assert_eq!(Route::resolve("GET", "/wallet/status"), Route::WalletStatus);
         assert_eq!(Route::resolve("GET", "/gate/g1"), Route::Gate("g1"));
-        assert_eq!(Route::resolve("POST", "/gate/g1/challenge"), Route::Challenge("g1"));
+        assert_eq!(
+            Route::resolve("POST", "/gate/g1/challenge"),
+            Route::Challenge("g1")
+        );
         assert_eq!(Route::resolve("POST", "/gate/g1/prove"), Route::Prove("g1"));
-        assert_eq!(Route::resolve("GET", "/proof/p1/status"), Route::ProofStatus("p1"));
+        assert_eq!(
+            Route::resolve("POST", "/gate/g1/credential"),
+            Route::Credential("g1")
+        );
+        assert_eq!(
+            Route::resolve("GET", "/proof/p1/status"),
+            Route::ProofStatus("p1")
+        );
     }
 
     #[test]
@@ -211,8 +227,17 @@ mod tests {
         // rather than to a normalised path that happens to escape.
         assert_eq!(Route::resolve("GET", "/"), Route::Asset("index.html"));
         assert_eq!(Route::resolve("GET", "/app.js"), Route::Asset("app.js"));
-        for bad in ["/app.js.map", "/Cargo.toml", "/../../etc/passwd", "/templates"] {
-            assert_eq!(Route::resolve("GET", bad), Route::NotFound, "{bad} must not be served");
+        for bad in [
+            "/app.js.map",
+            "/Cargo.toml",
+            "/../../etc/passwd",
+            "/templates",
+        ] {
+            assert_eq!(
+                Route::resolve("GET", bad),
+                Route::NotFound,
+                "{bad} must not be served"
+            );
         }
     }
 
@@ -235,16 +260,25 @@ mod tests {
             "/gate/g1/keys",
             "/proof/p1/statement",
         ] {
-            assert_eq!(Route::resolve("GET", path), Route::NotFound, "{path} must not exist");
+            assert_eq!(
+                Route::resolve("GET", path),
+                Route::NotFound,
+                "{path} must not exist"
+            );
         }
         for path in ["/wallet/transfer", "/gate/g1/spend", "/proof/p1/broadcast"] {
-            assert_eq!(Route::resolve("POST", path), Route::NotFound, "{path} must not exist");
+            assert_eq!(
+                Route::resolve("POST", path),
+                Route::NotFound,
+                "{path} must not exist"
+            );
         }
     }
 
     #[test]
     fn an_origin_header_is_read_out_of_the_request() {
-        let raw = "GET /health HTTP/1.1\r\nHost: 127.0.0.1:7799\r\nOrigin: https://vip.example\r\n\r\n";
+        let raw =
+            "GET /health HTTP/1.1\r\nHost: 127.0.0.1:7799\r\nOrigin: https://vip.example\r\n\r\n";
         let req = parse_request(raw).expect("parses");
         assert_eq!(req.origin.as_deref(), Some("https://vip.example"));
         assert_eq!(req.path, "/health");
@@ -254,12 +288,16 @@ mod tests {
     #[test]
     fn a_request_without_an_origin_reports_none() {
         let req = parse_request("GET /health HTTP/1.1\r\nHost: x\r\n\r\n").expect("parses");
-        assert_eq!(req.origin, None, "a CLI is not a browser, and the header's absence says so");
+        assert_eq!(
+            req.origin, None,
+            "a CLI is not a browser, and the header's absence says so"
+        );
     }
 
     #[test]
     fn an_origin_header_name_is_matched_case_insensitively() {
-        let req = parse_request("GET /health HTTP/1.1\r\noRiGiN: https://vip.example\r\n\r\n").expect("parses");
+        let req = parse_request("GET /health HTTP/1.1\r\noRiGiN: https://vip.example\r\n\r\n")
+            .expect("parses");
         assert_eq!(req.origin.as_deref(), Some("https://vip.example"));
     }
 
@@ -291,7 +329,10 @@ mod tests {
 
     #[test]
     fn an_error_response_is_json_with_a_reason() {
-        let r = render(&Response::error(403, "GG: origin http://evil.test is not permitted"));
+        let r = render(&Response::error(
+            403,
+            "GG: origin http://evil.test is not permitted",
+        ));
         assert!(r.starts_with("HTTP/1.1 403 Forbidden\r\n"));
         assert!(r.ends_with("{\"error\":\"GG: origin http://evil.test is not permitted\"}"));
     }

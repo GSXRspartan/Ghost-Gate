@@ -121,7 +121,10 @@ mod tests {
         // curl, a test harness, the operator. The header's absence is what marks a request as
         // non-browser, and a non-browser is the trusted case.
         assert!(policy().permits(None).is_ok());
-        assert!(OriginPolicy::new().permits(None).is_ok(), "even with an empty allowlist");
+        assert!(
+            OriginPolicy::new().permits(None).is_ok(),
+            "even with an empty allowlist"
+        );
     }
 
     #[test]
@@ -140,7 +143,10 @@ mod tests {
     #[test]
     fn the_allowlist_reports_what_it_permits() {
         assert_eq!(
-            policy().allow("http://localhost:5173").allowed().collect::<Vec<_>>(),
+            policy()
+                .allow("http://localhost:5173")
+                .allowed()
+                .collect::<Vec<_>>(),
             vec!["http://localhost:5173", "https://vip.example"]
         );
     }

@@ -38,7 +38,10 @@ use crate::wallet::{StatementRequest, WalletChannel};
 pub const MAX_BODY: usize = 8 * 1024;
 
 /// Everything the server needs, assembled once at startup.
-pub struct Bridge<W: WalletChannel> {
+pub struct Bridge<
+    W: WalletChannel,
+    R: crate::credential::ChainReader = crate::credential::NoChainReader,
+> {
     pub gates: GateRegistry,
     pub challenges: ChallengeBook,
     pub jobs: Vec<ProofJob>,
@@ -51,9 +54,13 @@ pub struct Bridge<W: WalletChannel> {
     /// A fixed list rather than a joined path: `Route::Asset` can only ever name one of three files, so
     /// there is no request that turns into a path traversal no matter what it contains.
     pub asset_dir: std::path::PathBuf,
+    /// Chain access for the credential proof mode. `None` is the default, and a bridge built
+    /// without one answers the credential route with an honest refusal rather than verifying
+    /// against nothing.
+    pub chain: Option<R>,
 }
 
-impl<W: WalletChannel> Bridge<W> {
+impl<W: WalletChannel> Bridge<W, crate::credential::NoChainReader> {
     pub fn new(gates: GateRegistry, wallet: W, origins: OriginPolicy) -> Self {
         Self {
             gates,
@@ -63,6 +70,32 @@ impl<W: WalletChannel> Bridge<W> {
             origins,
             challenge_ttl: crate::session::DEFAULT_CHALLENGE_TTL,
             asset_dir: std::path::PathBuf::from("web"),
+            chain: None,
+        }
+    }
+}
+
+impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
+    /// Serves the credential proof mode alongside the consensus one.
+    ///
+    /// Deliberately a separate constructor rather than a second generic on `new`: a bridge that
+    /// cannot read chain state must exist (the walletd path needs no reader), and its credential
+    /// route must refuse rather than invent a verdict.
+    pub fn with_chain_reader(
+        gates: GateRegistry,
+        wallet: W,
+        origins: OriginPolicy,
+        chain: R,
+    ) -> Self {
+        Self {
+            gates,
+            challenges: ChallengeBook::new(),
+            jobs: Vec::new(),
+            wallet,
+            origins,
+            challenge_ttl: crate::session::DEFAULT_CHALLENGE_TTL,
+            asset_dir: std::path::PathBuf::from("web"),
+            chain: Some(chain),
         }
     }
 
@@ -98,6 +131,7 @@ impl<W: WalletChannel> Bridge<W> {
             Route::Asset(name) => self.serve_asset(name),
             Route::Challenge(id) => self.issue_challenge(id),
             Route::Prove(id) => self.prove(id, request).await,
+            Route::Credential(id) => self.credential(id, request).await,
             Route::ProofStatus(id) => match self.jobs.iter().find(|j| j.id == id) {
                 Some(job) => Response::json(200, &job.status),
                 None => Response::error(404, "GG: no such proof"),
@@ -128,7 +162,10 @@ impl<W: WalletChannel> Bridge<W> {
                 },
                 body: String::from_utf8_lossy(&bytes).to_string(),
             },
-            Err(_) => Response::error(404, format!("GG: {name} is not present in the asset directory")),
+            Err(_) => Response::error(
+                404,
+                format!("GG: {name} is not present in the asset directory"),
+            ),
         }
     }
 
@@ -175,6 +212,121 @@ impl<W: WalletChannel> Bridge<W> {
         )
     }
 
+    /// The credential proof mode: verify a browser wallet's proof-of-funds output.
+    ///
+    /// The flow this completes is documented in `docs/PROVIDER_COMPATIBILITY.md` §3: the wallet
+    /// first created a real output carrying `minimumValuePromise`, then signed this bridge's
+    /// challenge over it. What this handler does is decide, from chain state and the signature,
+    /// whether that means what it claims. The page supplies four identifiers and a signature;
+    /// everything the verdict rests on is fetched or recomputed here.
+    ///
+    /// The challenge bookkeeping is the same book Mode A uses, so a credential proof and a
+    /// consensus proof compete for the same single-use challenges rather than each having a
+    /// private supply an attacker could pace.
+    async fn credential(&mut self, id: &str, request: &Request) -> Response {
+        let Some(gate) = self.gates.get(id).cloned() else {
+            return Response::error(404, "GG: no such gate");
+        };
+        let parsed: crate::credential::CredentialProofRequest =
+            match serde_json::from_str(&request.body) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::error(400, format!("GG: malformed credential request: {e}"));
+                }
+            };
+
+        // The reader must exist before anything else: a bridge with no chain access has no
+        // credential mode, and saying so is the honest answer.
+        let Some(chain) = self.chain.as_ref() else {
+            return Response::error(
+                503,
+                "GG: this bridge has no chain reader configured, so credential proofs cannot be verified. \
+                 Set GG_INDEXER_ENDPOINT to enable the credential mode.",
+            );
+        };
+
+        // The same challenge validation Mode A passes: live, single-use, session-bound, and bound
+        // to this gate's policy. A credential proof answers a challenge the bridge minted, never
+        // one a page invented.
+        let challenge = match validate_prove_request(
+            &gate,
+            &self.challenges,
+            &crate::policy::ProveRequest {
+                gate_id: parsed.gate_id.clone(),
+                challenge_nonce: parsed.challenge_nonce.clone(),
+                session_commitment: parsed.session_commitment.clone(),
+            },
+        ) {
+            Ok(c) => c,
+            Err(refusal) => {
+                return Response::json(
+                    409,
+                    &serde_json::json!({
+                        "refused": refusal.to_string(),
+                        "challenge_still_live": !matches!(
+                            refusal,
+                            crate::policy::ProofRefusal::Expired | crate::policy::ProofRefusal::AlreadyAnswered
+                        ),
+                    }),
+                );
+            }
+        };
+
+        // The challenge string the wallet signed is the exact string the challenge route returned
+        // and the page passed through: the lowercase hex of the nonce. Reconstruction, not trust.
+        let nonce_hex = crate::policy::nonce_to_hex(&challenge.nonce);
+        let verifier = crate::credential::CredentialVerifier {
+            network: gate.network,
+            threshold: gate.threshold,
+            resource: &gate.resource,
+            challenge_string: &nonce_hex,
+        };
+
+        let outcome = verifier.verify(chain, &parsed).await;
+        match outcome {
+            Ok(receipt) => {
+                // Retire the challenge only on a verified receipt, exactly as the consensus mode
+                // does: a refused proof leaves it live so the user can retry with a fresh output.
+                // The nonce bytes came from the challenge itself, already parsed by the policy
+                // check above.
+                let nonce_bytes = hex::decode(&nonce_hex)
+                    .ok()
+                    .and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok());
+                if let Some(nonce_bytes) = nonce_bytes {
+                    let _ = self.challenges.consume_on_acceptance(
+                        &nonce_bytes,
+                        challenge.session_commitment.as_slice(),
+                    );
+                }
+                let job_id = hex::encode(&crate::session::random_nonce()[..8]);
+                self.jobs.push(ProofJob {
+                    id: job_id.clone(),
+                    gate_id: id.to_string(),
+                    challenge_nonce: challenge.nonce.into_array(),
+                    status: ProofStatus::CredentialAccepted {
+                        result: Box::new(receipt.clone()),
+                    },
+                    started_at: std::time::SystemTime::now(),
+                });
+                Response::json(
+                    200,
+                    &serde_json::json!({
+                        "state": "accepted",
+                        "proof_id": job_id,
+                        "receipt": receipt,
+                    }),
+                )
+            }
+            Err(refusal) => Response::json(
+                409,
+                &serde_json::json!({
+                    "refused": refusal.to_string(),
+                    "challenge_still_live": true,
+                }),
+            ),
+        }
+    }
+
     /// Validates the request, then asks the wallet for a proof.
     ///
     /// The validation is complete before the wallet is touched. A request that fails a rule never
@@ -199,14 +351,17 @@ impl<W: WalletChannel> Bridge<W> {
             Err(refusal) => {
                 // A refusal is a normal outcome, not an error: the user was not proven to hold enough, and
                 // saying so leaks nothing they did not already know.
-                return Response::json(409, &serde_json::json!({
-                    "refused": refusal.to_string(),
-                    "challenge_still_live": !matches!(
-                        refusal,
-                        crate::policy::ProofRefusal::Expired | crate::policy::ProofRefusal::AlreadyAnswered
-                    ),
-                }));
-            },
+                return Response::json(
+                    409,
+                    &serde_json::json!({
+                        "refused": refusal.to_string(),
+                        "challenge_still_live": !matches!(
+                            refusal,
+                            crate::policy::ProofRefusal::Expired | crate::policy::ProofRefusal::AlreadyAnswered
+                        ),
+                    }),
+                );
+            }
         };
 
         let job_id_bytes = random_nonce();
@@ -238,11 +393,14 @@ impl<W: WalletChannel> Bridge<W> {
         let reply = match self.wallet.build_statement(statement).await {
             Ok(r) => r,
             Err(e) => {
-                self.set_status(&job_id, ProofStatus::Failed {
-                    reason: e.to_string(),
-                });
+                self.set_status(
+                    &job_id,
+                    ProofStatus::Failed {
+                        reason: e.to_string(),
+                    },
+                );
                 return Response::json(202, &serde_json::json!({ "proof_id": job_id }));
-            },
+            }
         };
 
         match self
@@ -266,13 +424,16 @@ impl<W: WalletChannel> Bridge<W> {
                     202,
                     &serde_json::json!({ "proof_id": job_id, "transaction_id": transaction_id }),
                 )
-            },
+            }
             Err(e) => {
-                self.set_status(&job_id, ProofStatus::Failed {
-                    reason: e.to_string(),
-                });
+                self.set_status(
+                    &job_id,
+                    ProofStatus::Failed {
+                        reason: e.to_string(),
+                    },
+                );
                 Response::json(202, &serde_json::json!({ "proof_id": job_id }))
-            },
+            }
         }
     }
 
@@ -291,7 +452,11 @@ impl<W: WalletChannel> Bridge<W> {
         for (index, transaction_id) in pending {
             let gate_id = self.jobs[index].gate_id.clone();
             let nonce = self.jobs[index].challenge_nonce;
-            match self.wallet.wait(&transaction_id, Duration::from_secs(120)).await {
+            match self
+                .wallet
+                .wait(&transaction_id, Duration::from_secs(120))
+                .await
+            {
                 Ok(crate::wallet::CommitOutcome::Accepted {
                     transaction_id,
                     attested_minimum,
@@ -299,37 +464,48 @@ impl<W: WalletChannel> Bridge<W> {
                 }) => {
                     // Only now is the challenge retired. A rejected proof leaves it live so the user can
                     // try again in the same session.
-                    self.challenges.consume_on_acceptance(
-                        &nonce,
-                        &self
-                            .challenges
-                            .peek(&nonce)
-                            .map(|e| e.challenge.session_commitment.as_slice().to_vec())
-                            .unwrap_or_default(),
-                    ).ok();
+                    self.challenges
+                        .consume_on_acceptance(
+                            &nonce,
+                            &self
+                                .challenges
+                                .peek(&nonce)
+                                .map(|e| e.challenge.session_commitment.as_slice().to_vec())
+                                .unwrap_or_default(),
+                        )
+                        .ok();
                     let binding = self.gates.get(&gate_id).cloned();
                     self.jobs[index].status = ProofStatus::Accepted {
                         result: PublicProof {
                             gate_id: gate_id.clone(),
-                            gate_address: binding.as_ref().map(|g| g.address.to_string()).unwrap_or_default(),
-                            resource_address: binding.as_ref().map(|g| g.resource.to_string()).unwrap_or_default(),
-                            required_minimum: binding.as_ref().map(|g| g.threshold).unwrap_or_default(),
+                            gate_address: binding
+                                .as_ref()
+                                .map(|g| g.address.to_string())
+                                .unwrap_or_default(),
+                            resource_address: binding
+                                .as_ref()
+                                .map(|g| g.resource.to_string())
+                                .unwrap_or_default(),
+                            required_minimum: binding
+                                .as_ref()
+                                .map(|g| g.threshold)
+                                .unwrap_or_default(),
                             attested_minimum,
                             input_count,
                             challenge_nonce: hex::encode(nonce),
                             transaction_id,
                         },
                     };
-                },
+                }
                 Ok(crate::wallet::CommitOutcome::Rejected { reason }) => {
                     self.jobs[index].status = ProofStatus::Refused { reason };
-                },
-                Ok(crate::wallet::CommitOutcome::Pending) => {},
+                }
+                Ok(crate::wallet::CommitOutcome::Pending) => {}
                 Err(e) => {
                     self.jobs[index].status = ProofStatus::Failed {
                         reason: e.to_string(),
                     };
-                },
+                }
             }
         }
     }
@@ -347,10 +523,11 @@ impl<W: WalletChannel> Bridge<W> {
 /// this project should outgrow casually: a bridge is a localhost service for one user's browser, and a
 /// serialized loop has no concurrency to get wrong. `Connection: close` is always sent, so a client
 /// cannot keep a socket open.
-pub async fn serve<W: WalletChannel + Send + 'static>(
-    addr: &str,
-    bridge: Bridge<W>,
-) -> std::io::Result<()> {
+pub async fn serve<W, R>(addr: &str, bridge: Bridge<W, R>) -> std::io::Result<()>
+where
+    W: WalletChannel + Send + 'static,
+    R: crate::credential::ChainReader + Send + 'static,
+{
     let listener = TcpListener::bind(addr).await?;
     let bridge = Arc::new(tokio::sync::Mutex::new(bridge));
     loop {
@@ -364,12 +541,12 @@ pub async fn serve<W: WalletChannel + Send + 'static>(
             Ok(0) => {
                 let _ = socket.shutdown().await;
                 continue;
-            },
+            }
             Ok(n) => n,
             Err(_) => {
                 let _ = socket.shutdown().await;
                 continue;
-            },
+            }
         };
         let raw = String::from_utf8_lossy(&buf[..read]).to_string();
 
@@ -377,7 +554,7 @@ pub async fn serve<W: WalletChannel + Send + 'static>(
             Some(request) => {
                 let mut bridge = bridge.lock().await;
                 bridge.handle(&request).await
-            },
+            }
             None => Response::error(400, "GG: malformed request"),
         };
 
@@ -391,6 +568,11 @@ mod tests {
     use crate::gate_registry::GateBinding;
     use crate::wallet::{CommitOutcome, InputChoice, StatementReply, WalletError, WalletStatus};
     use ghost_gate_core::network;
+    use rand::{CryptoRng, Rng, rng};
+    use tari_crypto::keys::{PublicKey as _, SecretKey as _};
+    use tari_crypto::ristretto::{RistrettoPublicKey, RistrettoSecretKey};
+    use tari_crypto::signatures::{SchnorrSigChallenge, SchnorrSignature};
+    use tari_crypto::tari_utilities::ByteArray;
     use tari_template_lib_types::stealth::StealthTransferStatement;
     use tari_template_lib_types::{ComponentAddress, MaxBytes, ObjectKey, ResourceAddress};
 
@@ -446,8 +628,12 @@ mod tests {
                 Err(WalletError::Unreachable("connection refused".into()))
             }
         }
-        async fn build_statement(&mut self, request: StatementRequest) -> Result<StatementReply, WalletError> {
-            self.asked.push((request.resource, request.minimum_value_promise));
+        async fn build_statement(
+            &mut self,
+            request: StatementRequest,
+        ) -> Result<StatementReply, WalletError> {
+            self.asked
+                .push((request.resource, request.minimum_value_promise));
             self.selections.push(request.selection.clone());
             if let Err(e) = &self.build_result {
                 return Err(WalletError::Refused(e.clone()));
@@ -467,10 +653,15 @@ mod tests {
         ) -> Result<String, WalletError> {
             // Recorded so a test can assert the nonce the bridge submitted is the one it issued: a
             // proof of some *other* challenge would be the failure worth catching here.
-            self.submitted.push((gate.to_string(), challenge.nonce.into_array())); // `gate` is `&str`.
+            self.submitted
+                .push((gate.to_string(), challenge.nonce.into_array())); // `gate` is `&str`.
             self.submit_result.clone().map_err(WalletError::Refused)
         }
-        async fn wait(&mut self, _transaction_id: &str, _timeout: Duration) -> Result<CommitOutcome, WalletError> {
+        async fn wait(
+            &mut self,
+            _transaction_id: &str,
+            _timeout: Duration,
+        ) -> Result<CommitOutcome, WalletError> {
             Ok(self.wait_result.clone())
         }
     }
@@ -505,9 +696,12 @@ mod tests {
             witness: OutputWitness {
                 amount: minimum_value_promise,
                 mask: RistrettoSecretKey::from(1u64),
-                sender_public_nonce: RistrettoPublicKey::from_secret_key(&RistrettoSecretKey::from(2u64)),
+                sender_public_nonce: RistrettoPublicKey::from_secret_key(
+                    &RistrettoSecretKey::from(2u64),
+                ),
                 minimum_value_promise,
-                encrypted_data: EncryptedData::try_from(vec![0u8; EncryptedData::min_size()]).unwrap(),
+                encrypted_data: EncryptedData::try_from(vec![0u8; EncryptedData::min_size()])
+                    .unwrap(),
                 resource_view_key: None,
             },
             auth: SpendAuthorization::Key(RistrettoPublicKeyBytes::default()),
@@ -522,10 +716,60 @@ mod tests {
         .expect("statement")
     }
 
+    /// A chain reader that pretends to be the indexer, so the credential route can be exercised
+    /// end to end. Only what the verifier needs is here: a floor, an auth key, and the ability to
+    /// be spent.
+    struct FakeChain {
+        outputs: std::collections::HashMap<String, crate::credential::UtxoOnChain>,
+    }
+
+    impl FakeChain {
+        fn with(substate_id: String, promise: u64, auth_key: [u8; 32]) -> Self {
+            let mut outputs = std::collections::HashMap::new();
+            outputs.insert(
+                substate_id,
+                crate::credential::UtxoOnChain {
+                    minimum_value_promise: promise,
+                    auth_key: Some(auth_key),
+                },
+            );
+            Self { outputs }
+        }
+    }
+
+    impl crate::credential::ChainReader for FakeChain {
+        async fn utxo(
+            &self,
+            address: &tari_template_lib_types::UtxoAddress,
+        ) -> Result<crate::credential::UtxoOnChain, String> {
+            // The production reader looks the UTXO up by its full string form; the fake keys on
+            // exactly what the caller will send.
+            match self.outputs.get(&address.to_string()) {
+                Some(o) => Ok(o.clone()),
+                None => Err("InputSubstateIsDown".into()),
+            }
+        }
+    }
+
+    fn credential_bridge(wallet: FakeWallet, chain: FakeChain) -> Bridge<FakeWallet, FakeChain> {
+        let mut gates = GateRegistry::new();
+        gates.register("g1", binding()).unwrap();
+        Bridge::with_chain_reader(
+            gates,
+            wallet,
+            OriginPolicy::new().allow("https://vip.example"),
+            chain,
+        )
+    }
+
     fn bridge(wallet: FakeWallet) -> Bridge<FakeWallet> {
         let mut gates = GateRegistry::new();
         gates.register("g1", binding()).unwrap();
-        Bridge::new(gates, wallet, OriginPolicy::new().allow("https://vip.example"))
+        Bridge::new(
+            gates,
+            wallet,
+            OriginPolicy::new().allow("https://vip.example"),
+        )
     }
 
     fn get(path: &str) -> Request {
@@ -546,8 +790,12 @@ mod tests {
         }
     }
 
-    async fn issue(b: &mut Bridge<FakeWallet>) -> (String, String) {
-        let r = b.handle(&post("/gate/g1/challenge", serde_json::json!({}))).await;
+    async fn issue<R: crate::credential::ChainReader>(
+        b: &mut Bridge<FakeWallet, R>,
+    ) -> (String, String) {
+        let r = b
+            .handle(&post("/gate/g1/challenge", serde_json::json!({})))
+            .await;
         let v: serde_json::Value = serde_json::from_str(&r.body).unwrap();
         (
             v["challenge_nonce"].as_str().unwrap().to_string(),
@@ -579,7 +827,11 @@ mod tests {
     async fn an_unregistered_gate_is_a_404_on_every_route() {
         let mut b = bridge(FakeWallet::new());
         for path in ["/gate/other", "/gate/other/challenge"] {
-            let method = if path.ends_with("challenge") { "POST" } else { "GET" };
+            let method = if path.ends_with("challenge") {
+                "POST"
+            } else {
+                "GET"
+            };
             let req = Request {
                 method,
                 path: path.into(),
@@ -637,7 +889,10 @@ mod tests {
             .await;
         assert_eq!(r.status, 202, "{}", r.body);
 
-        assert_eq!(b.wallet.asked, vec![(binding().resource, binding().threshold)]);
+        assert_eq!(
+            b.wallet.asked,
+            vec![(binding().resource, binding().threshold)]
+        );
         // `Named(vec![])`, not `WalletSelected`: an empty named set means "no input was specified",
         // which is what a request body can actually say, and the adapter fills it in by qualifying the
         // gate resource's own unspent outputs locally. Nothing named here came from the caller.
@@ -676,9 +931,7 @@ mod tests {
             .unwrap()
             .to_string();
 
-        let status = b
-            .handle(&get(&format!("/proof/{id}/status")))
-            .await;
+        let status = b.handle(&get(&format!("/proof/{id}/status"))).await;
         let body = status.body;
         assert!(
             body.contains("wallet-chosen inputs are not supported"),
@@ -795,10 +1048,11 @@ mod tests {
                 serde_json::json!({"gate_id":"g1","challenge_nonce":nonce,"session_commitment":session}),
             ))
             .await;
-        let proof_id = serde_json::from_str::<serde_json::Value>(&accepted.body).unwrap()["proof_id"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let proof_id =
+            serde_json::from_str::<serde_json::Value>(&accepted.body).unwrap()["proof_id"]
+                .as_str()
+                .unwrap()
+                .to_string();
         // Poll to completion so the accepted receipt -- the one response a site actually cares about --
         // is included in the sweep, not just the pending one.
         for _ in 0..20 {
@@ -809,7 +1063,9 @@ mod tests {
         }
         bodies.push((
             format!("/proof/{proof_id}/status"),
-            b.handle(&get(&format!("/proof/{proof_id}/status"))).await.body,
+            b.handle(&get(&format!("/proof/{proof_id}/status")))
+                .await
+                .body,
         ));
 
         for (path, body) in &bodies {
@@ -818,6 +1074,229 @@ mod tests {
                 "{path} returned a UTXO identifier: {body}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_credential_proof_from_a_real_signature_is_accepted_and_retires_the_challenge() {
+        // End to end with the real verifier: issue a challenge, sign it the way the wallet does,
+        // and require acceptance plus the single-use property.
+        let res = binding().resource;
+        let sk = RistrettoSecretKey::random(&mut rng());
+        let key_bytes = {
+            let pk = RistrettoPublicKey::from_secret_key(&sk);
+            let mut b = [0u8; 32];
+            b.copy_from_slice(pk.as_bytes());
+            b
+        };
+        // The substate id's resource half must be the gate's resource, in the bare-key form the
+        // wallets emit.
+        let substate_id = format!(
+            "utxo_{}_2c713522a4aaf79f2b219d869b5033d3d71d63c0537e5e0bbed2d717d8b2a67e",
+            hex::encode([7u8; 32])
+        );
+
+        let mut b = credential_bridge(
+            FakeWallet::new(),
+            FakeChain::with(substate_id.clone(), 50_000, key_bytes),
+        );
+        let (nonce, session) = issue(&mut b).await;
+
+        // Sign exactly what the wallet would sign: the framed message over the challenge string
+        // the challenge route returned.
+        let message = crate::credential::ownership_proof_message(
+            ghost_gate_core::network::LOCALNET,
+            &res,
+            &substate_id,
+            &nonce,
+        );
+        let signature = SchnorrSignature::<
+            RistrettoPublicKey,
+            RistrettoSecretKey,
+            SchnorrSigChallenge,
+        >::sign(&sk, &message, &mut rng())
+        .unwrap();
+        let pk = RistrettoPublicKey::from_secret_key(&sk);
+
+        let r = b
+            .handle(&post(
+                "/gate/g1/credential",
+                serde_json::json!({
+                    "gate_id": "g1",
+                    "challenge_nonce": nonce,
+                    "session_commitment": session,
+                    "substate_id": substate_id,
+                    "public_key": hex::encode(pk.as_bytes()),
+                    "public_nonce": hex::encode(signature.get_public_nonce().as_bytes()),
+                    "signature": hex::encode(signature.get_signature().as_bytes()),
+                }),
+            ))
+            .await;
+        assert_eq!(r.status, 200, "{}", r.body);
+        assert!(r.body.contains("\"accepted\""), "{}", r.body);
+        assert!(
+            r.body.contains("\"attested_minimum\":50000"),
+            "the floor is the chain's: {}",
+            r.body
+        );
+        assert!(r.body.contains("\"mode\":\"credential\""), "{}", r.body);
+
+        // Single-use: the same proof answers nothing a second time.
+        let r2 = b
+            .handle(&post(
+                "/gate/g1/credential",
+                serde_json::json!({
+                    "gate_id": "g1",
+                    "challenge_nonce": nonce,
+                    "session_commitment": session,
+                    "substate_id": substate_id,
+                    "public_key": hex::encode(pk.as_bytes()),
+                    "public_nonce": hex::encode(signature.get_public_nonce().as_bytes()),
+                    "signature": hex::encode(signature.get_signature().as_bytes()),
+                }),
+            ))
+            .await;
+        assert_eq!(r2.status, 409, "{}", r2.body);
+        assert!(r2.body.contains("already"), "{}", r2.body);
+    }
+
+    #[tokio::test]
+    async fn a_credential_proof_is_refused_when_the_output_is_below_the_gates_threshold() {
+        let sk = RistrettoSecretKey::random(&mut rng());
+        let key_bytes = {
+            let pk = RistrettoPublicKey::from_secret_key(&sk);
+            let mut b = [0u8; 32];
+            b.copy_from_slice(pk.as_bytes());
+            b
+        };
+        let substate_id = format!(
+            "utxo_{}_2c713522a4aaf79f2b219d869b5033d3d71d63c0537e5e0bbed2d717d8b2a67e",
+            hex::encode([7u8; 32])
+        );
+        let mut b = credential_bridge(
+            FakeWallet::new(),
+            FakeChain::with(substate_id.clone(), 9_999, key_bytes),
+        );
+        let (nonce, session) = issue(&mut b).await;
+        let res = binding().resource;
+        let message = crate::credential::ownership_proof_message(
+            ghost_gate_core::network::LOCALNET,
+            &res,
+            &substate_id,
+            &nonce,
+        );
+        let signature = SchnorrSignature::<
+            RistrettoPublicKey,
+            RistrettoSecretKey,
+            SchnorrSigChallenge,
+        >::sign(&sk, &message, &mut rng())
+        .unwrap();
+
+        let r = b
+            .handle(&post(
+                "/gate/g1/credential",
+                serde_json::json!({
+                    "gate_id": "g1",
+                    "challenge_nonce": nonce,
+                    "session_commitment": session,
+                    "substate_id": substate_id,
+                    "public_key": hex::encode(RistrettoPublicKey::from_secret_key(&sk).as_bytes()),
+                    "public_nonce": hex::encode(signature.get_public_nonce().as_bytes()),
+                    "signature": hex::encode(signature.get_signature().as_bytes()),
+                }),
+            ))
+            .await;
+        assert_eq!(r.status, 409, "{}", r.body);
+        assert!(r.body.contains("below this gate"), "{}", r.body);
+        assert!(r.body.contains("challenge_still_live\":true"), "{}", r.body);
+    }
+
+    #[tokio::test]
+    async fn a_credential_proof_naming_another_resource_is_refused() {
+        let sk = RistrettoSecretKey::random(&mut rng());
+        let key_bytes = {
+            let pk = RistrettoPublicKey::from_secret_key(&sk);
+            let mut b = [0u8; 32];
+            b.copy_from_slice(pk.as_bytes());
+            b
+        };
+        // A real-looking output of some *other* resource.
+        let other_resource_substate = format!(
+            "utxo_{}_2c713522a4aaf79f2b219d869b5033d3d71d63c0537e5e0bbed2d717d8b2a67e",
+            hex::encode([9u8; 32])
+        );
+        let mut b = credential_bridge(
+            FakeWallet::new(),
+            FakeChain::with(other_resource_substate.clone(), 50_000, key_bytes),
+        );
+        let (nonce, session) = issue(&mut b).await;
+
+        let r = b
+            .handle(&post(
+                "/gate/g1/credential",
+                serde_json::json!({
+                    "gate_id": "g1",
+                    "challenge_nonce": nonce,
+                    "session_commitment": session,
+                    "substate_id": other_resource_substate,
+                    "public_key": hex::encode([1u8; 32]),
+                    "public_nonce": hex::encode([2u8; 32]),
+                    "signature": hex::encode([3u8; 32]),
+                }),
+            ))
+            .await;
+        assert_eq!(r.status, 409, "{}", r.body);
+        assert!(r.body.contains("but this gate watches"), "{}", r.body);
+    }
+
+    #[tokio::test]
+    async fn a_credential_proof_on_a_bridge_without_a_chain_reader_says_so() {
+        // The default bridge has no reader. The route must refuse with the honest reason, not
+        // verify against nothing and not answer 404 as if the mode did not exist.
+        let mut b = bridge(FakeWallet::new());
+        let (nonce, session) = issue(&mut b).await;
+        let r = b
+            .handle(&post(
+                "/gate/g1/credential",
+                serde_json::json!({
+                    "gate_id": "g1",
+                    "challenge_nonce": nonce,
+                    "session_commitment": session,
+                    "substate_id": "utxo_x",
+                    "public_key": hex::encode([1u8; 32]),
+                    "public_nonce": hex::encode([2u8; 32]),
+                    "signature": hex::encode([3u8; 32]),
+                }),
+            ))
+            .await;
+        assert_eq!(r.status, 503, "{}", r.body);
+        assert!(r.body.contains("no chain reader"), "{}", r.body);
+    }
+
+    #[tokio::test]
+    async fn a_credential_request_cannot_smuggle_an_amount() {
+        let mut b = bridge(FakeWallet::new());
+        let (nonce, session) = issue(&mut b).await;
+        let r = b
+            .handle(&post(
+                "/gate/g1/credential",
+                serde_json::json!({
+                    "gate_id": "g1",
+                    "challenge_nonce": nonce,
+                    "session_commitment": session,
+                    "substate_id": "utxo_x",
+                    "public_key": hex::encode([1u8; 32]),
+                    "public_nonce": hex::encode([2u8; 32]),
+                    "signature": hex::encode([3u8; 32]),
+                    "minimum_value_promise": 100_000u64,
+                }),
+            ))
+            .await;
+        assert_eq!(r.status, 400, "{}", r.body);
+        assert!(
+            r.body.contains("malformed credential request"),
+            "{}",
+            r.body
+        );
     }
 
     #[tokio::test]
@@ -844,7 +1323,11 @@ mod tests {
         );
         req.origin = None; // a CLI, which is fine
         let r = b.handle(&req).await;
-        assert!(r.status == 202 || r.status == 409, "a CLI may ask; got {}", r.status);
+        assert!(
+            r.status == 202 || r.status == 409,
+            "a CLI may ask; got {}",
+            r.status
+        );
 
         // But an unlisted browser origin never gets that far.
         let mut hostile = post(
@@ -884,7 +1367,10 @@ mod tests {
         let (n1, s1) = issue(&mut b).await;
         let (n2, s2) = issue(&mut b).await;
         assert_ne!(n1, n2);
-        assert_ne!(s1, s2, "a session value the bridge generates per challenge cannot be reused");
+        assert_ne!(
+            s1, s2,
+            "a session value the bridge generates per challenge cannot be reused"
+        );
     }
 
     #[tokio::test]
@@ -925,9 +1411,15 @@ mod tests {
         let status = b.handle(&get(&format!("/proof/{proof_id}/status"))).await;
         let v: serde_json::Value = serde_json::from_str(&status.body).unwrap();
         assert_eq!(v["state"], "accepted");
-        assert_eq!(v["result"]["attested_minimum"], 10_000, "the floor, not the amount");
+        assert_eq!(
+            v["result"]["attested_minimum"], 10_000,
+            "the floor, not the amount"
+        );
         assert_eq!(v["result"]["required_minimum"], 10_000);
-        assert_eq!(v["result"]["input_count"], 1, "a count, never a list of inputs");
+        assert_eq!(
+            v["result"]["input_count"], 1,
+            "a count, never a list of inputs"
+        );
         assert_eq!(v["result"]["gate_id"], "g1");
 
         // And the challenge is now spent.
@@ -957,15 +1449,21 @@ mod tests {
             ))
             .await;
         assert_eq!(submitted.status, 202, "{}", submitted.body);
-        let proof_id = serde_json::from_str::<serde_json::Value>(&submitted.body).unwrap()["proof_id"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let proof_id =
+            serde_json::from_str::<serde_json::Value>(&submitted.body).unwrap()["proof_id"]
+                .as_str()
+                .unwrap()
+                .to_string();
         b.reconcile().await;
         let status = b.handle(&get(&format!("/proof/{proof_id}/status"))).await;
         let v: serde_json::Value = serde_json::from_str(&status.body).unwrap();
         assert_eq!(v["state"], "refused");
-        assert!(v["reason"].as_str().unwrap().contains("below the gate threshold"));
+        assert!(
+            v["reason"]
+                .as_str()
+                .unwrap()
+                .contains("below the gate threshold")
+        );
         assert_eq!(
             b.challenges.live(),
             1,

@@ -14,6 +14,11 @@ ghost-gate-bridge = { path = "../ghost-gate-bridge" }
 # localnet scenario drives directly, so the adapter speaks the same JSON-RPC surface the evidence was
 # gathered against rather than a re-description of it.
 tari_ootle_walletd_client = { workspace = true }
+# Chain reads for the bridge's credential mode: the relying site must fetch the proof output
+# itself, never accept it from the page.
+# `client` gates the REST surface; the indexer types alone are not enough to read substates.
+tari_indexer_client = { workspace = true, features = ["client"] }
+tari_engine_types = { workspace = true }
 # `transaction_builder()` and `UnsignedTransaction`. Needed to assemble the proof call, and the same
 # types the harness uses at integration_tests/tests/steps/ghost_gate.rs:477.
 tari_ootle_transaction = { workspace = true }

@@ -49,6 +49,10 @@
 //! [`submit_transaction`]: tari_ootle_walletd_client::WalletDaemonClient::submit_transaction
 //! [`wait_transaction_result`]: tari_ootle_walletd_client::WalletDaemonClient::wait_transaction_result
 
+mod indexer;
+
+pub use indexer::IndexerChainReader;
+
 use std::time::Duration;
 
 use ghost_gate_bridge::wallet::{
@@ -56,15 +60,15 @@ use ghost_gate_bridge::wallet::{
     WalletStatus,
 };
 use tari_ootle_transaction::{Epoch, Network, TransactionBuilder, TransactionId, args};
+use tari_ootle_wallet_sdk::apis::stealth_transfer::TransferOutput;
+use tari_ootle_wallet_sdk::crypto::pay_to::PayTo;
+use tari_ootle_wallet_sdk::models::{OutputStatus, WalletLockId};
 use tari_ootle_walletd_client::WalletDaemonClient;
 use tari_ootle_walletd_client::types::{
     AccountGetResponse, AccountsCreateStealthTransferStatementRequest, InputSelection,
     StealthUtxosListRequest, TransactionSubmitRequest, TransactionWaitResultRequest,
     TransactionWaitResultResponse, TransferStatementRequest,
 };
-use tari_ootle_wallet_sdk::apis::stealth_transfer::TransferOutput;
-use tari_ootle_wallet_sdk::crypto::pay_to::PayTo;
-use tari_ootle_wallet_sdk::models::{OutputStatus, WalletLockId};
 use tari_template_lib_types::stealth::StealthTransferStatement;
 use tari_template_lib_types::{Amount, ComponentAddress, ResourceAddress, UtxoAddress, UtxoId};
 
@@ -138,7 +142,9 @@ impl WalletDaemonChannel {
                 filter_by_status: Some(OutputStatus::Unspent),
             })
             .await
-            .map_err(|e| WalletError::Refused(format!("the wallet could not list {resource}: {e}")))?;
+            .map_err(|e| {
+                WalletError::Refused(format!("the wallet could not list {resource}: {e}"))
+            })?;
 
         // `u64` rather than `Amount` throughout: the comparison is against the gate's public threshold,
         // so there is no reason to carry a 128-bit amount or to convert one that could overflow.
@@ -167,10 +173,11 @@ impl WalletDaemonChannel {
             }
         }
 
-        best.map(|(_, address)| address).ok_or(WalletError::NoQualifyingOutput {
-            resource: resource.to_string(),
-            required,
-        })
+        best.map(|(_, address)| address)
+            .ok_or(WalletError::NoQualifyingOutput {
+                resource: resource.to_string(),
+                required,
+            })
     }
 }
 
@@ -190,7 +197,10 @@ impl WalletChannel for WalletDaemonChannel {
         })
     }
 
-    async fn build_statement(&mut self, request: StatementRequest) -> Result<StatementReply, WalletError> {
+    async fn build_statement(
+        &mut self,
+        request: StatementRequest,
+    ) -> Result<StatementReply, WalletError> {
         // Fail closed on the unsupported selection rather than producing a transaction consensus will
         // refuse. See `ghost_gate_bridge::wallet::InputChoice` for why this is the only honest answer.
         if request.selection == InputChoice::WalletSelected {
@@ -229,40 +239,47 @@ impl WalletChannel for WalletDaemonChannel {
 
         let response = self
             .client
-            .accounts_create_stealth_transfer_statement(AccountsCreateStealthTransferStatementRequest {
-                requests: vec![TransferStatementRequest {
-                    sender_account: tari_ootle_walletd_client::ComponentAddressOrName::ComponentAddress(
-                        account.account.component_address,
-                    ),
-                    resource_address: request.resource,
-                    // The input is named, not selected. This is the engine's requirement, not a
-                    // convenience: see the module docs.
-                    input_selection: InputSelection::Specific {
-                        utxo_addresses: vec![address],
-                    },
-                    outputs: vec![TransferOutput {
-                        // An `OotleAddress`, which is what the wallet needs to derive the output's
-                        // encryption keys. It is the wallet's own default address, read from the wallet --
-                        // never one a request supplied.
-                        address: account.address,
-                        revealed_amount: Amount::zero(),
-                        // The whole input moves. Anything else would need a change output, and a change
-                        // output would have to promise the threshold too -- so the full amount keeps the
-                        // qualifying output the only one that carries the promise.
-                        blinded_amount: request.input_revealed.to_u64_checked().ok_or_else(|| {
-                            WalletError::Refused(format!(
-                                "{} does not fit in a transaction's amount",
-                                request.input_revealed
-                            ))
-                        })?,
-                        memo: None,
-                        pay_to: PayTo::StealthPublicKey,
-                        minimum_value_promise: request.minimum_value_promise,
+            .accounts_create_stealth_transfer_statement(
+                AccountsCreateStealthTransferStatementRequest {
+                    requests: vec![TransferStatementRequest {
+                        sender_account:
+                            tari_ootle_walletd_client::ComponentAddressOrName::ComponentAddress(
+                                account.account.component_address,
+                            ),
+                        resource_address: request.resource,
+                        // The input is named, not selected. This is the engine's requirement, not a
+                        // convenience: see the module docs.
+                        input_selection: InputSelection::Specific {
+                            utxo_addresses: vec![address],
+                        },
+                        outputs: vec![TransferOutput {
+                            // An `OotleAddress`, which is what the wallet needs to derive the output's
+                            // encryption keys. It is the wallet's own default address, read from the wallet --
+                            // never one a request supplied.
+                            address: account.address,
+                            revealed_amount: Amount::zero(),
+                            // The whole input moves. Anything else would need a change output, and a change
+                            // output would have to promise the threshold too -- so the full amount keeps the
+                            // qualifying output the only one that carries the promise.
+                            blinded_amount: request.input_revealed.to_u64_checked().ok_or_else(
+                                || {
+                                    WalletError::Refused(format!(
+                                        "{} does not fit in a transaction's amount",
+                                        request.input_revealed
+                                    ))
+                                },
+                            )?,
+                            memo: None,
+                            pay_to: PayTo::StealthPublicKey,
+                            minimum_value_promise: request.minimum_value_promise,
+                        }],
                     }],
-                }],
-            })
+                },
+            )
             .await
-            .map_err(|e| WalletError::Refused(format!("the wallet would not build the statement: {e}")))?;
+            .map_err(|e| {
+                WalletError::Refused(format!("the wallet would not build the statement: {e}"))
+            })?;
 
         if response.statements.len() != 1 {
             return Err(WalletError::Refused(format!(
@@ -288,9 +305,14 @@ impl WalletChannel for WalletDaemonChannel {
     ) -> Result<String, WalletError> {
         // Refuse before signing if the wallet is on a different chain than the gate is bound to. A proof
         // submitted to the wrong network would be a valid transaction in the wrong place.
-        let found = self.client.get_wallet_info().await.map_err(|e| {
-            WalletError::Unreachable(format!("the wallet stopped answering mid-proof: {e}"))
-        })?.network_byte;
+        let found = self
+            .client
+            .get_wallet_info()
+            .await
+            .map_err(|e| {
+                WalletError::Unreachable(format!("the wallet stopped answering mid-proof: {e}"))
+            })?
+            .network_byte;
         if found != self.expected_network {
             return Err(WalletError::WrongNetwork {
                 expected: self.expected_network,
@@ -309,12 +331,11 @@ impl WalletChannel for WalletDaemonChannel {
 
         // `max_epoch` is a `u64` from the challenge's own field; the builder wants the cohort's `Epoch`.
         let max_epoch = Epoch(max_epoch);
-        let network = Network::try_from(self.expected_network).map_err(|_| {
-            WalletError::WrongNetwork {
+        let network =
+            Network::try_from(self.expected_network).map_err(|_| WalletError::WrongNetwork {
                 expected: self.expected_network,
                 found: self.expected_network,
-            }
-        })?;
+            })?;
 
         let transaction = TransactionBuilder::new(network, max_epoch)
             .with_nonce(rand::random())
@@ -355,14 +376,21 @@ impl WalletChannel for WalletDaemonChannel {
                 })?],
             })
             .await
-            .map_err(|e| WalletError::Refused(format!("the wallet would not submit the proof: {e}")))?;
+            .map_err(|e| {
+                WalletError::Refused(format!("the wallet would not submit the proof: {e}"))
+            })?;
 
         Ok(submitted.transaction_id.to_string())
     }
 
-    async fn wait(&mut self, transaction_id: &str, timeout: Duration) -> Result<CommitOutcome, WalletError> {
-        let id = TransactionId::from_hex(transaction_id)
-            .map_err(|e| WalletError::Refused(format!("{transaction_id:?} is not a transaction id: {e:?}")))?;
+    async fn wait(
+        &mut self,
+        transaction_id: &str,
+        timeout: Duration,
+    ) -> Result<CommitOutcome, WalletError> {
+        let id = TransactionId::from_hex(transaction_id).map_err(|e| {
+            WalletError::Refused(format!("{transaction_id:?} is not a transaction id: {e:?}"))
+        })?;
 
         let waited = self
             .client
@@ -482,7 +510,10 @@ mod tests {
 
         let address = utxo_address_of(&statement, gate_resource);
 
-        assert_eq!(address, UtxoAddress::new(gate_resource, UtxoId::from(commitment)));
+        assert_eq!(
+            address,
+            UtxoAddress::new(gate_resource, UtxoId::from(commitment))
+        );
         assert_eq!(
             address.resource_address(),
             &gate_resource,
@@ -501,7 +532,10 @@ mod tests {
             selection: InputChoice::WalletSelected,
         };
         let json = format!("{request:?}");
-        assert!(!json.to_lowercase().contains("utxo"), "no UTXO may reach the adapter: {json}");
+        assert!(
+            !json.to_lowercase().contains("utxo"),
+            "no UTXO may reach the adapter: {json}"
+        );
     }
 
     #[test]
@@ -511,7 +545,8 @@ mod tests {
         // check happens first. Without a wallet the alternative outcome would be `Unreachable`, so this
         // distinguishes "refused the selection" from "could not reach the wallet".
         let mut channel = WalletDaemonChannel {
-            client: WalletDaemonClient::connect("http://127.0.0.1:1", None).expect("a URL is a URL"),
+            client: WalletDaemonClient::connect("http://127.0.0.1:1", None)
+                .expect("a URL is a URL"),
             expected_network: ghost_gate_core::network::LOCALNET,
             max_fee: 100_000,
             max_epoch: 100,
@@ -549,11 +584,10 @@ mod tests {
             network: ghost_gate_core::network::LOCALNET,
             nonce: Hash32::from(nonce),
             expires_epoch: 90,
-            relying_site: tari_template_lib_types::MaxBytes::new_checked(b"vip.example".to_vec()).unwrap(),
-            session_commitment: tari_template_lib_types::MaxBytes::new_checked(
-                vec![0x11u8; 32],
-            )
-            .expect("32 bytes fits the session commitment bound"),
+            relying_site: tari_template_lib_types::MaxBytes::new_checked(b"vip.example".to_vec())
+                .unwrap(),
+            session_commitment: tari_template_lib_types::MaxBytes::new_checked(vec![0x11u8; 32])
+                .expect("32 bytes fits the session commitment bound"),
         };
         assert_eq!(challenge.nonce.into_array(), nonce);
         // A transaction must not outlive the challenge it answers.

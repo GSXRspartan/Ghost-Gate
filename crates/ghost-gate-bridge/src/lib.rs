@@ -35,9 +35,13 @@
 //! - [`policy`] — the validation every request passes, and the reason a request is refused.
 //! - [`OriginPolicy`] — which browser origins may talk to this process at all.
 //! - [`wallet`] — the wallet daemon channel, behind a trait so the policy above is testable without one.
+//! - [`credential`] — the credential proof mode (browser wallets): chain-state + signature
+//!   verification of a proof-of-funds output, with the properties that distinguish it from the
+//!   consensus mode stated rather than blurred.
 
 #![deny(unsafe_code)]
 
+pub mod credential;
 pub mod gate_registry;
 pub mod http;
 pub mod origin;
@@ -46,11 +50,18 @@ pub mod server;
 pub mod session;
 pub mod wallet;
 
-pub use gate_registry::{GateBinding, GateRegistry, GateRegistrationError};
+pub use credential::{
+    ChainReader, CredentialProofRequest, CredentialReceipt, CredentialRefusal, CredentialVerifier,
+    NoChainReader, OwnershipProof, UtxoOnChain, ownership_proof_message,
+    reported_key_is_the_auth_key,
+};
+pub use gate_registry::{GateBinding, GateRegistrationError, GateRegistry};
 pub use origin::{OriginPolicy, OriginRejection};
-pub use policy::{ProveRequest, ProofRefusal, validate_prove_request};
+pub use policy::{ProofRefusal, ProveRequest, validate_prove_request};
 pub use session::{ChallengeBook, IssuedChallenge, ProofJob, ProofStatus, PublicProof};
-pub use wallet::{CommitOutcome, InputChoice, StatementRequest, WalletChannel, WalletError, WalletStatus};
+pub use wallet::{
+    CommitOutcome, InputChoice, StatementRequest, WalletChannel, WalletError, WalletStatus,
+};
 
 /// Server version, reported by `GET /health`.
 pub const BRIDGE_VERSION: &str = env!("CARGO_PKG_VERSION");

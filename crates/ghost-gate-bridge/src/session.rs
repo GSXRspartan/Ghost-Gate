@@ -146,7 +146,10 @@ impl ChallengeBook {
 }
 
 /// Where an answer has got to.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// Deserialization is deliberately absent: a proof status is produced here and read over the wire,
+// never parsed back. That constraint is what allows the credential variant to reuse the consensus
+// receipt type without widening what can arrive on the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ProofStatus {
     /// The wallet is building the statement.
@@ -159,6 +162,13 @@ pub enum ProofStatus {
     Refused { reason: String },
     /// The wallet or the network could not be reached.
     Failed { reason: String },
+    /// Accepted through the credential mode. A separate variant, not a reshaped `Accepted`, so a
+    /// receipt always says which proof machinery produced it: a credential receipt names the
+    /// output it stands on, which is the property that makes it Mode B, and nothing may present
+    /// it as the consensus mode's receipt.
+    CredentialAccepted {
+        result: Box<crate::credential::CredentialReceipt>,
+    },
 }
 
 /// The public result of a proof. This is the whole surface that leaves the bridge.
@@ -236,11 +246,13 @@ mod tests {
     fn an_accepted_answer_retires_the_challenge() {
         let mut book = ChallengeBook::new();
         book.insert(challenge(1), TTL).unwrap();
-        book.consume_on_acceptance(&[1u8; 32], b"session-1").unwrap();
+        book.consume_on_acceptance(&[1u8; 32], b"session-1")
+            .unwrap();
         assert_eq!(book.live(), 0);
         assert_eq!(book.answered(), 1);
         assert_eq!(
-            book.consume_on_acceptance(&[1u8; 32], b"session-1").unwrap_err(),
+            book.consume_on_acceptance(&[1u8; 32], b"session-1")
+                .unwrap_err(),
             BookError::Consumed,
             "a second answer finds nothing, and is told it was already answered rather than \
              that it does not exist -- the more useful of the two refusals"
@@ -252,10 +264,15 @@ mod tests {
         let mut book = ChallengeBook::new();
         book.insert(challenge(1), TTL).unwrap();
         assert_eq!(
-            book.consume_on_acceptance(&[1u8; 32], b"session-2").unwrap_err(),
+            book.consume_on_acceptance(&[1u8; 32], b"session-2")
+                .unwrap_err(),
             BookError::SessionMismatch
         );
-        assert_eq!(book.live(), 1, "a lifted answer must not burn the challenge");
+        assert_eq!(
+            book.live(),
+            1,
+            "a lifted answer must not burn the challenge"
+        );
     }
 
     #[test]
@@ -263,14 +280,20 @@ mod tests {
         let mut book = ChallengeBook::new();
         book.insert(challenge(1), Duration::from_millis(1)).unwrap();
         std::thread::sleep(Duration::from_millis(5));
-        assert_eq!(book.check_live(&[1u8; 32], b"session-1").unwrap_err(), BookError::Expired);
+        assert_eq!(
+            book.check_live(&[1u8; 32], b"session-1").unwrap_err(),
+            BookError::Expired
+        );
     }
 
     #[test]
     fn a_duplicate_nonce_is_refused_rather_than_overwriting() {
         let mut book = ChallengeBook::new();
         book.insert(challenge(1), TTL).unwrap();
-        assert_eq!(book.insert(challenge(1), TTL).unwrap_err(), BookError::Consumed);
+        assert_eq!(
+            book.insert(challenge(1), TTL).unwrap_err(),
+            BookError::Consumed
+        );
         assert_eq!(book.live(), 1);
     }
 

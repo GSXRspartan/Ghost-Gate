@@ -25,6 +25,7 @@ use ghost_gate_bridge::wallet::{
     CommitOutcome, StatementReply, WalletChannel, WalletError, WalletStatus,
 };
 use ghost_gate_bridge::{GateBinding, GateRegistry, OriginPolicy};
+use ghost_gate_walletd::IndexerChainReader;
 use tari_template_lib_types::stealth::StealthTransferStatement;
 
 fn main() -> ExitCode {
@@ -75,15 +76,15 @@ fn main() -> ExitCode {
                 Ok(channel) => {
                     println!("  wallet daemon: {endpoint} (network byte {network})");
                     AnyWallet::Live(channel)
-                },
+                }
                 Err(e) => {
                     // Refusing to start is the honest response: a bridge that has been told where its
                     // wallet is and cannot reach it should not serve proofs that cannot complete.
                     eprintln!("ghost-gate-bridge: cannot connect to the wallet at {endpoint}: {e}");
                     return ExitCode::FAILURE;
-                },
+                }
             }
-        },
+        }
         _ => {
             // Stated plainly rather than discovered later: there is no wallet here, so /wallet/status
             // reports unavailable and a prove request cannot be completed. The gate metadata and
@@ -94,15 +95,18 @@ fn main() -> ExitCode {
                  The gate metadata and challenge routes are live."
             );
             AnyWallet::Absent(NoWallet)
-        },
+        }
     };
 
-    let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
         Ok(rt) => rt,
         Err(e) => {
             eprintln!("ghost-gate-bridge: could not start a runtime: {e}");
             return ExitCode::FAILURE;
-        },
+        }
     };
 
     // Probed once at startup, so a misconfigured network is visible immediately rather than at the first
@@ -122,17 +126,49 @@ fn main() -> ExitCode {
                     status.network
                 );
             }
-        },
-        Err(e) => eprintln!("  warning: the wallet did not answer a status probe ({e}); proofs will fail until it does."),
+        }
+        Err(e) => eprintln!(
+            "  warning: the wallet did not answer a status probe ({e}); proofs will fail until it does."
+        ),
     }
 
-    let bridge = Bridge::new(registry, wallet, config.origins);
-    match runtime.block_on(ghost_gate_bridge::server::serve(&config.bind, bridge)) {
+    // The credential mode needs chain reads. Optional by configuration: a bridge pointed only at
+    // walletd runs without it, and its credential route says exactly that instead of verifying
+    // against nothing.
+    //
+    // Two arms rather than one because the two bridges are different types (the reader is a type
+    // parameter, not a boxed object), and unifying them would need either a second enum or trait
+    // objects -- neither worth it for one if/else at startup.
+    let indexer = std::env::var("GG_INDEXER_ENDPOINT")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let outcome = match indexer {
+        Some(endpoint) => match IndexerChainReader::connect(&endpoint) {
+            Ok(reader) => {
+                println!("  indexer: {endpoint} (credential mode enabled)");
+                let bridge = Bridge::with_chain_reader(registry, wallet, config.origins, reader);
+                runtime.block_on(ghost_gate_bridge::server::serve(&config.bind, bridge))
+            }
+            Err(e) => {
+                eprintln!("ghost-gate-bridge: cannot connect to the indexer at {endpoint}: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => {
+            eprintln!(
+                "  note: GG_INDEXER_ENDPOINT is not set, so the credential proof mode (browser \
+                 wallets) is disabled; the consensus mode through walletd is unaffected."
+            );
+            let bridge = Bridge::new(registry, wallet, config.origins);
+            runtime.block_on(ghost_gate_bridge::server::serve(&config.bind, bridge))
+        }
+    };
+    match outcome {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("ghost-gate-bridge: {e}");
             ExitCode::FAILURE
-        },
+        }
     }
 }
 
@@ -200,7 +236,11 @@ impl WalletChannel for AnyWallet {
             Self::Absent(w) => w.submit(gate, challenge, statement, lock_id).await,
         }
     }
-    async fn wait(&mut self, transaction_id: &str, timeout: std::time::Duration) -> Result<CommitOutcome, WalletError> {
+    async fn wait(
+        &mut self,
+        transaction_id: &str,
+        timeout: std::time::Duration,
+    ) -> Result<CommitOutcome, WalletError> {
         match self {
             Self::Live(w) => w.wait(transaction_id, timeout).await,
             Self::Absent(w) => w.wait(transaction_id, timeout).await,
@@ -217,10 +257,17 @@ struct NoWallet;
 
 impl WalletChannel for NoWallet {
     async fn status(&mut self) -> Result<WalletStatus, WalletError> {
-        Err(WalletError::Unreachable("no wallet daemon is connected to this build".into()))
+        Err(WalletError::Unreachable(
+            "no wallet daemon is connected to this build".into(),
+        ))
     }
-    async fn build_statement(&mut self, _request: ghost_gate_bridge::StatementRequest) -> Result<StatementReply, WalletError> {
-        Err(WalletError::Unreachable("no wallet daemon is connected to this build".into()))
+    async fn build_statement(
+        &mut self,
+        _request: ghost_gate_bridge::StatementRequest,
+    ) -> Result<StatementReply, WalletError> {
+        Err(WalletError::Unreachable(
+            "no wallet daemon is connected to this build".into(),
+        ))
     }
     async fn submit(
         &mut self,
@@ -229,10 +276,18 @@ impl WalletChannel for NoWallet {
         _statement: &StealthTransferStatement,
         _lock_id: &str,
     ) -> Result<String, WalletError> {
-        Err(WalletError::Unreachable("no wallet daemon is connected to this build".into()))
+        Err(WalletError::Unreachable(
+            "no wallet daemon is connected to this build".into(),
+        ))
     }
-    async fn wait(&mut self, _transaction_id: &str, _timeout: std::time::Duration) -> Result<CommitOutcome, WalletError> {
-        Err(WalletError::Unreachable("no wallet daemon is connected to this build".into()))
+    async fn wait(
+        &mut self,
+        _transaction_id: &str,
+        _timeout: std::time::Duration,
+    ) -> Result<CommitOutcome, WalletError> {
+        Err(WalletError::Unreachable(
+            "no wallet daemon is connected to this build".into(),
+        ))
     }
 }
 
@@ -259,8 +314,9 @@ impl Config {
             ));
         }
 
-        let origins_raw = std::env::var("GG_BRIDGE_ORIGINS")
-            .map_err(|_| "GG_BRIDGE_ORIGINS must list at least one permitted browser origin".to_string())?;
+        let origins_raw = std::env::var("GG_BRIDGE_ORIGINS").map_err(|_| {
+            "GG_BRIDGE_ORIGINS must list at least one permitted browser origin".to_string()
+        })?;
         let origins: OriginPolicy = origins_raw
             .split(',')
             .map(str::trim)
@@ -273,7 +329,11 @@ impl Config {
         let gates_raw = std::env::var("GG_BRIDGE_GATES")
             .map_err(|_| "GG_BRIDGE_GATES must name at least one gate, as id=gate_address:resource:threshold:divisibility".to_string())?;
         let mut gates = Vec::new();
-        for entry in gates_raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        for entry in gates_raw
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             gates.push(parse_gate(entry)?);
         }
         if gates.is_empty() {
@@ -306,7 +366,9 @@ impl Config {
 /// The resource is named by **address**, never by symbol. The symbol is display only and is read last
 /// so that a caller cannot accidentally supply a name where an address belongs and have it accepted.
 fn parse_gate(entry: &str) -> Result<(String, GateBinding), String> {
-    let (id, rest) = entry.split_once('=').ok_or_else(|| format!("{entry:?} is missing id="))?;
+    let (id, rest) = entry
+        .split_once('=')
+        .ok_or_else(|| format!("{entry:?} is missing id="))?;
     let parts: Vec<&str> = rest.split(':').collect();
     if parts.len() < 5 {
         return Err(format!(
@@ -314,7 +376,10 @@ fn parse_gate(entry: &str) -> Result<(String, GateBinding), String> {
         ));
     }
     if !parts[0].starts_with("component_") {
-        return Err(format!("gate address must start with component_, got {:?}", parts[0]));
+        return Err(format!(
+            "gate address must start with component_, got {:?}",
+            parts[0]
+        ));
     }
     if !parts[1].starts_with("resource_") {
         return Err(format!(
@@ -327,7 +392,9 @@ fn parse_gate(entry: &str) -> Result<(String, GateBinding), String> {
         id.to_string(),
         GateBinding {
             address: parts[0].parse().map_err(|e| format!("gate address: {e}"))?,
-            resource: parts[1].parse().map_err(|e| format!("resource address: {e}"))?,
+            resource: parts[1]
+                .parse()
+                .map_err(|e| format!("resource address: {e}"))?,
             threshold: parts[2].parse().map_err(|e| format!("threshold: {e}"))?,
             network: ghost_gate_core::network::LOCALNET,
             relying_site: tari_template_lib_types::MaxBytes::new_checked(b"vip.example".to_vec())
