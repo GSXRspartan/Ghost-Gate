@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<!--
+  GHOST GATE — THE HAUNTED VAULT
+
+  An atmospheric descent through three sealed gates, opened only by genuine private
+  token-threshold proofs. The gates below are the bridge's registered gate ids; the thresholds
+  shown are whatever the BRIDGE reports for each gate over /gate/:id — never hard-coded here,
+  never trusted from this page's own state.
+
+  What this page never does, by the audit's rules (docs/SECURITY_RELEASE_GATE.md):
+  - no unlock is decided client-side. A chamber opens only from the bridge's own verdict for a
+    proof made in this session. Local storage keeps puzzle progress, lore and relics — cosmetic
+    only, and labelled as such.
+  - preview mode mints nothing. It is labelled in three places and touches no proof route.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Ghost Gate — The Haunted Vault</title>
+<link rel="stylesheet" href="/game/game.css">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body class="vault">
+<div id="fog" aria-hidden="true"></div>
+<div id="vignette" aria-hidden="true"></div>
+
+<main id="app">
+
+  <!-- ============================ TITLE / SANCTUM ============================ -->
+  <section id="title-screen">
+    <div class="title-wrap">
+      <h1 class="game-title"><span>GHOST</span> <span>GATE</span></h1>
+      <p class="game-subtitle">The Haunted Vault</p>
+      <p class="game-tagline">Three doors. Three thresholds. Your balance stays in the dark.</p>
+      <div class="title-actions">
+        <button id="btn-enter" class="btn primary">Descend</button>
+        <button id="btn-preview" class="btn ghost">Preview without a wallet</button>
+      </div>
+      <p class="title-note hint">
+        Real unlocks require a wallet and a genuine proof the network verifies.
+        Preview is a labelled walkthrough — it unlocks nothing and verifies nothing.
+      </p>
+    </div>
+  </section>
+
+  <!-- ============================ SANCTUM (HUB) ============================ -->
+  <section id="sanctum" hidden>
+    <header class="sanctum-head">
+      <h2>The Sanctum</h2>
+      <p class="hint" id="sanctum-status">The dark listens. Connect a wallet to begin.</p>
+      <div class="hud">
+        <span class="hud-item" title="Relics claimed">🕯 <b id="hud-relics">0</b>/3 relics</span>
+        <span class="hud-item" title="Secrets found">👁 <b id="hud-secrets">0</b> whispers</span>
+        <span class="hud-item"><button id="btn-wallet" class="btn small">Wallet</button>
+          <button id="btn-back-title" class="btn small ghost">Leave</button></span>
+      </div>
+    </header>
+
+    <div id="preview-banner" class="preview-banner" hidden>
+      <strong>PREVIEW MODE</strong> — sample states for walkthrough only. Nothing here is verified,
+      no proof was made, and no session exists. <button id="btn-exit-preview" class="btn small ghost">Exit preview</button>
+    </div>
+
+    <div class="doors">
+      <article class="door" id="door-crypt" data-gate="crypt">
+        <div class="door-visual crypt-visual">
+          <div class="door-left"></div><div class="door-right"></div>
+          <div class="door-crack"></div>
+          <div class="door-glow" aria-hidden="true"></div>
+          <span class="door-sigil" aria-hidden="true">☠</span>
+        </div>
+        <h3 class="door-name">The Crypt</h3>
+        <p class="door-req">Sealed · requires <b class="door-threshold">…</b></p>
+        <p class="door-lore hint">"Below the chapel floor, the first dead keep their vigil."</p>
+        <div class="door-actions">
+          <button class="btn primary door-prove">Break the seal</button>
+          <button class="btn ghost door-enter" hidden>Enter</button>
+        </div>
+      </article>
+
+      <article class="door" id="door-vault" data-gate="vault">
+        <div class="door-visual vault-visual">
+          <div class="door-left"></div><div class="door-right"></div>
+          <div class="door-crack"></div>
+          <div class="door-glow" aria-hidden="true"></div>
+          <span class="door-sigil" aria-hidden="true">🗝</span>
+        </div>
+        <h3 class="door-name">The Forgotten Vault</h3>
+        <p class="door-req">Sealed · requires <b class="door-threshold">…</b></p>
+        <p class="door-lore hint">"A banker's folly, bricked shut with the ledger inside."</p>
+        <div class="door-actions">
+          <button class="btn primary door-prove">Break the seal</button>
+          <button class="btn ghost door-enter" hidden>Enter</button>
+        </div>
+      </article>
+
+      <article class="door" id="door-abyss" data-gate="abyss">
+        <div class="door-visual abyss-visual">
+          <div class="door-left"></div><div class="door-right"></div>
+          <div class="door-crack"></div>
+          <div class="door-glow" aria-hidden="true"></div>
+          <span class="door-sigil" aria-hidden="true">🌀</span>
+        </div>
+        <h3 class="door-name">The Abyss</h3>
+        <p class="door-req">Sealed · requires <b class="door-threshold">…</b></p>
+        <p class="door-lore hint">"It is not that the door keeps something out. It keeps something in."</p>
+        <div class="door-actions">
+          <button class="btn primary door-prove">Break the seal</button>
+          <button class="btn ghost door-enter" hidden>Enter</button>
+        </div>
+      </article>
+    </div>
+
+    <p class="hint privacy-line">
+      Every seal is verified by the network through your Ghost Gate bridge: the gate learns a
+      <em>floor</em>, never a balance. Which output you spent is never shown to the site.
+    </p>
+  </section>
+
+  <!-- ============================ PROOF MODAL ============================ -->
+  <section id="proof-overlay" hidden>
+    <div class="proof-box">
+      <h3 id="proof-title">Breaking the seal</h3>
+      <p id="proof-line" class="hint">The dark stirs…</p>
+      <ol class="proof-steps">
+        <li data-step="challenge">The gate issues a fresh, single-use challenge</li>
+        <li data-step="statement">Your wallet prepares a private proof — approval in your wallet</li>
+        <li data-step="submit">The proof is submitted to the network</li>
+        <li data-step="wait">Consensus decides. The floor is public; the amount is not.</li>
+      </ol>
+      <p id="proof-error" class="error" hidden></p>
+      <div class="proof-actions">
+        <button id="proof-cancel" class="btn ghost">Stand down</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================ CHAMBER: THE CRYPT ============================ -->
+  <section id="chamber-crypt" class="chamber chamber-crypt" hidden>
+    <header class="chamber-head">
+      <h2>The Crypt</h2>
+      <p class="chamber-sub hint">Cold air. Four candles, long dead. Something expects them lit.</p>
+      <button class="btn small ghost chamber-leave">Back to the Sanctum</button>
+    </header>
+    <div class="chamber-body">
+      <p class="epitaph">"First the one that watches, then the one that weeps.<br>
+      Third, the keeper of names; last, the keeper of sleeps."</p>
+      <div class="candles" id="crypt-candles">
+        <!-- candle elements injected by script -->
+      </div>
+      <p class="hint puzzle-hint" id="crypt-hint">Light them in the order the epitaph tells. Wrong order wakes them.</p>
+    </div>
+    <div class="secret-glyph" data-secret="crypt" title="·">∴</div>
+  </section>
+
+  <!-- ============================ CHAMBER: THE FORGOTTEN VAULT ============================ -->
+  <section id="chamber-vault" class="chamber chamber-vault" hidden>
+    <header class="chamber-head">
+      <h2>The Forgotten Vault</h2>
+      <p class="chamber-sub hint">A dial of three rings. The ledger was locked with the banker's motto.</p>
+      <button class="btn small ghost chamber-leave">Back to the Sanctum</button>
+    </header>
+    <div class="chamber-body">
+      <p class="epitaph">"DEBT SLEEPS. TRUST WAKES. GOLD REMEMBERS."</p>
+      <div class="sigil" id="vault-sigil">
+        <div class="ring ring-outer" data-ring="0"><span class="glyph">D</span><span class="glyph">E</span><span class="glyph">B</span><span class="glyph">T</span></div>
+        <div class="ring ring-mid" data-ring="1"><span class="glyph">✦</span><span class="glyph">T</span><span class="glyph">R</span><span class="glyph">U</span><span class="glyph">S</span><span class="glyph">T</span></div>
+        <div class="ring ring-inner" data-ring="2"><span class="glyph">G</span><span class="glyph">O</span><span class="glyph">L</span><span class="glyph">D</span></div>
+      </div>
+      <p class="hint puzzle-hint" id="vault-hint">Click a ring to turn it. Each word must face the pointer at the top.</p>
+      <p class="hint" id="vault-state">Outer: — · Middle: — · Inner: —</p>
+    </div>
+    <div class="secret-glyph" data-secret="vault" title="·">∴</div>
+  </section>
+
+  <!-- ============================ CHAMBER: THE ABYSS ============================ -->
+  <section id="chamber-abyss" class="chamber chamber-abyss" hidden>
+    <header class="chamber-head">
+      <h2>The Abyss</h2>
+      <p class="chamber-sub hint">It whispers in fours. Answer in kind.</p>
+      <button class="btn small ghost chamber-leave">Back to the Sanctum</button>
+    </header>
+    <div class="chamber-body">
+      <div class="abyss-eye" id="abyss-eye"></div>
+      <div class="echoes" id="abyss-pads">
+        <button class="echo e0" data-i="0" aria-label="echo one"></button>
+        <button class="echo e1" data-i="1" aria-label="echo two"></button>
+        <button class="echo e2" data-i="2" aria-label="echo three"></button>
+        <button class="echo e3" data-i="3" aria-label="echo four"></button>
+      </div>
+      <p class="hint puzzle-hint" id="abyss-hint">Watch, then repeat. Each round grows by one.</p>
+    </div>
+    <div class="secret-glyph" data-secret="abyss" title="·">∴</div>
+  </section>
+
+  <!-- ============================ RELIC / LORE MODAL ============================ -->
+  <section id="relic-overlay" hidden>
+    <div class="relic-box">
+      <div class="relic-art" id="relic-art">🕯</div>
+      <h3 id="relic-title"></h3>
+      <p id="relic-lore" class="lore"></p>
+      <button id="relic-close" class="btn primary">Keep it</button>
+    </div>
+  </section>
+
+  <footer class="vault-footer">
+    <p class="hint">
+      Ghost Gate · The Haunted Vault — served by your local bridge, loopback only.
+      Local progress on this page (puzzles, lore, relics) is cosmetic and never a credential.
+    </p>
+  </footer>
+</main>
+
+<script src="/vendor/tari-connector.js"></script>
+<script type="module" src="/game/sanctum.js"></script>
+</body>
+</html>

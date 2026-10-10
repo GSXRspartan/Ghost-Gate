@@ -389,6 +389,24 @@ test("the walletd flow uses the existing bridge routes and reports the receipt v
 /* The matrix, as executable statements                                */
 /* ------------------------------------------------------------------ */
 
+test("the game page declares preview labelling and no persisted unlocks", async () => {
+  // Static checks over the game sources: the three labels must exist, and the unlock state that
+  // opens a door must be in-memory only (no localStorage writes for unlocks).
+  const { readFile } = await import("node:fs/promises");
+  const html = await readFile(new URL("../../game/index.html", import.meta.url), "utf8");
+  const js = await readFile(new URL("../../game/sanctum.js", import.meta.url), "utf8");
+  assert.match(html, /PREVIEW MODE/);
+  assert.match(js, /session\.unlocked/, "real unlocks live in memory only");
+  assert.doesNotMatch(
+    js,
+    /localStorage\.setItem\([^)]*unlock/i,
+    "unlocks must never be persisted",
+  );
+  assert.match(js, /store\.puzzles/, "cosmetic puzzle progress is persisted, labelled");
+  assert.match(js, /session\.provider\.id === "walletd"/, "consensus path via the walletd adapter");
+  assert.match(js, /credential/, "browser wallets use the verified credential path");
+});
+
 test("the compatibility matrix holds: no wallet implies both modes", () => {
   const sapientLocal = walletUsability(sapientCapabilities("local")).modes.map((m) => m.mode);
   const sapientDaemon = walletUsability(sapientCapabilities("daemon")).modes.map((m) => m.mode);

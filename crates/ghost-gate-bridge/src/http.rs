@@ -132,6 +132,10 @@ impl<'a> Route<'a> {
             ("GET", ["js", "ghost", "test.js"]) => Route::Asset("js/ghost/test.js"),
             ("GET", ["vendor", "tari-connector.js"]) => Route::Asset("vendor/tari-connector.js"),
             ("GET", ["vendor", "tari-dapp.d.ts"]) => Route::Asset("vendor/tari-dapp.d.ts"),
+            // The Haunted Vault. Same fixed-name rule as every other asset.
+            ("GET", ["game"]) => Route::Asset("game/index.html"),
+            ("GET", ["game", "sanctum.js"]) => Route::Asset("game/sanctum.js"),
+            ("GET", ["game", "game.css"]) => Route::Asset("game/game.css"),
             _ => Route::NotFound,
         }
     }
@@ -261,6 +265,8 @@ mod tests {
         assert_eq!(Route::resolve("GET", "/"), Route::Asset("index.html"));
         assert_eq!(Route::resolve("GET", "/js/ghost/provider.js"), Route::Asset("js/ghost/provider.js"));
         assert_eq!(Route::resolve("GET", "/vendor/tari-connector.js"), Route::Asset("vendor/tari-connector.js"));
+        assert_eq!(Route::resolve("GET", "/game"), Route::Asset("game/index.html"));
+        assert_eq!(Route::resolve("GET", "/game/sanctum.js"), Route::Asset("game/sanctum.js"));
         // The fixed-name list must stay closed: no subdirectory walk, no query suffix.
         assert_eq!(Route::resolve("GET", "/js/ghost/../secret.js"), Route::NotFound);
         assert_eq!(Route::resolve("GET", "/vendor/../Cargo.toml"), Route::NotFound);

@@ -250,6 +250,9 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
                 | "js/ghost/test.js"
                 | "vendor/tari-connector.js"
                 | "vendor/tari-dapp.d.ts"
+                | "game/index.html"
+                | "game/sanctum.js"
+                | "game/game.css"
         ) {
             return Response::error(404, "GG: no such asset");
         }
@@ -264,8 +267,8 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
             Ok(bytes) => Response {
                 status: 200,
                 content_type: match name {
-                    "index.html" => "text/html; charset=utf-8",
-                    "app.css" => "text/css; charset=utf-8",
+                    "index.html" | "game/index.html" => "text/html; charset=utf-8",
+                    "app.css" | "game/game.css" => "text/css; charset=utf-8",
                     // A declaration file is source text, not JavaScript.
                     "vendor/tari-dapp.d.ts" => "text/plain; charset=utf-8",
                     _ => "text/javascript; charset=utf-8",
