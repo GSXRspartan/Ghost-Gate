@@ -67,7 +67,11 @@ async fn run() -> i32 {
     let divisibility: u8 = env_or("GG_VAULT_DIVISIBILITY", "6").parse().unwrap_or(6);
     let supply: u64 = env_or("GG_VAULT_SUPPLY", "10_000_000".replace('_', "").as_str()).parse().unwrap_or(10_000_000);
 
-    let client = match WalletDaemonClient::connect(&endpoint, None) {
+    // The deploy tool authenticates like the bridge: an API key when the wallet requires one.
+    let client = match WalletDaemonClient::connect(
+        &endpoint,
+        std::env::var("GG_WALLETD_TOKEN").ok().filter(|t| !t.trim().is_empty()).map(zeroize::Zeroizing::new),
+    ) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("deploy_vault: cannot connect to walletd at {endpoint}: {e}");

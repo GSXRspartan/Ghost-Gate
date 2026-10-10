@@ -90,13 +90,22 @@ pub struct WalletDaemonChannel {
 
 impl WalletDaemonChannel {
     /// Connects to `endpoint`, which is a walletd JSON-RPC URL on loopback.
+    ///
+    /// `token` is the walletd API key, when the daemon requires authentication — an operator sets
+    /// `GG_WALLETD_TOKEN` and the bridge presents it on every call. The token is held by the
+    /// process and never logged; it is a credential, not configuration.
     pub fn connect(
         endpoint: &str,
+        token: Option<String>,
         expected_network: u8,
         max_fee: u64,
         max_epoch: u64,
     ) -> Result<Self, WalletError> {
-        let client = WalletDaemonClient::connect(endpoint, None)
+        // The client's token type is `zeroize::Zeroizing<String>` (alias private in the client),
+        // so the credential is constructed as exactly that — zeroised on drop, like the wallet
+        // holds it.
+        let encoded = token.map(zeroize::Zeroizing::new);
+        let client = WalletDaemonClient::connect(endpoint, encoded)
             .map_err(|e| WalletError::Unreachable(format!("cannot build a walletd client: {e}")))?;
         Ok(Self {
             client,

@@ -69,6 +69,7 @@ fn main() -> ExitCode {
                 .unwrap_or(ghost_gate_core::network::LOCALNET);
             match ghost_gate_walletd::WalletDaemonChannel::connect(
                 &endpoint,
+                std::env::var("GG_WALLETD_TOKEN").ok().filter(|t| !t.trim().is_empty()),
                 network,
                 fee_ceiling(),
                 max_epoch(),
