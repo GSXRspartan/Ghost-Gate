@@ -47,7 +47,18 @@ pub enum BookError {
     Consumed,
     #[error("GG: challenge belongs to a different browser session")]
     SessionMismatch,
+    #[error("GG: too many live challenges; wait for one to be answered or expire")]
+    TooManyChallenges,
 }
+
+/// The most live challenges the book will hold at once.
+///
+/// A challenge is state the process holds for up to the TTL, and minting one is unauthenticated
+/// apart from the origin policy. Without a cap, a page that loops the challenge route grows the
+/// process's memory without bound -- a denial of service that costs the attacker one request per
+/// entry. 256 is far above anything an honest user produces (a handful per session) and far below
+/// anything that matters to the allocator.
+pub const MAX_LIVE_CHALLENGES: usize = 256;
 
 /// The bridge's live challenges.
 #[derive(Debug, Default)]
@@ -70,6 +81,13 @@ impl ChallengeBook {
         if self.entries.contains_key(&nonce) {
             return Err(BookError::Consumed);
         }
+        // The cap is enforced on insert, after pruning whatever has already expired: a book that
+        // hit its cap through normal traffic frees the expired entries first, so the cap bounds
+        // *concurrent* challenges, not the rate.
+        self.prune_expired();
+        if self.entries.len() >= MAX_LIVE_CHALLENGES {
+            return Err(BookError::TooManyChallenges);
+        }
         self.entries.insert(
             nonce,
             IssuedChallenge {
@@ -78,6 +96,24 @@ impl ChallengeBook {
             },
         );
         Ok(())
+    }
+
+    /// Drops every entry whose TTL has passed.
+    ///
+    /// Called on insert rather than on a timer: the book has no background task, and the only
+    /// operation that can grow it is the one that should pay for cleaning it.
+    fn prune_expired(&mut self) {
+        let now = SystemTime::now();
+        self.entries.retain(|_, e| e.expires_at > now);
+    }
+
+    /// How many challenges are currently held, live or expired-but-not-yet-pruned.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 
     /// Reads a challenge without consuming it.

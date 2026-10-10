@@ -155,6 +155,18 @@ pub struct UtxoOnChain {
     pub minimum_value_promise: u64,
     /// The one-time key authorising a key-path spend, when the auth path is a key path.
     pub auth_key: Option<[u8; 32]>,
+    /// Whether the indexer's answer was itself verified against the shard group committee by
+    /// merkle proof.
+    ///
+    /// `false` means the value was served unverified — which is exactly the case where a malicious
+    /// or compromised indexer could hand the relying site a fabricated floor or key for an output
+    /// that does not exist, or a stale value for one that was spent. An access decision built on
+    /// unverified chain data is not a decision the bridge is willing to make, so the verifier
+    /// refuses these. The cost is real and documented: on networks with substate proofs disabled,
+    /// or in the window after an epoch change when no committee member can supply a proof yet,
+    /// credential proofs are unavailable. Fail-closed is the correct trade for an authorisation
+    /// path; the consensus mode does not depend on the indexer at all.
+    pub verified: bool,
 }
 
 /// Reads chain state, so the verifier can be tested without an indexer.
@@ -200,6 +212,8 @@ pub enum CredentialRefusal {
         "GG: the output's spend authorisation is not a key path, so ownership cannot be proven"
     )]
     NotKeySpendable,
+    #[error("GG: the indexer answered without a merkle-verified value; credential proofs refuse unverified chain data")]
+    UnverifiedChainData,
     #[error("GG: the ownership signature does not verify against the output's on-chain key")]
     ForgedKey,
     #[error("GG: malformed ownership proof: {0}")]
@@ -253,6 +267,13 @@ impl CredentialVerifier<'_> {
             .utxo(&address)
             .await
             .map_err(CredentialRefusal::Unspent)?;
+
+        // Indexer trust, stated as a rule: the floor and the key come from a remote service. When
+        // that service cannot prove its answer (merkle verification against the committee), the
+        // answer is not evidence and the proof is refused. See `UtxoOnChain::verified`.
+        if !on_chain.verified {
+            return Err(CredentialRefusal::UnverifiedChainData);
+        }
 
         if on_chain.minimum_value_promise < self.threshold {
             return Err(CredentialRefusal::BelowThreshold {
@@ -346,11 +367,13 @@ mod tests {
         promise: u64,
         auth_key: Option<[u8; 32]>,
         error: Option<String>,
+        verified: bool,
     }
 
     impl FixedReader {
         fn ok(promise: u64, auth_key: [u8; 32]) -> Self {
             Self {
+                verified: true,
                 promise,
                 auth_key: Some(auth_key),
                 error: None,
@@ -366,6 +389,7 @@ mod tests {
             Ok(UtxoOnChain {
                 minimum_value_promise: self.promise,
                 auth_key: self.auth_key,
+                verified: self.verified,
             })
         }
     }
@@ -544,6 +568,7 @@ mod tests {
             promise: 50_000,
             auth_key: Some(key_bytes(&pk)),
             error: Some("InputSubstateIsDown".into()),
+            verified: true,
         };
         let v = verifier(&res, 10_000, "9d69d80b");
 
@@ -590,11 +615,7 @@ mod tests {
         let req = request(&res, "9d69d80b", &sk);
         // `auth_key: None` is what a script-only auth path reads as: no key, so no ownership
         // proof can bind to this output.
-        let reader = FixedReader {
-            promise: 50_000,
-            auth_key: None,
-            error: None,
-        };
+        let reader = FixedReader { promise: 50_000, auth_key: None, error: None, verified: true };
         let v = verifier(&res, 10_000, "9d69d80b");
 
         let err = v
@@ -618,6 +639,27 @@ mod tests {
             .await
             .expect_err("garbage must refuse");
         assert!(matches!(err, CredentialRefusal::Malformed(_)), "{err}");
+    }
+
+    #[tokio::test]
+    async fn an_unverified_indexer_answer_is_refused_even_when_everything_else_matches() {
+        // A compromised indexer could fabricate a floor and a key for an output that does not
+        // exist, or serve a stale record for one that was spent. The merkle-verified flag is the
+        // indexer's own statement that it did neither; without it there is no evidence, and an
+        // authorisation decision is not made on no evidence.
+        let res = resource(7);
+        let (sk, pk) = keypair();
+        let req = request(&res, "9d69d80b", &sk);
+        let reader = FixedReader {
+            promise: 50_000,
+            auth_key: Some(key_bytes(&pk)),
+            error: None,
+            verified: false,
+        };
+        let v = verifier(&res, 10_000, "9d69d80b");
+
+        let err = v.verify(&reader, &req).await.expect_err("unverified chain data must refuse");
+        assert!(matches!(err, CredentialRefusal::UnverifiedChainData), "{err}");
     }
 
     #[tokio::test]

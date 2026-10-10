@@ -35,6 +35,14 @@ pub struct Request {
     pub path: String,
     /// The `Origin` header, if the caller sent one. `None` means not a browser.
     pub origin: Option<String>,
+    /// The `Host` header, if the caller sent one.
+    ///
+    /// Checked because of DNS rebinding: a page that resolves a name it controls to `127.0.0.1`
+    /// reaches this bridge with *same-origin* requests, which carry no `Origin` header and so pass
+    /// the origin allowlist precisely because they look like the operator's own CLI. The `Host`
+    /// header is what distinguishes them: a browser sends the name it typed, not the address it
+    /// connected to. See `Bridge::handle`.
+    pub host: Option<String>,
     /// The request body, already bounded by the caller.
     pub body: String,
 }
@@ -151,16 +159,18 @@ pub fn parse_request(raw: &str) -> Option<Request> {
     let path = target.split('?').next().unwrap_or("/").to_string();
 
     let mut origin = None;
+    let mut host = None;
     for line in lines {
         if line.is_empty() {
             break;
         }
-        if let Some(value) = line
-            .split_once(':')
-            .filter(|(name, _)| name.eq_ignore_ascii_case("origin"))
-            .map(|(_, v)| v.trim().to_string())
-        {
-            origin = Some(value);
+        if let Some((name, value)) = line.split_once(':') {
+            let value = value.trim().to_string();
+            if name.eq_ignore_ascii_case("origin") {
+                origin = Some(value);
+            } else if name.eq_ignore_ascii_case("host") {
+                host = Some(value);
+            }
         }
     }
 
@@ -169,6 +179,7 @@ pub fn parse_request(raw: &str) -> Option<Request> {
         method,
         path,
         origin,
+        host,
         body: raw[body_start..].to_string(),
     })
 }
@@ -185,6 +196,7 @@ pub fn render(response: &Response) -> String {
         403 => "Forbidden",
         404 => "Not Found",
         409 => "Conflict",
+        429 => "Too Many Requests",
         500 => "Internal Server Error",
         503 => "Service Unavailable",
         _ => "OK",
@@ -202,6 +214,19 @@ pub fn render(response: &Response) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_host_header_is_parsed_from_the_request() {
+        let raw = "GET /health HTTP/1.1\r\nHost: evil.com:7799\r\nAccept: */*\r\n\r\n";
+        let req = parse_request(raw).expect("a well-formed request parses");
+        assert_eq!(req.host.as_deref(), Some("evil.com:7799"));
+        assert_eq!(req.origin, None, "no Origin header means not a browser");
+
+        // Absent Host is None, not an error: HTTP/1.0 clients omit it, and the operator's curl
+        // never sends one to a loopback bridge.
+        let bare = "GET /health HTTP/1.1\r\n\r\n";
+        assert_eq!(parse_request(bare).unwrap().host, None);
+    }
 
     #[test]
     fn every_documented_route_resolves() {

@@ -61,6 +61,9 @@ impl ChainReader for IndexerChainReader {
         };
         Ok(UtxoOnChain {
             minimum_value_promise: output.output.minimum_value_promise,
+            // The indexer's own merkle-verification statement, carried through untouched. A
+            // `false` here refuses at the verifier, by design.
+            verified: response.verified,
             auth_key: output.auth.spend_key().map(|k| {
                 let mut out = [0u8; 32];
                 out.copy_from_slice(k.as_bytes());

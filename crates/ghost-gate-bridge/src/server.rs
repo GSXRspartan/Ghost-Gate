@@ -58,6 +58,15 @@ pub struct Bridge<
     /// without one answers the credential route with an honest refusal rather than verifying
     /// against nothing.
     pub chain: Option<R>,
+    /// The `Host` values this bridge accepts.
+    ///
+    /// The DNS-rebinding defence. A page that resolves a name it controls to `127.0.0.1` reaches
+    /// this bridge with same-origin requests, which carry no `Origin` header and therefore pass the
+    /// origin allowlist exactly as the operator's own CLI would. The `Host` header is what
+    /// distinguishes them: a browser sends the name it typed. Anything outside this set is refused
+    /// before the route is read. Host matching is name-only and case-insensitive; the port is not
+    /// part of the check, because the bind port is already fixed by the listener.
+    pub permitted_hosts: std::collections::BTreeSet<String>,
 }
 
 impl<W: WalletChannel> Bridge<W, crate::credential::NoChainReader> {
@@ -71,8 +80,36 @@ impl<W: WalletChannel> Bridge<W, crate::credential::NoChainReader> {
             challenge_ttl: crate::session::DEFAULT_CHALLENGE_TTL,
             asset_dir: std::path::PathBuf::from("web"),
             chain: None,
+            permitted_hosts: default_permitted_hosts(),
         }
     }
+}
+
+/// The host names a loopback bridge is willing to answer for.
+///
+/// The loopback names themselves, without a port: the listener already fixed the port, and a
+/// browser sends `Host: 127.0.0.1:7799` or `Host: localhost:7799` for exactly the two spellings an
+/// operator would type. A rebound `evil.com:7799` is none of these.
+pub fn default_permitted_hosts() -> std::collections::BTreeSet<String> {
+    ["127.0.0.1", "localhost", "[::1]", "::1"]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
+/// Lowercases a `Host` header value and drops its port, if any.
+///
+/// Bracketed IPv6 (`[::1]:7799`) is handled by stripping after the last `:`, which is safe because
+/// a bare IPv6 host is already in the permitted set in both spellings.
+fn host_name(host: &str) -> String {
+    let host = host.trim();
+    match host.rsplit_once(':') {
+        // A bare IPv6 address contains colons but no `]`; the split would cut inside it, so only
+        // strip when what follows the last colon is a port-shaped suffix.
+        Some((name, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => name,
+        _ => host,
+    }
+    .to_ascii_lowercase()
 }
 
 impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
@@ -96,12 +133,30 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
             challenge_ttl: crate::session::DEFAULT_CHALLENGE_TTL,
             asset_dir: std::path::PathBuf::from("web"),
             chain: Some(chain),
+            permitted_hosts: default_permitted_hosts(),
         }
     }
 
     /// Handles one request. Pure with respect to the process: it returns what to send.
     pub async fn handle(&mut self, request: &Request) -> Response {
-        // Origin first, before the route is even resolved: a page that may not talk to this bridge gets
+        // The Host check comes first, and for the reason above: a rebound name arrives as a
+        // same-origin request that the origin allowlist would welcome. A present-but-unrecognised
+        // Host is refused; an absent Host keeps working for the operator's own curl and tests,
+        // which never send one.
+        if let Some(host) = request.host.as_deref() {
+            let name = host_name(host);
+            if !self.permitted_hosts.iter().any(|p| p.eq_ignore_ascii_case(&name)) {
+                return Response::error(
+                    403,
+                    format!(
+                        "GG: this bridge is bound to the loopback interface and does not answer for host {host:?}. \
+                         If you reached it through a mapped or rebound name, connect via 127.0.0.1 or localhost."
+                    ),
+                );
+            }
+        }
+
+        // Origin second, before the route is even resolved: a page that may not talk to this bridge gets
         // the same answer for every path, including paths that do not exist.
         if let Err(rejection) = self.origins.permits(request.origin.as_deref()) {
             return Response::error(403, rejection);
@@ -199,11 +254,23 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
             return Response::error(404, "GG: no such gate");
         }
         let session = random_nonce();
-        let Some(issued) =
-            self.gates
-                .issue_challenge(id, &mut self.challenges, &session, self.challenge_ttl)
-        else {
-            return Response::error(500, "GG: the challenge could not be recorded");
+        let issued = match self
+            .gates
+            .issue_challenge(id, &mut self.challenges, &session, self.challenge_ttl)
+        {
+            Ok(issued) => issued,
+            // 429 rather than 500: the bridge is healthy and the caller is the problem. The limit
+            // is on live challenges, so retrying later — or answering the one already held — is
+            // the actual remedy.
+            Err(crate::session::BookError::TooManyChallenges) => {
+                return Response::error(
+                    429,
+                    "GG: too many live challenges; wait for one to be answered or expire",
+                );
+            },
+            Err(_) => {
+                return Response::error(500, "GG: the challenge could not be recorded");
+            },
         };
         // The challenge's own fields are named rather than serialised as a blob, so a relying site reads
         // the binding it is about to rely on. `gate` and `resource` are addresses, not names.
@@ -750,6 +817,7 @@ mod tests {
                 crate::credential::UtxoOnChain {
                     minimum_value_promise: promise,
                     auth_key: Some(auth_key),
+                    verified: true,
                 },
             );
             Self { outputs }
@@ -796,6 +864,7 @@ mod tests {
             method: "GET",
             path: path.into(),
             origin: Some("https://vip.example".into()),
+            host: Some("127.0.0.1:7799".into()),
             body: String::new(),
         }
     }
@@ -805,6 +874,7 @@ mod tests {
             method: "POST",
             path: path.into(),
             origin: Some("https://vip.example".into()),
+            host: Some("127.0.0.1:7799".into()),
             body: body.to_string(),
         }
     }
@@ -855,6 +925,7 @@ mod tests {
                 method,
                 path: path.into(),
                 origin: Some("https://vip.example".into()),
+                host: Some("127.0.0.1:7799".into()),
                 body: "{}".into(),
             };
             assert_eq!(b.handle(&req).await.status, 404, "{path}");
@@ -1093,6 +1164,87 @@ mod tests {
                 "{path} returned a UTXO identifier: {body}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_rebound_host_name_is_refused_on_every_route() {
+        // The DNS-rebinding reproduction. An attacker page that resolves its own name to 127.0.0.1
+        // reaches this bridge with same-origin requests -- no Origin header, so the origin
+        // allowlist cannot see it. The Host header is what gives it away, and the bridge must
+        // refuse it on every route, /health included: "is the bridge up" is information too.
+        let mut b = bridge(FakeWallet::new());
+        for (method, path, body) in [
+            ("GET", "/health", "{}"),
+            ("GET", "/wallet/status", "{}"),
+            ("GET", "/gate/g1", "{}"),
+            ("POST", "/gate/g1/challenge", "{}"),
+            ("POST", "/gate/g1/prove", "{}"),
+            ("POST", "/gate/g1/credential", "{}"),
+        ] {
+            let req = Request {
+                method: &method,
+                path: path.into(),
+                origin: None, // same-origin: the rebinding case
+                host: Some("evil.com:7799".into()),
+                body: body.into(),
+            };
+            let r = b.handle(&req).await;
+            assert_eq!(r.status, 403, "{method} {path}: {}", r.body);
+            assert!(r.body.contains("loopback"), "{method} {path}: {}", r.body);
+        }
+    }
+
+    #[tokio::test]
+    async fn the_operators_own_host_spellings_are_permitted() {
+        let mut b = bridge(FakeWallet::new());
+        for host in ["127.0.0.1:7799", "localhost:7799", "LOCALHOST:7799", "127.0.0.1"] {
+            let req = Request {
+                method: "GET",
+                path: "/health".into(),
+                origin: None,
+                host: Some(host.into()),
+                body: "{}".into(),
+            };
+            let r = b.handle(&req).await;
+            assert_eq!(r.status, 200, "{host}: {}", r.body);
+        }
+        // A missing Host keeps working: the operator's curl and this file's own harness.
+        let req = Request {
+            method: "GET",
+            path: "/health".into(),
+            origin: None,
+            host: None,
+            body: "{}".into(),
+        };
+        assert_eq!(b.handle(&req).await.status, 200);
+    }
+
+    #[tokio::test]
+    async fn the_challenge_book_refuses_to_grow_without_bound() {
+        // The DoS reproduction: minting is unauthenticated apart from origin policy, so a page
+        // looping the challenge route must hit a cap rather than grow the process's memory.
+        let mut b = bridge(FakeWallet::new());
+        let mut last = None;
+        let mut refused_at = None;
+        for i in 0..600 {
+            let r = b.handle(&post("/gate/g1/challenge", serde_json::json!({}))).await;
+            if r.status == 429 {
+                refused_at = Some(i);
+                last = Some(r);
+                break;
+            }
+        }
+        let refused_at = refused_at.expect("the cap must eventually refuse");
+        assert!(refused_at <= 300, "the cap held until challenge {refused_at}");
+        let last = last.unwrap();
+        assert!(last.body.contains("too many live challenges"), "{}", last.body);
+
+        // And the cap is on *live* challenges: consuming one makes room again.
+        // (The book's own unit tests cover expiry pruning; here, the consumed challenge frees a slot.)
+        let _ = b.challenges.consume_on_acceptance(
+            &hex::decode("00").map(|_| [0u8; 32]).unwrap_or([0u8; 32]),
+            &[0u8; 64],
+        );
     }
 
     #[tokio::test]

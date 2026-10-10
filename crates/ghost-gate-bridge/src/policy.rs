@@ -80,6 +80,9 @@ impl From<BookError> for ProofRefusal {
             BookError::Expired => Self::Expired,
             BookError::Consumed => Self::AlreadyAnswered,
             BookError::SessionMismatch => Self::SessionMismatch,
+            // A saturated book is not a property of *this* challenge; it surfaces on issue, never
+            // on validate. Mapped here so the conversion stays total.
+            BookError::TooManyChallenges => Self::UnknownChallenge,
         }
     }
 }
