@@ -144,6 +144,7 @@ impl GateRegistry {
         session_commitment: &[u8],
         expires_in: std::time::Duration,
         issued_to_origin: Option<String>,
+        expires_epoch: u64,
     ) -> Result<IssuedChallenge, crate::session::BookError> {
         let gate = self.gates.get(id).ok_or(crate::session::BookError::Unknown)?;
         let challenge = Challenge {
@@ -152,7 +153,11 @@ impl GateRegistry {
             threshold: gate.threshold,
             network: gate.network,
             nonce: Hash32::from_array(crate::session::random_nonce()),
-            expires_epoch: 0, // epoch-relative expiry is the gate's rule; see below
+            // The epoch bound is defence in depth; the wall-clock TTL above is the operative
+            // liveness limit and the nonce burn is the single-use guarantee. The second-pass audit
+            // caught the hard-coded 0: on any chain at epoch > 0 the gate would refuse every
+            // bridge-minted challenge, which is fail-closed but functionally dead.
+            expires_epoch,
             relying_site: gate.relying_site.clone(),
             session_commitment: max_bytes(session_commitment).ok_or(crate::session::BookError::Unknown)?,
         };
@@ -265,10 +270,10 @@ mod tests {
         let r = registry();
         let mut book = ChallengeBook::new();
         let a = r
-            .issue_challenge("g1", &mut book, b"s", std::time::Duration::from_secs(60), None)
+            .issue_challenge("g1", &mut book, b"s", std::time::Duration::from_secs(60), None, 1_000)
             .unwrap();
         let b = r
-            .issue_challenge("g1", &mut book, b"s", std::time::Duration::from_secs(60), None)
+            .issue_challenge("g1", &mut book, b"s", std::time::Duration::from_secs(60), None, 1_000)
             .unwrap();
         assert_ne!(
             a.challenge.nonce, b.challenge.nonce,
@@ -286,7 +291,7 @@ mod tests {
         let mut book = ChallengeBook::new();
         assert!(
             matches!(
-                r.issue_challenge("nope", &mut book, b"s", std::time::Duration::from_secs(60), None),
+                r.issue_challenge("nope", &mut book, b"s", std::time::Duration::from_secs(60), None, 1_000),
                 Err(crate::session::BookError::Unknown)
             ),
             "an unregistered gate is an operator error, distinct from a saturated book"

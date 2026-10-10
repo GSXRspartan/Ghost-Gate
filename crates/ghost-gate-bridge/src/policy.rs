@@ -111,7 +111,12 @@ pub fn validate_prove_request(
     // session commitment travels inside the challenge response, so possession of the pair proves
     // nothing about who is presenting it; the issuing origin is the part of the binding a reader
     // cannot forge. Operator callers (no Origin) may only answer operator challenges.
-    if issued.issued_to_origin.as_deref() != caller_origin {
+    let same_origin = match (issued.issued_to_origin.as_deref(), caller_origin) {
+        (None, None) => true,
+        (Some(issuer), Some(caller)) => crate::origin::normalise(issuer) == crate::origin::normalise(caller),
+        _ => false,
+    };
+    if !same_origin {
         return Err(ProofRefusal::SessionMismatch);
     }
 

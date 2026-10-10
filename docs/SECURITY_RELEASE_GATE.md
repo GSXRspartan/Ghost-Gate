@@ -12,6 +12,7 @@ pass, no test), or **KNOWN GAP** (documented, not fixed).
 | Consensus proof (Mode A) via local walletd | **GO** | PROVEN — adversarial suite (11 forgeries refused) + engine suite + localnet scenario; soundness enforced by the engine, not wallet software | Yes |
 | Credential proof (Mode B) via browser wallets | **GO, with conditions** | PROVEN — verifier tests (framing, key binding, unspent, unverified-data refusal, session binding) | Yes, where the indexer serves merkle-verified substates |
 | Credential proof where substate proofs are disabled | **NO-GO** | F-04 fail-closed; the route answers with the reason | n/a |
+| Credential proof against an indexer the operator does **not** control | **NO-GO** | Second pass: `verified` is the indexer's own bit; a compromised indexer sets it alongside fabricated values. Requires an operator-run indexer until upstream exposes proof bytes | No |
 | Bridge transport (loopback, origins, hosts, caps) | **GO** | PROVEN — rebinding, cap, hijack, replay, oversize, smuggling checks | Yes |
 | Haunted Vault game **preview mode** | **GO** | Renders labelled sample state; never calls the challenge/proof/credential routes; mints nothing | Yes |
 | Haunted Vault game **real unlocks** | **GO on testnets** | Bridge verdicts only; receipt-backed; no client-side grant path | Yes (testnet) |
@@ -61,6 +62,10 @@ pass, no test), or **KNOWN GAP** (documented, not fixed).
 - **F-07**: upstream GHSA-rr6w-w4r5-9fcx (account bricking via dust deposits) applies to the pinned
   cohort. Availability loss only; no Ghost Gate rule bypass. Remediation is a cohort re-pin when
   upstream ships a fix — a deliberate, byte-verified procedure (see below).
+- **F-13**: the gate template's `set_open` is callable by anyone (availability griefing on a public
+  network; reopening is equally public, so the flag is not an admin control). Template frozen at
+  `gate3-green`; an owner-gated rule is an upstream change to propose. The game treats open as the
+  normal state.
 - **Credential mode finality**: a receipt describes the output state at one moment; sites govern
   session length with their own expiry. Deep reorgs between lookup and decision are inherent to L2.
 - **Cross-session linkability in credential mode**: re-using one output links the sessions that used
@@ -74,7 +79,9 @@ pass, no test), or **KNOWN GAP** (documented, not fixed).
 
 - **None open at audit close.** All confirmed findings are fixed with failing-then-passing
   regressions; one was refuted; one upstream advisory is documented as unfixable within this
-  project's provenance constraints.
+  project's provenance constraints. Second-pass additions (F-10 reconcile dead path, F-11 epoch 0,
+  F-12 answered-map cap, F-13 `set_open` griefing) are fixed or recorded as KNOWN GAP in
+  `SECURITY_FINDINGS.md`.
 
 ## Features safe for local demonstration
 

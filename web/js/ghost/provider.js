@@ -128,11 +128,21 @@ export function windowTariProvider(id, label, discover) {
       });
 
       // Poll until the wallet has an answer. Statuses: pending/approved/submitting/submitted/
-      // rejected/failed; a rejected or failed request is a normal outcome, reported as one.
+      // rejected/failed; a rejected or failed request is a normal outcome, reported as one. The
+      // loop is bounded (the second-pass audit caught the unbounded `for(;;)`, which let a hung
+      // wallet extension pin the page at one request per second forever): ten minutes, then an
+      // error that tells the user the request id so the wallet's own history still has it.
       let summary;
+      const deadline = Date.now() + 10 * 60 * 1000;
       for (;;) {
         summary = await p.request({ method: "tari_getTransactionRequest", params: { requestId } });
         if (summary.status !== "pending" && summary.status !== "submitting") break;
+        if (Date.now() > deadline) {
+          throw new Error(
+            `the wallet did not settle request ${requestId} within ten minutes; check the wallet's ` +
+            "history before trying again",
+          );
+        }
         await sleep(1000);
       }
       if (summary.status !== "approved" && summary.status !== "submitted") {

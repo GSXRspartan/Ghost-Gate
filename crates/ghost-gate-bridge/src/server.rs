@@ -37,6 +37,12 @@ use crate::wallet::{StatementRequest, WalletChannel};
 /// Largest request body accepted. A prove request is three short strings; anything larger is not one.
 pub const MAX_BODY: usize = 8 * 1024;
 
+/// How long one status poll will wait on the wallet while reconciling a submitted job.
+///
+/// Short on purpose: the caller is polling anyway, so completion is driven by repeated polls rather
+/// than by one long blocking wait, and every other route stays responsive behind the mutex.
+pub const RECONCILE_WAIT: Duration = Duration::from_secs(3);
+
 /// The most proof jobs the bridge retains.
 ///
 /// Same reasoning as the challenge cap: a job is a record the process holds so `/proof/:id/status`
@@ -57,6 +63,8 @@ pub struct Bridge<
     pub origins: OriginPolicy,
     /// How long a freshly minted challenge stays answerable.
     pub challenge_ttl: Duration,
+    /// The epoch bound minted into every challenge. See `gate_registry::issue_challenge`.
+    pub challenge_expires_epoch: u64,
     /// Where the static demo assets live, resolved once at startup from a fixed list of names.
     ///
     /// A fixed list rather than a joined path: `Route::Asset` can only ever name one of three files, so
@@ -86,12 +94,22 @@ impl<W: WalletChannel> Bridge<W, crate::credential::NoChainReader> {
             wallet,
             origins,
             challenge_ttl: crate::session::DEFAULT_CHALLENGE_TTL,
+            challenge_expires_epoch: DEFAULT_CHALLENGE_EXPIRES_EPOCH,
             asset_dir: std::path::PathBuf::from("web"),
             chain: None,
             permitted_hosts: default_permitted_hosts(),
         }
     }
 }
+
+/// The default epoch bound minted into challenges.
+///
+/// Deliberately large rather than zero: the gate refuses an expired challenge, so a small constant
+/// would brick every proof the moment the chain moved past it (the second-pass audit caught the
+/// original hard-coded 0). The wall-clock TTL and the single-use nonce are the operative limits;
+/// this bound is defence in depth, and an operator who wants a tight one sets
+/// `GG_CHALLENGE_EXPIRES_EPOCH`.
+pub const DEFAULT_CHALLENGE_EXPIRES_EPOCH: u64 = 1_000_000;
 
 /// The host names a loopback bridge is willing to answer for.
 ///
@@ -142,6 +160,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
             asset_dir: std::path::PathBuf::from("web"),
             chain: Some(chain),
             permitted_hosts: default_permitted_hosts(),
+            challenge_expires_epoch: DEFAULT_CHALLENGE_EXPIRES_EPOCH,
         }
     }
 
@@ -195,9 +214,18 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
             Route::Challenge(id) => self.issue_challenge(id, request),
             Route::Prove(id) => self.prove(id, request).await,
             Route::Credential(id) => self.credential(id, request).await,
-            Route::ProofStatus(id) => match self.jobs.iter().find(|j| j.id == id) {
-                Some(job) => Response::json(200, &job.status),
-                None => Response::error(404, "GG: no such proof"),
+            Route::ProofStatus(id) => {
+                // Lazy reconciliation: a Submitted job is polled against the wallet here, because
+                // nothing else in the process ever does. The pre-audit design had a `reconcile`
+                // method that only tests called -- which this audit's second pass caught as a
+                // shipped-but-dead consensus path (F-10). The per-call wait is deliberately short:
+                // the polling client drives completion by returning, and the bridge never blocks
+                // longer than a few seconds on one job.
+                self.reconcile_job(id, RECONCILE_WAIT).await;
+                match self.jobs.iter().find(|j| j.id == id) {
+                    Some(job) => Response::json(200, &job.status),
+                    None => Response::error(404, "GG: no such proof"),
+                }
             },
             Route::NotFound => Response::error(404, "GG: no such route"),
         }
@@ -270,6 +298,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
                 &session,
                 self.challenge_ttl,
                 request.origin.clone(),
+                self.challenge_expires_epoch,
             )
         {
             Ok(issued) => issued,
@@ -538,26 +567,39 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
         }
     }
 
-    /// Polls the network for a submitted proof and retires the challenge only on acceptance.
+    /// Polls the network for every submitted proof. Kept for tests and for a future background
+    /// tick; the production path is `reconcile_job` from the status route, which the second-pass
+    /// audit added after finding that nothing here was ever called from the server.
     pub async fn reconcile(&mut self) {
-        let pending: Vec<(usize, String)> = self
+        let ids: Vec<String> = self
             .jobs
             .iter()
-            .enumerate()
-            .filter_map(|(i, j)| match &j.status {
-                ProofStatus::Submitted { transaction_id } => Some((i, transaction_id.clone())),
-                _ => None,
-            })
+            .filter(|j| matches!(j.status, ProofStatus::Submitted { .. }))
+            .map(|j| j.id.clone())
             .collect();
+        for id in ids {
+            self.reconcile_job(&id, Duration::from_secs(120)).await;
+        }
+    }
 
-        for (index, transaction_id) in pending {
-            let gate_id = self.jobs[index].gate_id.clone();
-            let nonce = self.jobs[index].challenge_nonce;
-            match self
-                .wallet
-                .wait(&transaction_id, Duration::from_secs(120))
-                .await
-            {
+    /// Polls the network for one submitted proof and retires the challenge only on acceptance.
+    ///
+    /// Jobs that are not `Submitted` are untouched, so repeated polls of a settled proof are free.
+    pub async fn reconcile_job(&mut self, job_id: &str, timeout: Duration) {
+        let Some(index) = self.jobs.iter().position(|j| j.id == job_id) else {
+            return;
+        };
+        if !matches!(self.jobs[index].status, ProofStatus::Submitted { .. }) {
+            return;
+        }
+        let transaction_id = match &self.jobs[index].status {
+            ProofStatus::Submitted { transaction_id } => transaction_id.clone(),
+            _ => return,
+        };
+        let gate_id = self.jobs[index].gate_id.clone();
+        let nonce = self.jobs[index].challenge_nonce;
+        match self.wallet.wait(&transaction_id, timeout).await
+        {
                 Ok(crate::wallet::CommitOutcome::Accepted {
                     transaction_id,
                     attested_minimum,
@@ -608,7 +650,6 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
                     };
                 }
             }
-        }
     }
 
     /// Records a job, dropping the oldest once the cap is hit.
@@ -1663,6 +1704,39 @@ mod tests {
             ))
             .await;
         assert_eq!(again.status, 409);
+    }
+
+    #[tokio::test]
+    async fn the_status_route_itself_reconciles_a_submitted_proof() {
+        // The F-10 regression. reconcile() existed and was tested, but nothing in production ever
+        // called it, so a real proof sat in `submitted` forever and the challenge was never
+        // consumed bridge-side. The route must do the polling itself; this test would have failed
+        // before the fix because there is no manual reconcile() in it.
+        let mut b = bridge(FakeWallet::new());
+        let (nonce, session) = issue(&mut b).await;
+        let r = b
+            .handle(&post(
+                "/gate/g1/prove",
+                serde_json::json!({"gate_id":"g1","challenge_nonce":nonce,"session_commitment":session}),
+            ))
+            .await;
+        assert_eq!(r.status, 202, "{}", r.body);
+        let proof_id = serde_json::from_str::<serde_json::Value>(&r.body).unwrap()["proof_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // First poll: reconciles against the wallet, which reports accepted immediately.
+        let status = b.handle(&get(&format!("/proof/{proof_id}/status"))).await;
+        let v: serde_json::Value = serde_json::from_str(&status.body).unwrap();
+        assert_eq!(v["state"], "accepted", "the status route must reconcile: {}", status.body);
+        assert_eq!(v["result"]["attested_minimum"], 10_000);
+
+        // The challenge is consumed by that reconciliation, and a settled job is not re-waited.
+        assert_eq!(b.challenges.live(), 0);
+        assert_eq!(b.challenges.answered(), 1);
+        let again = b.handle(&get(&format!("/proof/{proof_id}/status"))).await;
+        assert_eq!(again.body, status.body, "polling a settled job must be free and stable");
     }
 
     #[tokio::test]

@@ -68,6 +68,9 @@ pub enum BookError {
 /// anything that matters to the allocator.
 pub const MAX_LIVE_CHALLENGES: usize = 256;
 
+/// The most answered nonces retained for replay detection, after eviction.
+pub const MAX_ANSWERED: usize = 4_096;
+
 /// The bridge's live challenges.
 #[derive(Debug, Default)]
 pub struct ChallengeBook {
@@ -172,6 +175,22 @@ impl ChallengeBook {
     ) -> Result<IssuedChallenge, BookError> {
         self.check_live(nonce, session_commitment)?;
         self.answered.insert(*nonce, SystemTime::now());
+        // The answered set exists so a replayed challenge answers `AlreadyAnswered` rather than
+        // `Unknown`. It is also state a loop of *successful* proofs grows, so it is capped like the
+        // live set: the oldest receipts drop once the cap is hit, and a nonce old enough to have
+        // fallen out of the cap is also old enough that its live entry is long gone -- so the
+        // replay it would have caught now answers `Unknown`, which is still a refusal.
+        if self.answered.len() > MAX_ANSWERED {
+            let overflow = self.answered.len() - MAX_ANSWERED;
+            // Sorted copy of the timestamps rather than a heap: the cap is hit rarely and the map
+            // is bounded, so an O(n log n) sweep on the way past is the simpler honest code.
+            let mut oldest: Vec<([u8; 32], SystemTime)> =
+                self.answered.iter().map(|(k, t)| (*k, *t)).collect();
+            oldest.sort_by_key(|(_, t)| *t);
+            for (k, _) in oldest.into_iter().take(overflow) {
+                self.answered.remove(&k);
+            }
+        }
         Ok(self.entries.remove(nonce).expect("checked above"))
     }
 

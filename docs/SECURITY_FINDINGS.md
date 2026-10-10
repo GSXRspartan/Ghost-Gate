@@ -86,6 +86,14 @@ Legend: **CRITICAL** / **HIGH** / **MEDIUM** / **LOW** / **INFORMATIONAL**.
   false` → `CredentialRefusal::UnverifiedChainData` (fail-closed). Documented cost: credential
   proofs are unavailable where substate proofs are disabled or in the post-epoch-committee window;
   the consensus mode never touches the indexer.
+- **Scope correction (second pass)**: the flag is computed *by the indexer software*, and the REST
+  response carries no proof bytes — so this fix closes the honest-indexer-without-proofs and
+  misconfiguration cases, **not** a fully compromised indexer, which can simply set `verified: true`
+  alongside a fabricated value. Client-side merkle/quorum verification is not exposed by the cohort's
+  REST surface (the upstream validator client carries the same gap as a `TODO`). Consequence recorded
+  in the release gate: credential mode requires an indexer the operator controls. Original severity
+  stands for that trust model; the "malicious indexer" case is explicitly out of remediation scope
+  until upstream exposes proof bytes.
 - **Test**: `an_unverified_indexer_answer_is_refused_even_when_everything_else_matches`.
 
 ## F-05 — Documentation overclaim: browser Mode A called "unsound" — **INFORMATIONAL, CORRECTED**
@@ -163,7 +171,12 @@ dispositions:
   the output returns to the prover's own account. No over-spend parameter exists on the surface.
   No finding.
 - **"Can a second challenge be answered by the first proof's receipt?"** Checked: receipts bind the
-  nonce, which is burnt on acceptance; a replay refuses at the gate (engine-tested). No finding.
+  nonce, which is burnt on acceptance; a replay refuses at the gate (engine-tested). Two honest
+  corrections to the first pass's wording, recorded rather than papered over: bridge-side, the
+  challenge was not consumed on acceptance until F-10 (the claim "second submission sees
+  AlreadyAnswered" was test-only), and concurrent duplicate submissions both drive the wallet before
+  the on-chain burn picks the winner — the serialized loop prevents two *committed* receipts, not
+  two wallet submissions. No finding beyond F-10 itself.
 - **"Can the Host allowlist be bypassed with an IP-literal Host?"** Checked: the permitted set is
   the loopback literals themselves; any other literal (e.g. the machine's LAN IP) refuses. No
   finding. (A page on the victim's own LAN IP origin would need to *reach* that IP — the listener
@@ -180,6 +193,54 @@ dispositions:
 
 One genuinely new MEDIUM finding emerged from the second pass and is fixed in the same commit that
 records it — see **F-09** below.
+
+## F-10 — `reconcile()` never ran in production; consensus proofs never completed over HTTP — **HIGH, FIXED**
+
+- **Component**: `ghost-gate-walletd/src/bin/ghost-gate-bridge.rs` (no call),
+  `ghost-gate-bridge/src/server.rs` (`reconcile`, `ProofStatus` route).
+- **Found by**: the independent second-pass review — the first pass tested the no-wallet failure
+  paths live and never a *completing* proof.
+- **Reproduction**: run the binary with `GG_WALLETD_ENDPOINT`, complete a real proof, poll
+  `/proof/:id/status` → `submitted` forever; the challenge is never consumed bridge-side, so a
+  replay inside the TTL window re-drives a full wallet build+submit (rejected on chain by the burnt
+  nonce — no double receipt — but the shipped consensus path was dead and the F-08 concurrency claim
+  was test-only).
+- **Expected**: the status route settles a submitted job. **Observed (pre-fix)**: no production
+  caller of `reconcile`.
+- **Remediation**: lazy reconciliation — `reconcile_job(id, RECONCILE_WAIT)` (3 s) runs inside the
+  status route for `Submitted` jobs only; the polling client drives completion by returning;
+  `reconcile()` remains for tests/background. Settled jobs are never re-waited.
+- **Test**: `the_status_route_itself_reconciles_a_submitted_proof` (would fail pre-fix: no manual
+  `reconcile()` call in it).
+
+## F-11 — Bridge challenges hard-coded `expires_epoch: 0` — **MEDIUM, FIXED**
+
+- **Component**: `ghost-gate-bridge/src/gate_registry.rs` (`issue_challenge`).
+- **Reproduction**: mint a bridge challenge on any chain at epoch > 0; the gate refuses every proof
+  with `challenge has expired`. Fail-closed, functionally dead — caught by the second pass; the
+  cucumber harness builds its own challenges, which is why the localnet scenario never saw it.
+- **Remediation**: the mint takes the epoch from configuration (`DEFAULT_CHALLENGE_EXPIRES_EPOCH =
+  1_000_000`, `GG_CHALLENGE_EXPIRES_EPOCH` override). The wall-clock TTL and the single-use nonce
+  remain the operative limits; the epoch bound is defence in depth, and the reasoning is written
+  into the constant's docs.
+- **Test**: the mint signature carries the epoch; the constant's docs state the failure it prevents.
+
+## F-12 — `answered` replay map unbounded; `prune()` dead — **LOW, FIXED**
+
+- **Component**: `ghost-gate-bridge/src/session.rs`.
+- **Reproduction**: loop mint→accept; `answered()` grows monotonically; `prune()` has zero callers.
+- **Remediation**: `MAX_ANSWERED = 4_096` with oldest-first eviction on consume. Documented
+  consequence: a nonce old enough to fall out of the cap answers `Unknown` instead of
+  `AlreadyAnswered` — still a refusal.
+- **Test**: the cap logic sits on the acceptance path the suite already exercises.
+
+## F-13 — `set_open` is allow-all on the gate template — **LOW, KNOWN GAP (documented, not fixed)**
+
+- **Component**: `templates/ghost_gate/src/lib.rs` (access rules + `set_open`).
+- **Impact**: any account may close the gate, and any account may reopen it — availability griefing
+  on a public network, no soundness impact. Not fixed here: the template is frozen at `gate3-green`
+  and an owner-gated rule is an upstream template change with its own review burden. Recorded in the
+  release gate; the game treats `open = true` as normal and an operator recovers by re-deploying.
 
 ## F-09 — Session commitments are not bound to the *challenger* — **MEDIUM, FIXED**
 

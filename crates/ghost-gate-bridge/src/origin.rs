@@ -69,7 +69,12 @@ pub enum OriginRejection {
 }
 
 /// Trims and lowercases an origin so the comparison cannot be dodged by case or a trailing slash.
-fn normalise(origin: &str) -> String {
+/// The origin comparison used by both the allowlist and the challenge-issuer binding.
+///
+/// One function, deliberately: the binding check must normalise exactly as the allowlist does, or
+/// two spellings of the same origin pass one check and fail the other (the second pass caught the
+/// issuer side drifting from the allowlist side).
+pub(crate) fn normalise(origin: &str) -> String {
     origin.trim().trim_end_matches('/').to_ascii_lowercase()
 }
 
