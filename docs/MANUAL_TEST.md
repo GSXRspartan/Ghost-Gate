@@ -45,6 +45,27 @@ The resource and threshold come from the gate's own on-chain state. Take them fr
 scenario's output rather than inventing them: `GG_BRIDGE_GATES` needs a resource **address**, and a
 symbol in that field is refused at startup by design.
 
+## Wallet choice, and which flow a case uses
+
+The page offers three wallets, each probed from its own capabilities:
+
+| Wallet | Where it works | Proof mode | Notes |
+| --- | --- | --- | --- |
+| **Sapient** (extension) | any tab, once installed | **credential** | local (seed) accounts only; a daemon-relayed account shows as unsupported |
+| **Tari Universe** | only inside its app-catalogue iframe | **credential** | a plain tab is unreachable *by design*; the picker says so |
+| **Local walletd** | this bridge + a running daemon | **consensus** | the developer backend; no daemon credentials are ever asked of a browser-provider user |
+
+Per-wallet setup for the cases below:
+
+- **Sapient**: install the extension, create or import a wallet, fund the account with at least the
+  gate threshold of the gate's resource (the credential flow additionally needs XTR for the fee).
+  Case 2's second form (wrong resource) needs a holding of some *other* stealth resource.
+- **Tari Universe**: open the dApp from the app catalogue (never a plain tab), connect, fund as above.
+- **Local walletd**: run the bridge with `GG_WALLETD_ENDPOINT` set, as in the Preconditions.
+
+The cases are the same for all three; only the flow differs (credential mode shows a two-step
+approval: the proof output first, then the challenge signature).
+
 ## The cases
 
 | # | Setup | Expected | Where the evidence goes |
@@ -55,6 +76,18 @@ symbol in that field is refused at startup by design.
 | 4 | Wallet holds the wrong resource only | **ACCESS DENIED** | `state: refused`; consensus refused the cross-resource spend |
 | 5 | Replay: reuse the challenge that case 1 consumed | **ACCESS DENIED**, "Challenge already used. Request a fresh challenge." | `409` from `POST /gate/:id/prove` |
 | 6 | Wait out the challenge TTL, then answer | **ACCESS DENIED**, "Challenge expired." | `409` with `challenge has expired` |
+
+## Credential-mode specifics to watch (Sapient / Universe)
+
+- The wallet's own approval screen must show the **public and permanent** disclosure for the
+  minimum-value-promise output. If it does not, that is a wallet bug; note it, do not work around it.
+- The page must never request view access. If a view-access prompt appears, the flow is wrong.
+- The bridge's verdict must name the on-chain floor (`attested_minimum` read from the substate), not
+  the amount the page asked for.
+- A rejected request in the wallet (code 4001) must land as "REQUEST DECLINED" with nothing
+  submitted — not as an error and not as a denial of the gate.
+- Re-running the flow with the same output must be refused as an answered challenge; re-running with
+  a fresh output must work. That is the single-use property, per mode, on a real wallet.
 
 ## What to capture for each
 
