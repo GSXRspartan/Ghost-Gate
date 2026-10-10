@@ -122,3 +122,35 @@ pre {
 }
 
 footer { margin-top: 1.5rem; }
+
+/* ---- wallet picker ---- */
+.wallet-cards {
+  display: grid;
+  gap: 12px;
+}
+.wallet-card {
+  border: 1px solid var(--line, #2a2f3a);
+  border-radius: 8px;
+  padding: 12px;
+  display: grid;
+  gap: 6px;
+}
+.wallet-card.unsupported {
+  opacity: 0.75;
+}
+.wallet-state {
+  min-height: 1.2em;
+}
+.mode-list {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 4px;
+}
+.mode-item {
+  display: grid;
+  gap: 2px;
+}
+.wallet-blurb {
+  margin: 0;
+}

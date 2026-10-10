@@ -1,0 +1,400 @@
+/**
+ * Capability and provider tests, run with `node --test`.
+ *
+ * These are contract-driven: the mocks mirror the pinned `web/vendor/tari-dapp.d.ts`, including the
+ * two divergences found in Sapient's source (its capability extras, and its dual accountsChanged
+ * delivery). Nothing here talks to a live wallet — no browser or extension exists in this
+ * environment — so a green run means "the adapters behave per the contract", never "Sapient works
+ * on my machine". The live checklist lives in docs/MANUAL_TEST.md.
+ *
+ * The provider module reads `window`, so the harness installs a fake one before importing it.
+ */
+
+import test from "node:test";
+import assert from "node:assert/strict";
+import { PROOF_MODES, supportedProofModes, walletUsability, networkMatches, parseAmount, formatAmount } from "./capabilities.js";
+import { sapientProvider, universeProvider, walletdProvider } from "./provider.js";
+
+/** Installs a minimal fake window with a provider object, returns an uninstaller. */
+function withWindow(provider, extra = {}) {
+  globalThis.window = {
+    location: { origin: "http://127.0.0.1:7799" },
+    tari: provider,
+    ...extra,
+  };
+  return () => {
+    delete globalThis.window;
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* capabilities.js — the mode mapping                                  */
+/* ------------------------------------------------------------------ */
+
+test("a fully capable local account offers exactly the credential mode", () => {
+  const caps = {
+    privateSpend: true,
+    minimumValuePromise: true,
+    ownershipProof: true,
+    walletOwnershipProof: true,
+    transactionRequests: true,
+  };
+  const modes = supportedProofModes(caps);
+  assert.equal(modes.length, 1);
+  assert.equal(modes[0].mode, "credential");
+  // A browser wallet must never report the consensus mode, no matter how capable it looks.
+  assert(!modes.some((m) => m.mode === "consensus"));
+});
+
+test("a daemon-relayed account (no stealth signing) supports no mode and says why", () => {
+  const caps = {
+    privateSpend: true, // the daemon path can move revealed funds
+    minimumValuePromise: false,
+    ownershipProof: false,
+  };
+  const { usable, reason, modes } = walletUsability(caps);
+  assert.equal(usable, false);
+  assert.equal(modes.length, 0);
+  assert.match(reason, /minimumValuePromise/);
+  assert.match(reason, /daemon-relayed/, "the reason names the situation the user is actually in");
+});
+
+test("a wallet that answers nothing fails closed with a reason, not silently", () => {
+  const { usable, reason } = walletUsability(null);
+  assert.equal(usable, false);
+  assert.match(reason, /did not report capabilities/);
+});
+
+test("the network check compares Ootle bytes, tolerating name case", () => {
+  const names = { esmeralda: 0x26, igor: 0x24, localnet: 0x10 };
+  assert.equal(networkMatches("Esmeralda", names, 0x26).ok, true);
+  assert.equal(networkMatches("esmeralda ", names, 0x26).ok, true);
+  assert.equal(networkMatches("mainnet", names, 0x26).ok, false);
+  assert.equal(networkMatches(undefined, names, 0x26).byte, null);
+  // The Universe trap: tari_getNetwork returns the Ootle network, never the L1 one. A gate bound
+  // to the Ootle byte must not be "verified" against an L1 network name.
+  assert.equal(networkMatches("esmeralda", names, 0x10).ok, false);
+});
+
+test("amounts parse as strings or bigints and never as floats", () => {
+  assert.equal(parseAmount("400000").toString(), "400000");
+  assert.equal(parseAmount(400000n)?.toString(), "400000");
+  assert.equal(parseAmount("4e5"), null, "exponent notation is not an amount the wallets accept");
+  assert.equal(parseAmount(0.5), null);
+  assert.equal(parseAmount("9007199254740993").toString(), "9007199254740993", "beyond Number.MAX_SAFE_INTEGER");
+});
+
+test("display formatting uses the resource's own divisibility, never an assumed 6", () => {
+  assert.equal(formatAmount("10000", 2), "100");
+  assert.equal(formatAmount("10000", 6), "0.01");
+  assert.equal(formatAmount("400000", 0), "400000");
+  assert.equal(formatAmount("1000000", 2), "10000");
+});
+
+/* ------------------------------------------------------------------ */
+/* Sapient — the extension provider                                    */
+/* ------------------------------------------------------------------ */
+
+function sapientCapabilities(account = "local") {
+  const isLocal = account === "local";
+  return {
+    exactInputSelection: true,
+    stealthWithdraw: isLocal,
+    stealthRedeem: isLocal,
+    stealthRedeemPrivateFee: isLocal,
+    htlcFund: isLocal,
+    scriptPathSpend: isLocal,
+    privateSpend: true,
+    shieldFunds: true, // Sapient's own extension beyond the shared spec; read and ignored
+    privateBalanceView: true,
+    privateScan: isLocal,
+    privateViewGranted: false,
+    transactionResultLookup: true,
+    transactionRequests: true,
+    walletAddress: true,
+    minimumValuePromise: isLocal,
+    ownershipProof: isLocal,
+    walletOwnershipProof: isLocal,
+    confidentialDeposit: isLocal,
+    supportsPrivateFees: isLocal,
+    dryRunIsLocal: false,
+  };
+}
+
+function fakeTari({ caps, rejectMethods = [] } = {}) {
+  const calls = [];
+  const provider = {
+    isTariWallet: true,
+    isEmbedded: false,
+    async request({ method, params }) {
+      calls.push({ method, params });
+      if (rejectMethods.includes(method)) {
+        const e = new Error("Method unsupported by this wallet");
+        e.code = 4200;
+        throw e;
+      }
+      switch (method) {
+        case "tari_getCapabilities":
+          return caps;
+        case "tari_createTransactionRequest":
+          return { requestId: "req_1" };
+        case "tari_getTransactionRequest":
+          return { status: "approved", note: "" };
+        case "tari_submitTransactionRequest":
+          return { transactionId: "tx_1", commitment: "ab", substateId: "utxo_res_2c71", minimumValuePromise: "10000" };
+        case "tari_signOwnershipChallenge":
+          assert.ok(params.resourceAddress, "the gate resource must be sent");
+          assert.equal(params.substateId, "utxo_res_2c71");
+          assert.ok(params.challenge, "the site's challenge string must be sent verbatim");
+          return { publicKey: "pk", publicNonce: "r", signature: "s" };
+        case "tari_getTransactionResult":
+          return { status: "Accepted" };
+        default:
+          throw Object.assign(new Error("unmocked method " + method), { code: 4200 });
+      }
+    },
+  };
+  return { provider, calls };
+}
+
+test("sapient probe: a local account gets exactly credential mode", async () => {
+  const { provider } = fakeTari({ caps: sapientCapabilities("local") });
+  const undo = withWindow(provider);
+  try {
+    const probe = await sapientProvider().probe();
+    assert.equal(probe.available, true);
+    assert.deepEqual(probe.modes.map((m) => m.mode), ["credential"]);
+    assert.equal(probe.unusableReason, null);
+  } finally {
+    undo();
+  }
+});
+
+test("sapient probe: a daemon-relayed account is shown as unsupported, not hidden", async () => {
+  const { provider } = fakeTari({ caps: sapientCapabilities("daemon") });
+  const undo = withWindow(provider);
+  try {
+    const probe = await sapientProvider().probe();
+    assert.equal(probe.available, true, "the wallet answered; the account is what fails");
+    assert.equal(probe.modes.length, 0);
+    assert.match(probe.unusableReason, /Missing: minimumValuePromise, ownershipProof/);
+  } finally {
+    undo();
+  }
+});
+
+test("no wallet on the page: the probe reports the install/open path", async () => {
+  const undo = withWindow(null);
+  try {
+    const probe = await sapientProvider().probe();
+    assert.equal(probe.available, false);
+    assert.match(probe.unavailableReason, /Install the Sapient extension/);
+  } finally {
+    undo();
+  }
+});
+
+test("credentials flow: shield -> poll -> submit -> sign, in that order, with the right params", async () => {
+  const { provider, calls } = fakeTari({ caps: sapientCapabilities("local") });
+  const undo = withWindow(provider);
+  try {
+    const p = sapientProvider();
+    const built = await p.approveAndBuildProof("credential", {
+      resourceAddress: "resource_7",
+      amount: "10000",
+      minimumValuePromise: "10000",
+      maxFee: "5000",
+    });
+    assert.equal(built.substateId, "utxo_res_2c71");
+    assert.equal(built.minimumValuePromise, "10000");
+
+    const kinds = calls.map((c) => c.method);
+    assert.deepEqual(kinds, [
+      "tari_createTransactionRequest",
+      "tari_getTransactionRequest",
+      "tari_submitTransactionRequest",
+    ]);
+    const createParams = calls[0].params;
+    assert.equal(createParams.kind, "shield");
+    assert.equal(createParams.minimumValuePromise, "10000", "the gate threshold is the promise");
+    assert.equal(createParams.amount, "10000");
+    assert.equal(createParams.maxFee, "5000");
+
+    const ownership = await p.signChallenge("utxo_res_2c71", "challenge-abc");
+    assert.deepEqual(ownership, { publicKey: "pk", publicNonce: "r", signature: "s" });
+    // The signing call names the gate's resource — the wallet re-derives the output's key from it.
+    const signCall = calls.at(-1);
+    assert.equal(signCall.params.resourceAddress, "resource_7");
+  } finally {
+    undo();
+  }
+});
+
+test("a wallet rejection (4001) surfaces as a declined request, not an error", async () => {
+  const { provider } = fakeTari({ caps: sapientCapabilities("local") });
+  const original = provider.request.bind(provider);
+  provider.request = async (args) => {
+    if (args.method === "tari_createTransactionRequest") {
+      throw Object.assign(new Error("User rejected"), { code: 4001 });
+    }
+    return original(args);
+  };
+  const undo = withWindow(provider);
+  try {
+    const p = sapientProvider();
+    await assert.rejects(
+      () => p.approveAndBuildProof("credential", { resourceAddress: "r", amount: "1", minimumValuePromise: "1" }),
+      (e) => e.code === 4001,
+    );
+  } finally {
+    undo();
+  }
+});
+
+test("a wallet that returns no substateId is an error, never a silent skip", async () => {
+  const { provider } = fakeTari({ caps: sapientCapabilities("local") });
+  const original = provider.request.bind(provider);
+  provider.request = async (args) => {
+    if (args.method === "tari_submitTransactionRequest") return { transactionId: "tx_1" };
+    return original(args);
+  };
+  const undo = withWindow(provider);
+  try {
+    await assert.rejects(
+      () => sapientProvider().approveAndBuildProof("credential", { resourceAddress: "r", amount: "1", minimumValuePromise: "1" }),
+      /no substateId/,
+    );
+  } finally {
+    undo();
+  }
+});
+
+test("sapient extras in capabilities do not create modes", async () => {
+  // supportsPrivateFees / shieldFunds are real Sapient extensions; neither is a Ghost Gate mode.
+  const caps = { ...sapientCapabilities("local"), supportsPrivateFees: true, shieldFunds: true };
+  const undo = withWindow({ isTariWallet: true, isEmbedded: false, async request() { return caps; } });
+  try {
+    const probe = await sapientProvider().probe();
+    assert.deepEqual(probe.modes.map((m) => m.mode), ["credential"]);
+  } finally {
+    undo();
+  }
+});
+
+/* ------------------------------------------------------------------ */
+/* Tari Universe — the embedded provider                               */
+/* ------------------------------------------------------------------ */
+
+test("universe in a plain tab: unreachable by design, with the explanation", async () => {
+  const undo = withWindow(null);
+  try {
+    const probe = await universeProvider().probe();
+    assert.equal(probe.available, false);
+    assert.match(probe.unavailableReason, /app catalogue/);
+  } finally {
+    undo();
+  }
+});
+
+test("universe with a non-embedded provider (extension present): says to open inside the wallet", async () => {
+  const { provider } = fakeTari({ caps: sapientCapabilities("local") });
+  const undo = withWindow(provider);
+  try {
+    const probe = await universeProvider().probe();
+    assert.equal(probe.available, false);
+    assert.match(probe.unavailableReason, /not running inside it/);
+  } finally {
+    undo();
+  }
+});
+
+test("universe embedded: the same contract, the same mode", async () => {
+  const { provider } = fakeTari({ caps: sapientCapabilities("local") });
+  const undo = withWindow(provider, { tari: { ...provider, isEmbedded: true } });
+  try {
+    const probe = await universeProvider().probe();
+    assert.equal(probe.available, true);
+    assert.deepEqual(probe.modes.map((m) => m.mode), ["credential"]);
+  } finally {
+    undo();
+  }
+});
+
+/* ------------------------------------------------------------------ */
+/* Local walletd — the developer backend                               */
+/* ------------------------------------------------------------------ */
+
+function withFetch(routes) {
+  const original = globalThis.fetch;
+  globalThis.fetch = async (input, init = {}) => {
+    const path = String(input).replace(/^https?:\/\/[^/]+/, "");
+    const key = `${init.method || "GET"} ${path}`;
+    const handler = routes[key];
+    if (!handler) return { ok: false, status: 404, json: async () => ({ error: `no route ${key}` }) };
+    return handler();
+  };
+  return () => {
+    globalThis.fetch = original;
+  };
+}
+
+test("walletd probe: consensus mode only, and never credential", async () => {
+  const undo = withFetch({
+    "GET /wallet/status": () =>
+      ({ ok: true, status: 200, json: async () => ({ reachable: true, has_default_account: true, network: 16, network_name: "localnet" }) }),
+  });
+  try {
+    const probe = await walletdProvider("http://127.0.0.1:7799").probe();
+    assert.equal(probe.available, true);
+    assert.deepEqual(probe.modes.map((m) => m.mode), ["consensus"]);
+    assert.equal(probe.capabilities.ownershipProof, false, "credential mode is deliberately not offered here");
+  } finally {
+    undo();
+  }
+});
+
+test("walletd unreachable: the card shows the reason, and the consensus mode list is empty", async () => {
+  const undo = withFetch({
+    "GET /wallet/status": () => ({ ok: false, status: 503, json: async () => ({ error: "no wallet daemon is connected" }) }),
+  });
+  try {
+    const probe = await walletdProvider("http://127.0.0.1:7799").probe();
+    assert.equal(probe.available, false);
+    assert.match(probe.unavailableReason, /no wallet daemon is connected/);
+  } finally {
+    undo();
+  }
+});
+
+test("the walletd flow uses the existing bridge routes and reports the receipt verbatim", async () => {
+  const undo = withFetch({
+    "GET /wallet/status": () => ({ ok: true, status: 200, json: async () => ({ reachable: true }) }),
+    "POST /gate/g1/challenge": () =>
+      ({ ok: true, status: 200, json: async () => ({ challenge_nonce: "aa", session_commitment: "bb" }) }),
+    "POST /gate/g1/prove": () => ({ ok: true, status: 202, json: async () => ({ proof_id: "p1" }) }),
+    "GET /proof/p1/status": () =>
+      ({ ok: true, status: 200, json: async () => ({ state: "accepted", transaction_id: "tx9", attested_minimum: 10000, input_count: 1 }) }),
+  });
+  try {
+    const p = walletdProvider("http://127.0.0.1:7799");
+    const { result } = await p.approveAndBuildProof("consensus", { gateId: "g1" });
+    assert.equal(result.state, "accepted");
+    assert.equal(result.attested_minimum, 10000);
+  } finally {
+    undo();
+  }
+});
+
+/* ------------------------------------------------------------------ */
+/* The matrix, as executable statements                                */
+/* ------------------------------------------------------------------ */
+
+test("the compatibility matrix holds: no wallet implies both modes", () => {
+  const sapientLocal = walletUsability(sapientCapabilities("local")).modes.map((m) => m.mode);
+  const sapientDaemon = walletUsability(sapientCapabilities("daemon")).modes.map((m) => m.mode);
+  const walletd = ["consensus"];
+  const all = [...sapientLocal, ...sapientDaemon, ...walletd];
+  assert.equal(all.filter((m) => m === "consensus").length, 1, "only walletd offers the consensus mode");
+  assert.equal(all.filter((m) => m === "credential").length, 1, "only Sapient local accounts offer the credential mode");
+  assert(!PROOF_MODES.consensus.requires.length, "the consensus mode is not gated on a capability bit");
+});

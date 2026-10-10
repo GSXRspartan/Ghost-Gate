@@ -148,7 +148,24 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
     fn serve_asset(&self, name: &str) -> Response {
         // Belt and braces: `Route::resolve` already restricts this to three names, and the check below
         // means a future route cannot widen it by accident.
-        if !matches!(name, "index.html" | "app.css" | "app.js") {
+        if !matches!(
+            name,
+            "index.html"
+                | "app.css"
+                | "app.js"
+                | "js/ghost/capabilities.js"
+                | "js/ghost/provider.js"
+                | "js/ghost/ghost-gate.js"
+                | "js/ghost/test.js"
+                | "vendor/tari-connector.js"
+                | "vendor/tari-dapp.d.ts"
+        ) {
+            return Response::error(404, "GG: no such asset");
+        }
+        // A fixed name can contain a subdirectory, but never a `..`: `Route::resolve` only ever
+        // hands over one of the names above, and this check repeats the rule so widening the route
+        // cannot widen the filesystem surface.
+        if name.contains("..") {
             return Response::error(404, "GG: no such asset");
         }
         let path = self.asset_dir.join(name);
@@ -158,6 +175,8 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
                 content_type: match name {
                     "index.html" => "text/html; charset=utf-8",
                     "app.css" => "text/css; charset=utf-8",
+                    // A declaration file is source text, not JavaScript.
+                    "vendor/tari-dapp.d.ts" => "text/plain; charset=utf-8",
                     _ => "text/javascript; charset=utf-8",
                 },
                 body: String::from_utf8_lossy(&bytes).to_string(),

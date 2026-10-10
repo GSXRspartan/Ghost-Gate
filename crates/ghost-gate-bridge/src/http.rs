@@ -116,6 +116,14 @@ impl<'a> Route<'a> {
             ("GET", ["index.html"]) => Route::Asset("index.html"),
             ("GET", ["app.css"]) => Route::Asset("app.css"),
             ("GET", ["app.js"]) => Route::Asset("app.js"),
+            // The multi-wallet front end. Still a fixed list, still no traversal: `serve_asset`
+            // re-checks the name, so widening this route cannot silently widen the surface.
+            ("GET", ["js", "ghost", "capabilities.js"]) => Route::Asset("js/ghost/capabilities.js"),
+            ("GET", ["js", "ghost", "provider.js"]) => Route::Asset("js/ghost/provider.js"),
+            ("GET", ["js", "ghost", "ghost-gate.js"]) => Route::Asset("js/ghost/ghost-gate.js"),
+            ("GET", ["js", "ghost", "test.js"]) => Route::Asset("js/ghost/test.js"),
+            ("GET", ["vendor", "tari-connector.js"]) => Route::Asset("vendor/tari-connector.js"),
+            ("GET", ["vendor", "tari-dapp.d.ts"]) => Route::Asset("vendor/tari-dapp.d.ts"),
             _ => Route::NotFound,
         }
     }
@@ -226,6 +234,11 @@ mod tests {
         // A fixed list, not a path join. `GET /../../.ssh/id_rsa` has to resolve to nothing at all,
         // rather than to a normalised path that happens to escape.
         assert_eq!(Route::resolve("GET", "/"), Route::Asset("index.html"));
+        assert_eq!(Route::resolve("GET", "/js/ghost/provider.js"), Route::Asset("js/ghost/provider.js"));
+        assert_eq!(Route::resolve("GET", "/vendor/tari-connector.js"), Route::Asset("vendor/tari-connector.js"));
+        // The fixed-name list must stay closed: no subdirectory walk, no query suffix.
+        assert_eq!(Route::resolve("GET", "/js/ghost/../secret.js"), Route::NotFound);
+        assert_eq!(Route::resolve("GET", "/vendor/../Cargo.toml"), Route::NotFound);
         assert_eq!(Route::resolve("GET", "/app.js"), Route::Asset("app.js"));
         for bad in [
             "/app.js.map",
