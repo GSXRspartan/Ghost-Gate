@@ -15,6 +15,15 @@
 
 ## 2. Processes running right now (in WSL)
 
+**Localnet binaries: ALL LINKED.** The atomic-swap session's release build finished —
+`tari_indexer` (80M), `tari_ootle_walletd` (63M), `tari_validator_node` (74M), `minotari_node`
+(85M), `minotari_console_wallet` (57M), `minotari_miner` (18M) all exist in the two release target
+dirs, and no cargo build remains. The swarm daemon is running but has NOT started its instances —
+no instance ports are listening yet, and starting them looks like a web-UI action (or the other
+session's next step). Per the operator's rule the swarm is not to be modified, reset or stopped by
+this session; the one missing step may be exactly the operator clicking *Start* in
+<http://127.0.0.1:8080>.
+
 | PID | What | Port | Notes |
 |---|---|---|---|
 | 83448 | **ghost-gate-bridge** (our binary) | **7799** | started by `start_vault.sh`; 3 game gates registered; NO wallet/indexer yet — proofs fail closed with an honest message |
