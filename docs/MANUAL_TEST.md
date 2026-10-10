@@ -114,6 +114,26 @@ variant where the wallet holds a qualifying output **of a different resource**: 
 nothing for the *gate's* resource and refuse the same way. Neither path may reach consensus, and
 neither may name a UTXO in its error.
 
+## The Haunted Vault (game) manual pass
+
+On the demo machine, after `scripts/start_vault.sh`:
+
+1. **Preview walk-through** — open `/game`, choose "Preview without a wallet", verify the banner
+   says PREVIEW in three places, walk all three chambers, solve all three puzzles, find all three
+   whisper glyphs, watch a door-opening animation. Confirm nothing on the Network tab hits
+   `/gate/*/challenge`, `/gate/*/prove` or `/gate/*/credential` during preview.
+2. **Sealed-from-scratch** — reload the page with progress cleared: all doors sealed again (an
+   unlock is a session fact, never a stored one).
+3. **Real proof, consensus path** — with a standing localnet + walletd behind the bridge: pick the
+   Local walletd adapter, break The Crypt's seal, approve in walletd, watch the door open. The
+   proof overlay's step list must match the actual flow; the failure case (wallet holds too
+   little) must land as a clean refusal with the gate's own reason.
+4. **Foreign-origin join links** — a join link edited to point `claim=` at a non-loopback host
+   must be refused by the join page before any wallet is involved.
+5. **Telegram** — with the bot running: `/join` → open the link → approve twice in the wallet →
+   the bot grants a single-seat invite; wait out `GG_TG_ACCESS_TTL` (test with a short value) and
+   confirm revocation + the re-verification message; confirm a replayed join link refuses.
+
 ## The question this test is really asking
 
 Not "does it work" — that is the engine suite and the localnet. The question is whether a person can
