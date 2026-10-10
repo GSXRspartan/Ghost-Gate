@@ -1,0 +1,13 @@
+--- a/applications/tari_walletd/src/cli.rs
++++ b/applications/tari_walletd/src/cli.rs
+@@ -46,7 +46,9 @@
+ pub struct Cli {
+     #[clap(flatten)]
+     pub common: CommonCliArgs,
+-    #[clap(long, short = 'l', alias = "listen-on", env = "JRPC_LISTEN_ON")]
++    // No short: `CommonCliArgs::log_config` already claims `-l`, and clap's debug asserts reject the
++    // duplicate at every debug-build startup.
++    #[clap(long, alias = "listen-on", env = "JRPC_LISTEN_ON")]
+     /// The address to listen on for Web and JSON-RPC requests. Defaults to localhost:5100.
+     pub listen_on: Option<SocketAddr>,
+     #[clap(long, env = "SIGNALING_SERVER_ADDRESS")]

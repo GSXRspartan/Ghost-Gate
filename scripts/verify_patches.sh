@@ -25,7 +25,7 @@ PATCHED="${PATCHED:-$WORKSPACE/_ootle-v042-ghost-gate}"
 # A clone with the pinned commit's history, used to export an LF-clean copy of it.
 UPSTREAM="${UPSTREAM:-/home/pdark/Tari-Bug-Hunt/ootle-contest-392d805}"
 REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-PATCHES=(docs/wallet-mvp.patch docs/ghsa-empty-proof.patch)
+PATCHES=(docs/wallet-mvp.patch docs/ghsa-empty-proof.patch docs/walletd-cli-dup-short.patch)
 
 status=0
 fail() {
@@ -87,12 +87,19 @@ for p in "${PATCHES[@]}"; do
     continue
   fi
 done
-touched="$(for p in "${PATCHES[@]}"; do grep '^+++ ' "$REPO/$p" | sed 's|^+++ b/||'; done)"
+# Sanitise: some patch generators leave a timestamp after the path (separated by a tab). A mangled
+# name would make the comparison loop hash two unreadable files and "pass" on equal empty input,
+# which is a false pass -- so cut at the first tab and refuse a name that is not a real file.
+touched="$(for p in "${PATCHES[@]}"; do grep '^+++ ' "$REPO/$p" | sed 's|^+++ b/||; s|\t.*$||'; done)"
 mismatches=0
 compared=0
 while IFS= read -r f; do
   [ -z "$f" ] && continue
   compared=$((compared + 1))
+  if [ ! -f "$expected/$f" ] || [ ! -f "$PATCHED/$f" ]; then
+    fail "patch names a file that does not exist in the export or the cohort: $f"
+    continue
+  fi
   # Line endings are normalised before comparing: the export is LF (as the repository stores it) and the
   # patched cohort's working tree is CRLF, because D: is mounted through WSL. Anything else -- a real
   # content difference -- still fails.
