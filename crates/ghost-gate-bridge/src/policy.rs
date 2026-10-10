@@ -96,6 +96,7 @@ pub fn validate_prove_request(
     gate: &GateBinding,
     book: &ChallengeBook,
     request: &ProveRequest,
+    caller_origin: Option<&str>,
 ) -> Result<ghost_gate_core::Challenge, ProofRefusal> {
     let nonce = parse_nonce(&request.challenge_nonce)?;
     let session = parse_session(&request.session_commitment)?;
@@ -104,11 +105,17 @@ pub fn validate_prove_request(
     // one that has already been spent, against the gate's policy.
     book.check_live(&nonce, &session)?;
 
-    let issued = book
-        .peek(&nonce)
-        .map_err(ProofRefusal::from)?
-        .challenge
-        .clone();
+    let issued = book.peek(&nonce).map_err(ProofRefusal::from)?;
+
+    // The session binding is enforced against the *issuer*, not just the submitted value. The
+    // session commitment travels inside the challenge response, so possession of the pair proves
+    // nothing about who is presenting it; the issuing origin is the part of the binding a reader
+    // cannot forge. Operator callers (no Origin) may only answer operator challenges.
+    if issued.issued_to_origin.as_deref() != caller_origin {
+        return Err(ProofRefusal::SessionMismatch);
+    }
+
+    let issued = issued.challenge.clone();
 
     if issued.gate != gate.address {
         return Err(ProofRefusal::GateMismatch);
@@ -189,14 +196,14 @@ mod tests {
 
     fn book(nonce: u8) -> ChallengeBook {
         let mut b = ChallengeBook::new();
-        b.insert(challenge(nonce), Duration::from_secs(60)).unwrap();
+        b.insert(challenge(nonce), Duration::from_secs(60), None).unwrap();
         b
     }
 
     #[test]
     fn a_request_for_a_gate_the_bridge_serves_is_accepted() {
         let book = book(1);
-        let issued = validate_prove_request(&binding(), &book, &request(1)).expect("accepted");
+        let issued = validate_prove_request(&binding(), &book, &request(1), None).expect("accepted");
         assert_eq!(issued.nonce.into_array(), [1u8; 32]);
     }
 
@@ -204,7 +211,7 @@ mod tests {
     fn a_challenge_this_bridge_never_issued_is_refused() {
         // Correct shape, correct session, but nonce 9 was never inserted.
         assert_eq!(
-            validate_prove_request(&binding(), &book(1), &request(9)).unwrap_err(),
+            validate_prove_request(&binding(), &book(1), &request(9), None).unwrap_err(),
             ProofRefusal::UnknownChallenge
         );
     }
@@ -214,7 +221,7 @@ mod tests {
         let mut req = request(1);
         req.session_commitment = hex::encode(b"bb");
         assert_eq!(
-            validate_prove_request(&binding(), &book(1), &req).unwrap_err(),
+            validate_prove_request(&binding(), &book(1), &req, None).unwrap_err(),
             ProofRefusal::SessionMismatch
         );
     }
@@ -224,7 +231,7 @@ mod tests {
         let mut book = book(1);
         book.consume_on_acceptance(&[1u8; 32], b"aa").unwrap();
         assert_eq!(
-            validate_prove_request(&binding(), &book, &request(1)).unwrap_err(),
+            validate_prove_request(&binding(), &book, &request(1), None).unwrap_err(),
             ProofRefusal::AlreadyAnswered
         );
     }
@@ -232,10 +239,10 @@ mod tests {
     #[test]
     fn an_expired_challenge_is_refused() {
         let mut book = ChallengeBook::new();
-        book.insert(challenge(1), Duration::from_millis(1)).unwrap();
+        book.insert(challenge(1), Duration::from_millis(1), None).unwrap();
         std::thread::sleep(Duration::from_millis(5));
         assert_eq!(
-            validate_prove_request(&binding(), &book, &request(1)).unwrap_err(),
+            validate_prove_request(&binding(), &book, &request(1), None).unwrap_err(),
             ProofRefusal::Expired
         );
     }
@@ -251,35 +258,35 @@ mod tests {
         let mut gate = base.clone();
         gate.address = ComponentAddress::new(ObjectKey::from_array([2u8; 32]));
         assert_eq!(
-            validate_prove_request(&gate, &book(1), &request(1)).unwrap_err(),
+            validate_prove_request(&gate, &book(1), &request(1), None).unwrap_err(),
             ProofRefusal::GateMismatch
         );
 
         let mut gate = base.clone();
         gate.resource = ResourceAddress::new(ObjectKey::from_array([8u8; 32]));
         assert_eq!(
-            validate_prove_request(&gate, &book(1), &request(1)).unwrap_err(),
+            validate_prove_request(&gate, &book(1), &request(1), None).unwrap_err(),
             ProofRefusal::ResourceMismatch
         );
 
         let mut gate = base.clone();
         gate.threshold = 1;
         assert_eq!(
-            validate_prove_request(&gate, &book(1), &request(1)).unwrap_err(),
+            validate_prove_request(&gate, &book(1), &request(1), None).unwrap_err(),
             ProofRefusal::ThresholdMismatch
         );
 
         let mut gate = base.clone();
         gate.network = ghost_gate_core::network::ESMERALDA;
         assert_eq!(
-            validate_prove_request(&gate, &book(1), &request(1)).unwrap_err(),
+            validate_prove_request(&gate, &book(1), &request(1), None).unwrap_err(),
             ProofRefusal::NetworkMismatch
         );
 
         let mut gate = base.clone();
         gate.relying_site = MaxBytes::new_checked(b"evil.example".to_vec()).unwrap();
         assert_eq!(
-            validate_prove_request(&gate, &book(1), &request(1)).unwrap_err(),
+            validate_prove_request(&gate, &book(1), &request(1), None).unwrap_err(),
             ProofRefusal::RelyingSiteMismatch
         );
     }
@@ -290,7 +297,7 @@ mod tests {
             let mut req = request(1);
             req.challenge_nonce = bad.to_string();
             assert_eq!(
-                validate_prove_request(&binding(), &book(1), &req).unwrap_err(),
+                validate_prove_request(&binding(), &book(1), &req, None).unwrap_err(),
                 ProofRefusal::MalformedChallenge,
                 "{bad:?}"
             );
@@ -302,7 +309,7 @@ mod tests {
         // A user declined once must be able to try again in the same session.
         let book = book(1);
         for _ in 0..3 {
-            assert!(validate_prove_request(&binding(), &book, &request(1)).is_ok());
+            assert!(validate_prove_request(&binding(), &book, &request(1), None).is_ok());
         }
         assert_eq!(book.live(), 1);
         assert_eq!(book.answered(), 0);
@@ -356,6 +363,7 @@ mod tests {
         let issued = IssuedChallenge {
             challenge: challenge(3),
             expires_at: std::time::SystemTime::now(),
+            issued_to_origin: None,
         };
         let gate = binding();
         assert_eq!(issued.challenge.resource, gate.resource);

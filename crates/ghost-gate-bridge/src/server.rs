@@ -37,6 +37,14 @@ use crate::wallet::{StatementRequest, WalletChannel};
 /// Largest request body accepted. A prove request is three short strings; anything larger is not one.
 pub const MAX_BODY: usize = 8 * 1024;
 
+/// The most proof jobs the bridge retains.
+///
+/// Same reasoning as the challenge cap: a job is a record the process holds so `/proof/:id/status`
+/// can answer, and creating one is unauthenticated apart from the transport checks. The oldest
+/// entries are dropped once the cap is hit, because a proof's result matters for minutes, not
+/// forever, and the challenge cap upstream already bounds how fast jobs can be created.
+pub const MAX_JOBS: usize = 1_000;
+
 /// Everything the server needs, assembled once at startup.
 pub struct Bridge<
     W: WalletChannel,
@@ -184,7 +192,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
             },
 
             Route::Asset(name) => self.serve_asset(name),
-            Route::Challenge(id) => self.issue_challenge(id),
+            Route::Challenge(id) => self.issue_challenge(id, request),
             Route::Prove(id) => self.prove(id, request).await,
             Route::Credential(id) => self.credential(id, request).await,
             Route::ProofStatus(id) => match self.jobs.iter().find(|j| j.id == id) {
@@ -249,14 +257,20 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
     /// challenge. A caller that supplies its own session value could reuse one session across gates; a
     /// value this bridge generates per challenge is bound to that challenge and to the browser that
     /// asked for it.
-    fn issue_challenge(&mut self, id: &str) -> Response {
+    fn issue_challenge(&mut self, id: &str, request: &Request) -> Response {
         if self.gates.get(id).is_none() {
             return Response::error(404, "GG: no such gate");
         }
         let session = random_nonce();
         let issued = match self
             .gates
-            .issue_challenge(id, &mut self.challenges, &session, self.challenge_ttl)
+            .issue_challenge(
+                id,
+                &mut self.challenges,
+                &session,
+                self.challenge_ttl,
+                request.origin.clone(),
+            )
         {
             Ok(issued) => issued,
             // 429 rather than 500: the bridge is healthy and the caller is the problem. The limit
@@ -342,6 +356,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
                 challenge_nonce: parsed.challenge_nonce.clone(),
                 session_commitment: parsed.session_commitment.clone(),
             },
+            request.origin.as_deref(),
         ) {
             Ok(c) => c,
             Err(refusal) => {
@@ -432,7 +447,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
             return Response::error(400, "GG: the request's gate_id does not match the path");
         }
 
-        let challenge = match validate_prove_request(&gate, &self.challenges, &parsed) {
+        let challenge = match validate_prove_request(&gate, &self.challenges, &parsed, request.origin.as_deref()) {
             Ok(c) => c,
             Err(refusal) => {
                 // A refusal is a normal outcome, not an error: the user was not proven to hold enough, and
@@ -453,7 +468,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
         let job_id_bytes = random_nonce();
         let job_id = hex::encode(&job_id_bytes[..8]);
         let nonce = challenge.nonce.into_array();
-        self.jobs.push(ProofJob {
+        self.push_job(ProofJob {
             id: job_id.clone(),
             gate_id: id.to_string(),
             challenge_nonce: nonce,
@@ -593,6 +608,18 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
                     };
                 }
             }
+        }
+    }
+
+    /// Records a job, dropping the oldest once the cap is hit.
+    ///
+    /// Draining from the front keeps the newest results answerable; the dropped ones answer 404,
+    /// which is what a result old enough to matter no longer being retained should look like.
+    fn push_job(&mut self, job: ProofJob) {
+        self.jobs.push(job);
+        if self.jobs.len() > MAX_JOBS {
+            let overflow = self.jobs.len() - MAX_JOBS;
+            self.jobs.drain(0..overflow);
         }
     }
 
@@ -852,10 +879,13 @@ mod tests {
     fn bridge(wallet: FakeWallet) -> Bridge<FakeWallet> {
         let mut gates = GateRegistry::new();
         gates.register("g1", binding()).unwrap();
+        // Two permitted origins, because an operator may legitimately serve more than one site:
+        // the F-09 question is whether a challenge minted by one permitted site can be answered by
+        // another.
         Bridge::new(
             gates,
             wallet,
-            OriginPolicy::new().allow("https://vip.example"),
+            OriginPolicy::new().allow("https://vip.example").allow("https://partner.example"),
         )
     }
 
@@ -1192,6 +1222,36 @@ mod tests {
             assert_eq!(r.status, 403, "{method} {path}: {}", r.body);
             assert!(r.body.contains("loopback"), "{method} {path}: {}", r.body);
         }
+    }
+
+    #[tokio::test]
+    async fn a_proof_from_a_different_origin_than_the_challenge_is_refused() {
+        // The F-09 reproduction, kept as the regression. Origin A (the page) mints a challenge;
+        // origin B (a hostile page, or a leak recipient) reads the response -- both the nonce and
+        // the session commitment are in it -- and submits the proof. Possession of the pair is all
+        // the old check required, so this must refuse now that the bridge binds the issuing origin.
+        let mut wallet = FakeWallet::new();
+        wallet.selections.clear();
+        let mut b = bridge(wallet);
+        let (nonce, session) = issue(&mut b).await; // origin: https://vip.example
+
+        let hijack = Request {
+            method: "POST",
+            path: "/gate/g1/prove".into(),
+            origin: Some("https://partner.example".into()), // permitted, but not the issuer
+            host: Some("127.0.0.1:7799".into()),
+            body: serde_json::json!({
+                "gate_id": "g1",
+                "challenge_nonce": nonce,
+                "session_commitment": session,
+            })
+            .to_string(),
+        };
+        let r = b.handle(&hijack).await;
+        assert_eq!(r.status, 409, "{}", r.body);
+        assert!(r.body.contains("session"), "{}", r.body);
+        // And the wallet was never asked: a hijacked submission must not drive the wallet.
+        assert!(b.wallet.asked.is_empty());
     }
 
     #[tokio::test]

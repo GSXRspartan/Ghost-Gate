@@ -537,6 +537,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_proof_signed_for_another_network_is_refused() {
+        // The network byte is part of the signed message, so a proof minted on one chain is not a
+        // proof on another. The verifier hashes with the GATE's network; a wallet that signed for
+        // a different cohort produced different bytes, and the signature check refuses.
+        let res = resource(7);
+        let (sk, pk) = keypair();
+        // Signed with mainnet's byte; verified against localnet's.
+        let message = ownership_proof_message(0x00, &res, &substate_id(&res), "9d69d80b");
+        let signature = SchnorrSignature::<RistrettoPublicKey, RistrettoSecretKey, SchnorrSigChallenge>::sign(
+            &sk, &message, &mut rng(),
+        )
+        .unwrap();
+        let req = CredentialProofRequest {
+            gate_id: "g1".into(),
+            challenge_nonce: "9d69d80b".into(),
+            session_commitment: "11".repeat(32),
+            substate_id: substate_id(&res),
+            ownership: OwnershipProof {
+                public_key: hex::encode(RistrettoPublicKey::from_secret_key(&sk).as_bytes()),
+                public_nonce: hex::encode(signature.get_public_nonce().as_bytes()),
+                signature: hex::encode(signature.get_signature().as_bytes()),
+            },
+        };
+        let reader = FixedReader::ok(50_000, key_bytes(&pk));
+        let v = verifier(&res, 10_000, "9d69d80b");
+
+        let err = v.verify(&reader, &req).await.expect_err("a cross-network proof must refuse");
+        assert!(matches!(err, CredentialRefusal::ForgedKey), "{err}");
+    }
+
+    #[tokio::test]
     async fn a_proof_for_a_different_resource_is_refused_before_the_chain_is_read() {
         let gate_resource = resource(7);
         let other = resource(9);

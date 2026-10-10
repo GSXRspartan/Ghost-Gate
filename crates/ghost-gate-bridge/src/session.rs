@@ -34,6 +34,14 @@ pub struct IssuedChallenge {
     pub challenge: Challenge,
     /// When this bridge stops considering it answerable. Not the gate's rule; see the module docs.
     pub expires_at: SystemTime,
+    /// The browser origin the challenge was minted for, as this bridge observed it.
+    ///
+    /// The session commitment alone is bearer knowledge: it travels inside the challenge response,
+    /// so whoever can read one response can replay the pair from anywhere. The issuing origin is
+    /// the part of the binding the reader cannot forge, and recording it is what turns "bound to a
+    /// browser session" from a claim into a check. `None` marks an operator/CLI challenge, which
+    /// may be answered only by another no-origin caller.
+    pub issued_to_origin: Option<String>,
 }
 
 /// Why a challenge was refused.
@@ -76,7 +84,12 @@ impl ChallengeBook {
     ///
     /// Refuses a duplicate nonce rather than overwriting: a collision must not silently invalidate a
     /// session somebody already holds.
-    pub fn insert(&mut self, challenge: Challenge, ttl: Duration) -> Result<(), BookError> {
+    pub fn insert(
+        &mut self,
+        challenge: Challenge,
+        ttl: Duration,
+        issued_to_origin: Option<String>,
+    ) -> Result<(), BookError> {
         let nonce = challenge.nonce.into_array();
         if self.entries.contains_key(&nonce) {
             return Err(BookError::Consumed);
@@ -93,6 +106,7 @@ impl ChallengeBook {
             IssuedChallenge {
                 challenge,
                 expires_at: SystemTime::now() + ttl,
+                issued_to_origin,
             },
         );
         Ok(())
@@ -272,7 +286,7 @@ mod tests {
     #[test]
     fn a_challenge_is_live_until_answered() {
         let mut book = ChallengeBook::new();
-        book.insert(challenge(1), TTL).unwrap();
+        book.insert(challenge(1), TTL, None).unwrap();
         assert_eq!(book.live(), 1);
         assert!(book.check_live(&[1u8; 32], b"session-1").is_ok());
         assert_eq!(book.live(), 1, "checking is not consuming");
@@ -281,7 +295,7 @@ mod tests {
     #[test]
     fn an_accepted_answer_retires_the_challenge() {
         let mut book = ChallengeBook::new();
-        book.insert(challenge(1), TTL).unwrap();
+        book.insert(challenge(1), TTL, None).unwrap();
         book.consume_on_acceptance(&[1u8; 32], b"session-1")
             .unwrap();
         assert_eq!(book.live(), 0);
@@ -298,7 +312,7 @@ mod tests {
     #[test]
     fn an_answer_from_another_session_is_refused_and_leaves_the_challenge_live() {
         let mut book = ChallengeBook::new();
-        book.insert(challenge(1), TTL).unwrap();
+        book.insert(challenge(1), TTL, None).unwrap();
         assert_eq!(
             book.consume_on_acceptance(&[1u8; 32], b"session-2")
                 .unwrap_err(),
@@ -314,7 +328,7 @@ mod tests {
     #[test]
     fn an_expired_challenge_is_refused() {
         let mut book = ChallengeBook::new();
-        book.insert(challenge(1), Duration::from_millis(1)).unwrap();
+        book.insert(challenge(1), Duration::from_millis(1), None).unwrap();
         std::thread::sleep(Duration::from_millis(5));
         assert_eq!(
             book.check_live(&[1u8; 32], b"session-1").unwrap_err(),
@@ -325,9 +339,9 @@ mod tests {
     #[test]
     fn a_duplicate_nonce_is_refused_rather_than_overwriting() {
         let mut book = ChallengeBook::new();
-        book.insert(challenge(1), TTL).unwrap();
+        book.insert(challenge(1), TTL, None).unwrap();
         assert_eq!(
-            book.insert(challenge(1), TTL).unwrap_err(),
+            book.insert(challenge(1), TTL, None).unwrap_err(),
             BookError::Consumed
         );
         assert_eq!(book.live(), 1);
