@@ -227,6 +227,10 @@ pub enum CredentialRefusal {
 /// the property that makes it Mode B.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CredentialReceipt {
+    /// Which gate verified this. A downstream consumer (the Telegram bot, a game) must check the
+    /// receipt names the gate it cares about — a receipt is evidence about one gate, not a
+    /// general-purpose pass, and this field is what makes that check possible.
+    pub gate_id: String,
     pub attested_minimum: u64,
     /// The output the proof stands on. Public by construction in this mode; documented as the
     /// linkability cost in `docs/PROVIDER_COMPATIBILITY.md` §3.
@@ -239,6 +243,8 @@ pub struct CredentialReceipt {
 /// `expected` is everything the bridge knows from its own book: the gate's policy, the network the
 /// gate is bound to, and the challenge the page claims to be answering.
 pub struct CredentialVerifier<'a> {
+    /// The gate this verification is for, recorded into the receipt.
+    pub gate_id: &'a str,
     pub network: u8,
     pub threshold: u64,
     pub resource: &'a ResourceAddress,
@@ -288,6 +294,7 @@ impl CredentialVerifier<'_> {
         self.verify_signature(&request.ownership, &auth_key, &request.substate_id)?;
 
         Ok(CredentialReceipt {
+            gate_id: self.gate_id.to_string(),
             attested_minimum: on_chain.minimum_value_promise,
             substate_id: request.substate_id.clone(),
             mode: "credential",
@@ -444,6 +451,7 @@ mod tests {
         challenge: &'a str,
     ) -> CredentialVerifier<'a> {
         CredentialVerifier {
+            gate_id: "g1",
             network: NETWORK,
             threshold,
             resource: res,
@@ -565,6 +573,20 @@ mod tests {
 
         let err = v.verify(&reader, &req).await.expect_err("a cross-network proof must refuse");
         assert!(matches!(err, CredentialRefusal::ForgedKey), "{err}");
+    }
+
+    #[tokio::test]
+    async fn the_receipt_names_the_gate_that_verified_it() {
+        // Downstream consumers (the Telegram bot, the game) must be able to check a receipt is for
+        // the gate they care about; this is the field that makes that possible.
+        let res = resource(7);
+        let (sk, pk) = keypair();
+        let req = request(&res, "9d69d80b", &sk);
+        let reader = FixedReader::ok(50_000, key_bytes(&pk));
+        let v = verifier(&res, 10_000, "9d69d80b");
+
+        let receipt = v.verify(&reader, &req).await.expect("a true proof verifies");
+        assert_eq!(receipt.gate_id, "g1");
     }
 
     #[tokio::test]

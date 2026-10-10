@@ -136,6 +136,9 @@ impl<'a> Route<'a> {
             ("GET", ["game"]) => Route::Asset("game/index.html"),
             ("GET", ["game", "sanctum.js"]) => Route::Asset("game/sanctum.js"),
             ("GET", ["game", "game.css"]) => Route::Asset("game/game.css"),
+            // The Telegram join flow, served same-origin so the credential flow works.
+            ("GET", ["telegram", "join"]) => Route::Asset("telegram/join.html"),
+            ("GET", ["telegram", "claim.js"]) => Route::Asset("telegram/claim.js"),
             _ => Route::NotFound,
         }
     }

@@ -253,6 +253,8 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
                 | "game/index.html"
                 | "game/sanctum.js"
                 | "game/game.css"
+                | "telegram/join.html"
+                | "telegram/claim.js"
         ) {
             return Response::error(404, "GG: no such asset");
         }
@@ -267,7 +269,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
             Ok(bytes) => Response {
                 status: 200,
                 content_type: match name {
-                    "index.html" | "game/index.html" => "text/html; charset=utf-8",
+                    "index.html" | "game/index.html" | "telegram/join.html" => "text/html; charset=utf-8",
                     "app.css" | "game/game.css" => "text/css; charset=utf-8",
                     // A declaration file is source text, not JavaScript.
                     "vendor/tari-dapp.d.ts" => "text/plain; charset=utf-8",
@@ -409,6 +411,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
         // and the page passed through: the lowercase hex of the nonce. Reconstruction, not trust.
         let nonce_hex = crate::policy::nonce_to_hex(&challenge.nonce);
         let verifier = crate::credential::CredentialVerifier {
+            gate_id: id,
             network: gate.network,
             threshold: gate.threshold,
             resource: &gate.resource,
