@@ -63,6 +63,11 @@ const DEFAULT_GATE: &str = "crypt";
 const JOIN_TTL: Duration = Duration::from_secs(600);
 const ACCESS_TTL: Duration = Duration::from_secs(3600);
 const RECHECK_INTERVAL: Duration = Duration::from_secs(60);
+/// Whether the fixture bridge/telegram pair is in use; set once at startup.
+static FIXTURE_POLL_PAUSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The Telegram account fixture grants bind to.
+const FIXTURE_TG_USER: i64 = 42;
 const POLL_INTERVAL: u64 = 3; // seconds between getUpdates calls
 const MAX_ANSWERED_SEEN: usize = 1024;
 
@@ -133,6 +138,60 @@ pub struct TgMessage {
 #[derive(Debug, Clone, Deserialize)]
 pub struct TgUser {
     pub id: i64,
+}
+
+/// A controlled-fixture Telegram client for LOCAL testing only (GG_TG_FIXTURE=1).
+///
+/// It records every message the bot "sends" to stdout as `[fixture]` lines and answers getUpdates
+/// with nothing, so the whole grant lifecycle can be exercised — join page, claim endpoint,
+/// invites, revocation — with no real Telegram and no bot token. It is deliberate, labelled, and
+/// never runs unless the operator asks for it.
+pub struct FixtureTelegram;
+
+impl TelegramApi for FixtureTelegram {
+    async fn send_message(&mut self, user: i64, text: &str) -> Result<(), String> {
+        println!("[fixture] -> tg_user {user}: {text}");
+        Ok(())
+    }
+    async fn create_single_seat_invite(&mut self, _chat: i64) -> Result<String, String> {
+        let mut b = [0u8; 8];
+        rand::fill(&mut b);
+        Ok(format!("https://t.me/fixture/join/{}", hex::encode(b)))
+    }
+    async fn kick_member(&mut self, chat: i64, user: i64) -> Result<(), String> {
+        println!("[fixture] kick tg_user {user} from {chat} (ban+unban: seat freed, door open)");
+        Ok(())
+    }
+    async fn unban_member(&mut self, chat: i64, user: i64) -> Result<(), String> {
+        println!("[fixture] unban tg_user {user} from {chat}");
+        Ok(())
+    }
+    async fn get_updates(&mut self, _offset: u64) -> Result<Vec<TgUpdate>, String> {
+        Ok(vec![])
+    }
+}
+
+/// The fixture bridge: proof ids starting with `fixture_` answer as accepted credential receipts
+/// for the configured gate; anything else answers "not found", so negative cases are still real.
+pub struct FixtureBridge {
+    gate: String,
+}
+
+impl BridgeClient for FixtureBridge {
+    async fn proof_status(&self, proof_id: &str) -> Result<ProofStatus, String> {
+        if proof_id.starts_with("fixture_") {
+            return Ok(ProofStatus {
+                state: "credential_accepted".into(),
+                result: Some(Receipt {
+                    gate_id: self.gate.clone(),
+                    mode: "credential".into(),
+                    attested_minimum: 100_000,
+                    substate_id: format!("utxo_fixture_{proof_id}"),
+                }),
+            });
+        }
+        Err("404: no such proof".into())
+    }
 }
 
 /// The real Telegram client: plain Bot API over HTTPS, long polling.
@@ -452,10 +511,17 @@ fn main() {
 }
 
 async fn run() -> i32 {
-    let token = match std::env::var("GG_TG_BOT_TOKEN") {
-        Ok(t) if !t.trim().is_empty() => t,
+    // Fixture mode, for LOCAL lifecycle testing without Telegram. It is explicitly labelled in
+    // every log line; a fixture grant is never a real membership.
+    let fixture = std::env::var("GG_TG_FIXTURE").ok().as_deref() == Some("1");
+    let token = match (fixture, std::env::var("GG_TG_BOT_TOKEN")) {
+        (true, _) => String::new(),
+        (false, Ok(t)) if !t.trim().is_empty() => t,
         _ => {
-            eprintln!("ghost-gate-telegram: GG_TG_BOT_TOKEN must be set (from BotFather; never committed, never logged)");
+            eprintln!(
+                "ghost-gate-telegram: GG_TG_BOT_TOKEN must be set (from BotFather; never committed, \
+                 never logged) — or set GG_TG_FIXTURE=1 for a local, no-Telegram fixture run"
+            );
             return 1;
         },
     };
@@ -470,6 +536,35 @@ async fn run() -> i32 {
     let gate = std::env::var("GG_TG_GATE").unwrap_or_else(|_| DEFAULT_GATE.into());
     let claim_port: u16 = std::env::var("GG_TG_CLAIM_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_CLAIM_PORT);
     let bridge_base = std::env::var("GG_JOIN_BASE_URL").unwrap_or_else(|_| bridge.clone());
+
+    // Two arms, because the fixture and real bots are different types (the clients are type
+    // parameters, never trait objects), and unifying them would need an extra enum for one
+    // startup if/else.
+    if fixture {
+        FIXTURE_POLL_PAUSE.store(true, std::sync::atomic::Ordering::Relaxed);
+        // In fixture mode the bot never reads Telegram, so it mints one join token at startup for
+        // the fixture user and prints everything needed to drive the lifecycle by hand.
+        let mut bot = Bot::new(FixtureTelegram, FixtureBridge { gate: gate.clone() }, chat, gate.clone());
+        let reply = bot
+            .join(FIXTURE_TG_USER, &bridge_base, &format!("http://127.0.0.1:{claim_port}"))
+            .await
+            .expect("fixture join");
+        let marker = "/telegram/join/";
+        let token_part = reply[reply.find(marker).expect("join link") + marker.len()..]
+            .split('?')
+            .next()
+            .expect("token")
+            .to_string();
+        eprintln!(
+            "ghost-gate-telegram: FIXTURE MODE — no Telegram is contacted; grants are local only.\n\
+             fixture join page (for a browser with a wallet):\n\
+               {reply}\n\
+             and a ready-made claim (the fixture bridge accepts proof ids starting with 'fixture_'):\n\
+               curl -s -X POST http://127.0.0.1:{claim_port}/claim -H 'Content-Type: application/json' \\
+                 -d '{{\"token\":\"{token_part}\",\"proof_id\":\"fixture_smoke\"}}'"
+        );
+        return serve(bot, &bridge_base, &format!("http://127.0.0.1:{claim_port}"), claim_port, &gate).await;
+    }
 
     let bot = Bot::new(TelegramBot::new(&token), HttpBridge::new(&bridge), chat, gate.clone());
     serve(bot, &bridge_base, &format!("http://127.0.0.1:{claim_port}"), claim_port, &gate).await
@@ -543,8 +638,14 @@ pub async fn serve<T: TelegramApi, B: BridgeClient>(
                 let _ = socket.write_all(response.as_bytes()).await;
                 let _ = socket.shutdown().await;
             },
-            // Telegram long polling.
-            updates = bot.telegram.get_updates(update_offset) => {
+            // Telegram long polling. (The fixture client answers instantly, so the fixture pauses
+            // before each poll to keep the loop from spinning the CPU.)
+            updates = async {
+                if FIXTURE_POLL_PAUSE.load(std::sync::atomic::Ordering::Relaxed) {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+                bot.telegram.get_updates(update_offset).await
+            } => {
                 match updates {
                     Ok(list) => {
                         for update in list {
