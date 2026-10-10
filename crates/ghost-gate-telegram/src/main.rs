@@ -68,6 +68,9 @@ static FIXTURE_POLL_PAUSE: std::sync::atomic::AtomicBool = std::sync::atomic::At
 
 /// The Telegram account fixture grants bind to.
 const FIXTURE_TG_USER: i64 = 42;
+
+/// The most pending join tokens held at once (audit F-03's class, applied to the bot).
+const MAX_PENDING_TOKENS: usize = 512;
 const POLL_INTERVAL: u64 = 3; // seconds between getUpdates calls
 const MAX_ANSWERED_SEEN: usize = 1024;
 
@@ -349,6 +352,22 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
         let mut bytes = [0u8; 32];
         rand::fill(&mut bytes);
         let token = hex::encode(bytes);
+        // The same bound state rule as the bridge's challenge book (audit F-03): /join is cheap
+        // to call, so the pending-token set is capped, with the oldest-expiring dropped first.
+        // Saturation answers with the remedy rather than growing without bound.
+        if self.tokens.len() >= MAX_PENDING_TOKENS {
+            self.tokens.retain(|_, t| t.expires > Instant::now());
+            if self.tokens.len() >= MAX_PENDING_TOKENS {
+                let oldest = self
+                    .tokens
+                    .iter()
+                    .min_by_key(|(_, t)| t.expires)
+                    .map(|(k, _)| k.clone());
+                if let Some(oldest) = oldest {
+                    self.tokens.remove(&oldest);
+                }
+            }
+        }
         self.tokens.insert(
             token.clone(),
             JoinToken { user, expires: Instant::now() + self.join_ttl, used: false },
@@ -674,15 +693,66 @@ pub async fn serve<T: TelegramApi, B: BridgeClient>(
 /// wildcard, ever — a claim endpoint that answers for every origin is a claim endpoint the whole
 /// web can drive.
 async fn handle_claim_http<T: TelegramApi, B: BridgeClient>(bot: &mut Bot<T, B>, raw: &str) -> String {
+    // The same transport discipline the bridge applies, scaled to this endpoint. A claim endpoint
+    // that answered every host is a claim endpoint a rebound name could drive; and a POST whose
+    // Content-Type is a CORS-safelisted type (text/plain etc.) would skip the preflight entirely,
+    // so the declared type is enforced and the body's shape re-checked below.
     let allowed_origin = std::env::var("GG_JOIN_BASE_URL").unwrap_or_else(|_| "http://127.0.0.1:7799".into());
     let cors = format!("Access-Control-Allow-Origin: {allowed_origin}\r\nAccess-Control-Allow-Methods: POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nVary: Origin\r\n");
-    if raw.starts_with("OPTIONS") {
+
+    let mut lines = raw.split("\r\n");
+    let request_line = lines.next().unwrap_or("");
+    let (method, _target) = request_line.split_once(' ').unwrap_or(("", ""));
+    let mut content_type: Option<String> = None;
+    let mut host: Option<String> = None;
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            let v = value.trim();
+            if name.eq_ignore_ascii_case("content-type") {
+                content_type = Some(v.to_string());
+            } else if name.eq_ignore_ascii_case("host") {
+                host = Some(v.to_string());
+            }
+        }
+    }
+    // Host: only loopback spellings, like the bridge.
+    if let Some(h) = &host {
+        let name = h.rsplit_once(':').map(|(n, p)| {
+            if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) { n } else { h.as_str() }
+        });
+        if let Some(name) = name {
+            let lname = name.to_ascii_lowercase();
+            if !matches!(lname.as_str(), "127.0.0.1" | "localhost" | "[::1]" | "::1") {
+                return format!(
+                    "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: 67\r\n{cors}\r\n\
+                     {{\"error\":\"this claim endpoint answers only for loopback hosts\"}}"
+                );
+            }
+        }
+    }
+
+    if method == "OPTIONS" {
         return format!("HTTP/1.1 204 No Content\r\n{cors}\r\n");
     }
-    if !raw.starts_with("POST ") {
+    if method != "POST" {
         return format!("HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n{cors}\r\n");
     }
-    let body = raw.split("\r\n\r\n").nth(1).unwrap_or("");
+    // The declared media type must be JSON: a safelisted type would have skipped the preflight
+    // that this endpoint's CORS otherwise gates.
+    if let Some(ct) = &content_type {
+        let base = ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+        if base != "application/json" {
+            return format!(
+                "HTTP/1.1 415 Unsupported Media Type\r\nContent-Type: application/json\r\nContent-Length: 45\r\n{cors}\r\n\
+                 {{\"error\":\"claims must be application/json\"}}"
+            );
+        }
+    }
+    let body = raw.split("\r\n\r
+").nth(1).unwrap_or("");
     let parsed: Result<serde_json::Value, _> = serde_json::from_str(body);
     let Some(body) = parsed.ok() else {
         return format!("HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: 32\r\n{cors}\r\n{{\"error\":\"malformed claim body\"}}");
@@ -909,6 +979,47 @@ mod tests {
         }
         bot.seen_updates.truncate_tail(MAX_ANSWERED_SEEN);
         assert!(bot.seen_updates.len() <= MAX_ANSWERED_SEEN);
+    }
+
+    #[tokio::test]
+    async fn the_claim_endpoint_enforces_loopback_hosts_and_json_content_type() {
+        // Phase-6 recheck regressions, pre-fixed: (a) a rebound host must not be answered, (b) a
+        // CORS-safelisted content type must not bypass the preflight the JSON contract relies on.
+        let bridge = FakeBridge { answers: HashMap::from([("fixture_smoke".to_string(), FakeBridge::accepted("crypt"))]) };
+        let (mut bot, _tg) = bot_owned(bridge);
+        let (token, _) = mint_join(&mut bot, 13).await;
+        let body = serde_json::json!({ "token": token, "proof_id": "fixture_smoke" }).to_string();
+
+        let rebinding = format!(
+            "POST /claim HTTP/1.1\r\nHost: evil.com:7810\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let r = handle_claim_http(&mut bot, &rebinding).await;
+        assert!(r.contains("403"), "{r}");
+        assert!(r.contains("loopback"), "{r}");
+
+        let csrf_style = format!(
+            "POST /claim HTTP/1.1\r\nHost: 127.0.0.1:7810\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let r2 = handle_claim_http(&mut bot, &csrf_style).await;
+        assert!(r2.contains("415"), "{r2}");
+        assert!(r2.contains("application/json"), "{r2}");
+    }
+
+    #[tokio::test]
+    async fn pending_join_tokens_are_capped() {
+        // The F-03 class on the bot: /join is cheap, so the pending set must be bounded.
+        let bridge = FakeBridge { answers: HashMap::new() };
+        let (mut bot, _tg) = bot_owned(bridge);
+        for u in 0..(MAX_PENDING_TOKENS + 10) {
+            bot.join(u as i64, "http://x", "http://y").await.unwrap();
+        }
+        assert!(
+            bot.tokens.len() <= MAX_PENDING_TOKENS,
+            "the pending set stayed bounded: {}",
+            bot.tokens.len()
+        );
     }
 
     #[tokio::test]
