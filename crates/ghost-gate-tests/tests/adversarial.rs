@@ -501,10 +501,18 @@ fn someone_elses_output_cannot_be_spent_by_claiming_its_commitment() {
             .seal(test.secret_key()),
         vec![],
     );
+    // The invariant under test: Mallory cannot spend Alice's output, either because the engine's
+    // authorisation pass refuses the signature (the intended reason) or because the input failed
+    // to resolve under a signer Mallory controls. Both are engine invariants; what would be
+    // incidental is a template-side panic or a fee-only outcome, so the refusal reason is pinned
+    // to one of the two and the test fails on anything else, naming what it saw.
     let text = format!("{reason}").to_lowercase();
+    let authorised_refusal = text.contains("sign") || text.contains("auth") || text.contains("scope");
+    let resolution_refusal = text.contains("not found") || text.contains("substate");
     assert!(
-        text.contains("sign") || text.contains("auth") || text.contains("scope") || text.contains("not found"),
-        "the refusal must be an authorisation or resolution failure, got: {text}"
+        authorised_refusal ^ resolution_refusal,
+        "the refusal must be exactly one of: an authorisation failure or an input-resolution \
+         failure (got: {text}) — anything else is an incidental rejection, not the invariant"
     );
     let (accepted, burnt) = gate_state(&mut test, gate);
     assert_eq!((accepted, burnt), (0, false));

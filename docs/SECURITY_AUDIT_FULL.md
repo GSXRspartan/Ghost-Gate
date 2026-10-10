@@ -224,6 +224,38 @@ Both are being built **only** on the verified boundaries:
   The bot never asks for seeds, keys, or exact balances; it consumes the same public receipts the
   game consumes. The full design is in the Telegram section of the implementation docs.
 
+## 7b. Live-integration recheck (this phase) — boundaries after the new components
+
+The Haunted Vault game, the Telegram bot and the join page were added after the audit's first pass.
+The four fixed vulnerability classes were replayed against the new code, and the shared-localnet
+compatibility question was settled from source:
+
+- **Two reintroductions found and fixed** (commit `d2b0455`): the bot's claim endpoint had no Host
+  validation and enforced no media type — a `text/plain` CORS-safelisted POST would have skipped
+  the preflight that its CORS otherwise gates (CSRF shape); and the bot's pending-token set was
+  unbounded (the F-03 class). Both now mirror the bridge's discipline: loopback Host spellings
+  only, `application/json` required, tokens capped at 512 — each verified live against the running
+  binary and pinned by regression tests.
+- **No reintroduction** elsewhere: issuer-origin binding covers the telegram flow (the join page
+  mints and answers its challenge from one origin); credential claims need no reconciliation (the
+  bridge records the receipt synchronously); the game's poll loops are bounded; preview mode
+  touches no proof route (asserted by a web test).
+- **The 11 malicious-statement tests re-pinned.** Each refusal reason is now asserted to be exactly
+  one of the two intended engine invariants (authorisation failure or input-resolution failure),
+  with an XOR so an incidental rejection cannot satisfy the test silently. Verified concretely:
+  the wrong-signer case refuses with `RequiredSignatureMissingForStealthUtxo` — the engine's
+  key-path scope check, which is the intended boundary, not a side effect.
+- **Shared-localnet compatibility, settled from source**: the atomic-swap session's ootle tree is
+  the SAME commit as our pin (`a43773e6`), and its `engine`, `runtime`, `consensus`, `state_store`
+  and `epoch` crates are byte-identical to ours modulo line endings. The only content differences
+  are the three files of our GHSA-pp4v-v773-9qxg backport, which exist only in our tree. Consequences:
+  (a) their validators CAN execute Ghost Gate proofs — engine-side MVP verification is native to
+  v0.42; (b) our MVP-patched walletd runs standalone against their validators/indexer with an
+  independent wallet DB; (c) the GHSA empty-proof gap EXISTS on their network and is a shared-network
+  residual — it cannot be remediated without modifying their tree (prohibited), and no Ghost Gate
+  proof path depends on Proof-possession rules (the gate's access rules are `allow_all`; its
+  threshold is enforced by the engine's stealth validation), so it is not a Ghost Gate bypass.
+
 ## 8. What was actually tested (counts at audit close)
 
 | Suite | Count | What it covers |
