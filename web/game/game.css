@@ -27,6 +27,16 @@ body.vault {
   overflow-x: hidden;
 }
 
+/*
+ * The `hidden` attribute is load-bearing for every overlay and panel in this page, but the UA
+ * stylesheet's `[hidden] { display: none }` is weaker than ANY author `display` rule. The overlays
+ * below set `display: grid`, which silently overrode `hidden` and rendered the proof + relic
+ * dialogs on first paint — the "dark, blurred, popup over the title" start. This one rule makes
+ * `hidden` authoritative everywhere. Do not remove it; if a panel needs to show, clear the
+ * attribute from JS (which this code always does).
+ */
+[hidden] { display: none !important; }
+
 #fog {
   position: fixed; inset: -20%;
   pointer-events: none; z-index: 0;

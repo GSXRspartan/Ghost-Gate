@@ -407,6 +407,48 @@ test("the game page declares preview labelling and no persisted unlocks", async 
   assert.match(js, /credential/, "browser wallets use the verified credential path");
 });
 
+test("the title screen offers both an explicit preview and a wallet path", async () => {
+  // The startup regression was a title screen buried under an overlay; the entry choices must also
+  // be unambiguous, so both paths are named on the title itself.
+  const { readFile } = await import("node:fs/promises");
+  const html = await readFile(new URL("../../game/index.html", import.meta.url), "utf8");
+  assert.match(html, /id="btn-preview"/, "a preview entry point exists");
+  assert.match(html, /id="btn-enter"/, "a wallet entry point exists");
+  assert.match(html, /Connect a wallet/i, "the wallet path says what it does");
+  assert.match(html, /Enter Preview/i, "the preview path is named Enter Preview");
+});
+
+test("the stylesheet makes the hidden attribute authoritative", async () => {
+  // The reported startup bug: #proof-overlay/#relic-overlay set `display: grid`, which overrides the
+  // UA's `[hidden] { display: none }`, so the dialogs rendered over the title on first paint.
+  const { readFile } = await import("node:fs/promises");
+  const css = await readFile(new URL("../../game/game.css", import.meta.url), "utf8");
+  assert.match(
+    css,
+    /\[hidden\]\s*\{\s*display:\s*none\s*!important/,
+    "the hidden attribute must win over author display rules",
+  );
+});
+
+test("a transfer-only wallet is refused with a burn-free explanation", () => {
+  // A wallet that can burn/bridge but not prove must never look like an unlock path, and the user
+  // must be told plainly that Ghost Gate does not burn anything.
+  const caps = {
+    privateSpend: false,
+    minimumValuePromise: false,
+    ownershipProof: false,
+    walletOwnershipProof: false,
+    transactionRequests: true,
+    burnAndBridgeIncoming: true,
+    burnAndBridgeOutgoing: true,
+  };
+  const u = walletUsability(caps);
+  assert.equal(u.usable, false, "a transfer-only wallet is not usable for proofs");
+  assert.deepEqual(u.modes, [], "no proof mode is offered");
+  assert.match(u.reason, /transfer or bridge funds/i);
+  assert.match(u.reason, /never requires a burn/i);
+});
+
 test("the compatibility matrix holds: no wallet implies both modes", () => {
   const sapientLocal = walletUsability(sapientCapabilities("local")).modes.map((m) => m.mode);
   const sapientDaemon = walletUsability(sapientCapabilities("daemon")).modes.map((m) => m.mode);

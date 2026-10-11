@@ -101,12 +101,20 @@ export function walletUsability(caps, extra = {}) {
   const modes = supportedProofModes(caps, extra);
   if (modes.length > 0) return { usable: true, reason: null, modes };
   const missing = PROOF_MODES.credential.requires.filter((n) => caps[n] !== true);
+  // Say plainly when the wallet CAN move funds but cannot prove anything. Burn/bridge (transfer)
+  // capability is not a proof capability: naming that explicitly stops a transfer-only wallet from
+  // being mistaken for an unlock path. Ghost Gate never asks a wallet to burn anything.
+  const canTransfer = caps.burnAndBridgeIncoming === true || caps.burnAndBridgeOutgoing === true;
   return {
     usable: false,
     reason:
       "This account supports none of Ghost Gate's proof modes. Missing: " +
       missing.join(", ") +
-      ". A daemon-relayed account, for instance, cannot sign stealth outputs at all.",
+      ". A daemon-relayed account, for instance, cannot sign stealth outputs at all." +
+      (canTransfer
+        ? " This wallet can transfer or bridge funds, but transferring is not a proof: Ghost Gate " +
+          "never requires a burn, and a transfer-only wallet cannot open a gate."
+        : ""),
     modes,
   };
 }

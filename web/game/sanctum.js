@@ -57,7 +57,12 @@ let previewMode = false;
 /* ------------------------------- boot ------------------------------- */
 
 window.addEventListener("DOMContentLoaded", () => {
-  $("btn-enter").addEventListener("click", enterSanctum);
+  // "Connect a wallet" lands in the Sanctum and opens the chooser straight away, so the button
+  // means what it says. It still only *offers* wallets that can actually prove something.
+  $("btn-enter").addEventListener("click", async () => {
+    await enterSanctum();
+    await chooseWallet();
+  });
   $("btn-preview").addEventListener("click", () => enterSanctum(true));
   $("btn-back-title").addEventListener("click", backToTitle);
   $("btn-exit-preview").addEventListener("click", exitPreview);
@@ -124,6 +129,10 @@ function enterChamber(gate) {
   $("sanctum").hidden = true;
   const chamber = document.getElementById(`chamber-${gate}`);
   if (chamber) chamber.hidden = false;
+  // The vault dial is laid out in JS from measured pixels, and a hidden element measures 0. Built
+  // at page load (while the chamber was hidden) every glyph was placed on a -14px radius, so the
+  // rings showed a pile of letters until the first click. Re-measure once the chamber is on screen.
+  if (gate === "vault") updateVault(vaultRings, vaultOffsets);
 }
 
 function leaveChamber(silent = false) {
@@ -338,12 +347,12 @@ async function proveFor(gate) {
         : { state: "failed", reason: "unexpected verdict" };
     }
 
-    setProofStep("wait", "active");
-    $("proof-line").textContent = "Consensus is deciding. The floor is public; the amount is not.";
-    const status = await pollProof(proof.proof_id);
-    setProofStep("wait", "done");
-
-    if (status.state === "accepted") {
+    // Both branches above have already resolved to a terminal verdict — the consensus path by
+    // polling its proof id, the credential path from the bridge's own accept/refuse response.
+    // There is nothing left to poll here; an earlier revision re-polled `proof.proof_id` on both
+    // paths, which crashed the credential flow (no `proof` existed there) and would have thrown
+    // even on consensus. Judge the door on this single verdict.
+    if (verdict.state === "accepted") {
       session.unlocked.add(gate);
       $("proof-line").textContent = "The seal breaks.";
       await sleep(900);
@@ -355,7 +364,6 @@ async function proveFor(gate) {
     } else {
       throw new Error("the proof did not settle");
     }
-    setProofStep("wait", "done");
   } catch (e) {
     const msg = e && e.message ? e.message : String(e);
     if (cancelRequested || msg.includes("cancelled")) {
@@ -526,18 +534,20 @@ function lightCandle(i) {
 /* ---- The Forgotten Vault: ring alignment ---- */
 
 const VAULT_TARGET = { 0: "T", 1: "T", 2: "G" }; // each ring's glyph that must sit under the pointer
+// Module scope, because the dial is re-measured when its chamber is shown (see enterChamber).
+let vaultRings = [];
+const vaultOffsets = [0, 0, 0];
 
 function buildVaultPuzzle() {
-  const rings = [...document.querySelectorAll("#vault-sigil .ring")];
-  const offsets = [0, 0, 0];
-  rings.forEach((ring, ri) => {
+  vaultRings = [...document.querySelectorAll("#vault-sigil .ring")];
+  vaultRings.forEach((ring, ri) => {
     ring.addEventListener("click", () => {
       if (isPuzzleSolved("vault")) return;
-      offsets[ri] = (offsets[ri] + 1) % ring.children.length;
-      updateVault(rings, offsets);
+      vaultOffsets[ri] = (vaultOffsets[ri] + 1) % ring.children.length;
+      updateVault(vaultRings, vaultOffsets);
     });
   });
-  updateVault(rings, offsets);
+  updateVault(vaultRings, vaultOffsets);
 }
 
 /**
@@ -582,6 +592,10 @@ function updateVault(rings, offsets) {
 const ABYSS_ROUNDS = 4;
 let abyssSeq = [];
 let abyssInput = [];
+// True from "watch" until "your turn". Presses during playback are ignored rather than counted as a
+// wrong answer: the abyss is asking you to WATCH first, and a player who taps early should not be
+// punished with a reset they cannot explain.
+let abyssListening = false;
 
 function buildAbyssPuzzle() {
   document.querySelectorAll("#abyss-pads .echo").forEach((b) =>
@@ -591,6 +605,7 @@ function buildAbyssPuzzle() {
 }
 
 function startAbyssRound() {
+  abyssListening = true;
   abyssSeq.push(Math.floor(Math.random() * 4));
   abyssInput = [];
   $("abyss-hint").textContent = `Round ${abyssSeq.length} of ${ABYSS_ROUNDS}. Watch.`;
@@ -607,6 +622,7 @@ async function playAbyss() {
   }
   eye.classList.remove("listening");
   $("abyss-hint").textContent = "Your turn.";
+  abyssListening = false;
 }
 
 function flashEcho(i) {
@@ -618,13 +634,14 @@ function flashEcho(i) {
 }
 
 async function echoPress(i) {
-  if (isPuzzleSolved("abyss")) return;
+  if (isPuzzleSolved("abyss") || abyssListening) return;
   flashEcho(i);
   abyssInput.push(i);
   const idx = abyssInput.length - 1;
   if (abyssSeq[idx] !== i) {
     $("abyss-hint").textContent = "Wrong echo. It begins again.";
     abyssSeq = [];
+    abyssListening = true; // hold input across the pause so a click can't split the restart
     await sleep(700);
     startAbyssRound();
     return;
@@ -634,6 +651,7 @@ async function echoPress(i) {
       completePuzzle("abyss");
       $("abyss-hint").textContent = "It stops asking.";
     } else {
+      abyssListening = true; // same across the between-round pause
       await sleep(500);
       startAbyssRound();
     }
