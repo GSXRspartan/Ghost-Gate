@@ -683,6 +683,16 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
 /// this project should outgrow casually: a bridge is a localhost service for one user's browser, and a
 /// serialized loop has no concurrency to get wrong. `Connection: close` is always sent, so a client
 /// cannot keep a socket open.
+/// A peer gets this long to send a complete request, and this long to accept the response.
+///
+/// Without the read bound, one client that connects and says nothing -- or that disconnects
+/// mid-request, leaving a half-open socket -- blocks this loop in `read()` forever. Because the
+/// loop handles one connection at a time, that wedged the whole bridge: every later request,
+/// including `/health`, simply queued behind the stalled socket and the game stopped loading.
+/// Connections are therefore bounded on both ends rather than left to hang.
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 pub async fn serve<W, R>(addr: &str, bridge: Bridge<W, R>) -> std::io::Result<()>
 where
     W: WalletChannel + Send + 'static,
@@ -697,13 +707,15 @@ where
         };
 
         let mut buf = vec![0u8; MAX_BODY + 2048];
-        let read = match socket.read(&mut buf).await {
-            Ok(0) => {
+        // Bounded read: a silent or half-closed peer costs at most READ_TIMEOUT, not forever.
+        let read = match tokio::time::timeout(READ_TIMEOUT, socket.read(&mut buf)).await {
+            Ok(Ok(0)) => {
                 let _ = socket.shutdown().await;
                 continue;
             }
-            Ok(n) => n,
-            Err(_) => {
+            Ok(Ok(n)) => n,
+            // Read error, or the peer never finished sending: drop it and serve the next one.
+            Ok(Err(_)) | Err(_) => {
                 let _ = socket.shutdown().await;
                 continue;
             }
@@ -718,7 +730,8 @@ where
             None => Response::error(400, "GG: malformed request"),
         };
 
-        let _ = socket.write_all(render(&response).as_bytes()).await;
+        let body = render(&response);
+        let _ = tokio::time::timeout(WRITE_TIMEOUT, socket.write_all(body.as_bytes())).await;
         let _ = socket.shutdown().await;
     }
 }

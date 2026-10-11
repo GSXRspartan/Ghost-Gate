@@ -125,6 +125,18 @@ const click = (sel) => evaluate(`(() => {
 })()`);
 
 /**
+ * Click WITHOUT awaiting the returned promise. The "Connect a wallet" handler is async (it enters
+ * the Sanctum and then probes wallets, each with its own retry timeouts), so awaiting its promise
+ * would block this harness for minutes. Fire it and poll for the resulting state instead.
+ */
+const clickNoWait = (sel) =>
+  send("Runtime.evaluate", {
+    expression: `(() => { const el = document.querySelector(${JSON.stringify(sel)}); if (!el) return "MISSING"; el.click(); return "clicked"; })()`,
+    returnByValue: true,
+    awaitPromise: false,
+  }).then((r) => r.result?.value);
+
+/**
  * Wait until `expr` (evaluated in the page) is truthy, instead of sleeping a fixed amount. Entering
  * the Sanctum awaits a gate-metadata fetch per door before it renders them, and on a cold bridge
  * that can outlast any fixed pause -- which is how a green game looked broken in the harness.
@@ -334,7 +346,32 @@ async function main() {
   check("reload returns to the title screen (not trapped)", titleAgain.shown, JSON.stringify(titleAgain));
   check("no overlay re-shown after reload", (await visible("#relic-overlay")).display === "none");
 
-  console.log("\n== 8. console / network hygiene ==");
+  console.log("\n== 8. no-wallet failure path never strands the player ==");
+  // With no walletd and no browser wallet, "Connect a wallet" must land in the Sanctum, explain
+  // itself honestly, and leave no overlay. Pressing a door with no wallet must not open a proof
+  // dialog that cannot be dismissed -- the bug class that strands users.
+  await goto(GAME);
+  await sleep(400);
+  consoleErrors.length = 0;
+  await clickNoWait("#btn-enter");
+  await waitFor(`(() => { const s = document.getElementById("sanctum"); return s && !s.hidden; })()`, 20000, "sanctum after Connect a wallet");
+  check("Connect a wallet reaches the Sanctum", (await visible("#sanctum")).shown);
+  check("no overlay after Connect a wallet", (await visible("#proof-overlay")).display === "none" && (await visible("#relic-overlay")).display === "none");
+  const status = await evaluate(`document.getElementById("sanctum-status").textContent || ""`);
+  // Either a wallet was found (fine) or the page explained how to get one. Both are acceptable;
+  // what must never happen is a silent dead end.
+  check("wallet status is explained, not silent", status.trim().length > 0, status.slice(0, 90));
+  await clickNoWait("#door-crypt .door-prove");
+  await sleep(3000);
+  const strandedOverlay = (await visible("#proof-overlay")).shown;
+  check("pressing a door with no wallet leaves NO stuck overlay", !strandedOverlay);
+  check("player is still in the game", (await visible("#sanctum")).shown);
+  // And they can always get back out.
+  await click("#btn-back-title");
+  await sleep(500);
+  check("Leave returns to the title screen", (await visible("#title-screen")).shown);
+
+  console.log("\n== 9. console / network hygiene ==");
   check("no console errors", consoleErrors.length === 0, consoleErrors.slice(0, 3).join(" | ") || "none");
   const realFailed = failedRequests.filter((f) => !/net::ERR_ABORTED/.test(f));
   check("no failed network requests", realFailed.length === 0, realFailed.slice(0, 3).join(" | ") || "none");
