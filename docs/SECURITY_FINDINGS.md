@@ -266,3 +266,39 @@ records it — see **F-09** below.
   unchanged.
 - **Note**: this is a *modelling* fix that tightens an assumption the design doc already claimed
   ("bound to that browser session"); the gate's on-chain rules were never affected.
+
+---
+
+## GG-012 — A silent peer could wedge the bridge (availability) — FIXED
+
+**Severity:** availability. **Status:** fixed in `24aaf8a`, verified against the running bridge.
+
+**What it was.** The serve loop read a request with no timeout:
+
+```rust
+let read = match socket.read(&mut buf).await { ... }   // no bound
+```
+
+Connections were handled one at a time on the accept loop, so a single client that opened a TCP
+connection to the bridge and then sent nothing held the service in `read()` indefinitely. Every
+later request — `/health` included — queued behind it, and the page stopped loading. Opening a
+socket and not writing is all it takes; no malformed input, no privileges, nothing to parse.
+
+It is a denial of service against the component that decides whether a gate opens. It grants no
+access and forges nothing, but a wedged bridge means nobody can prove anything *or* be told why.
+
+**How it presented.** During the game verification the bridge stopped answering entirely, with
+CLOSE-WAIT sockets on the server side carrying unread bytes (83–85) — half-open connections left by
+test browsers killed mid-request, each one a stall the loop would never clear.
+
+**Fix.** Read and write are both bounded (10s), so a silent or half-closed peer costs at most that
+and the bridge serves the next connection. Measured after the fix: a silent peer opened at t=0, a
+health request at t=2s answered in 7.92s (the remaining timeout) instead of never; every subsequent
+request was immediate.
+
+**Why not a task per connection.** The wallet and indexer futures are not `Send` across their
+awaits, so `tokio::spawn` per connection would require reshaping security-critical state. The
+timeout removes the unbounded stall, which is the defect; the serial handling is unchanged.
+
+**Regression test.** `scripts/browser_game_check.sh` asserts the game still loads and plays after
+the fix; the timeout behaviour itself is verified against the live bridge as described above.
