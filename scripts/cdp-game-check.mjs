@@ -124,6 +124,23 @@ const click = (sel) => evaluate(`(() => {
   return "clicked";
 })()`);
 
+/**
+ * Wait until `expr` (evaluated in the page) is truthy, instead of sleeping a fixed amount. Entering
+ * the Sanctum awaits a gate-metadata fetch per door before it renders them, and on a cold bridge
+ * that can outlast any fixed pause -- which is how a green game looked broken in the harness.
+ */
+async function waitFor(expr, timeoutMs = 15000, label = expr) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    let v = false;
+    try { v = await evaluate(expr); } catch { /* mid-navigation */ }
+    if (v) return true;
+    await sleep(100);
+  }
+  console.log(`  (timeout waiting for: ${label})`);
+  return false;
+}
+
 /* ------------------------------ the checks ------------------------------ */
 
 async function main() {
@@ -146,7 +163,9 @@ async function main() {
               for (var m of muts) {
                 var has = m.target.classList.contains("flash");
                 var had = (m.oldValue || "").includes("flash");
-                if (has && !had) rec.push(Number(m.target.dataset.i));
+                // Ignore echoes the PLAYER makes: echoPress flashes the pad it was given, and those
+                // are not part of the sequence the abyss is asking us to repeat.
+                if (has && !had && !window.__echoIgnore) rec.push(Number(m.target.dataset.i));
               }
             }).observe(e, { attributes: true, attributeOldValue: true });
           });
@@ -191,7 +210,13 @@ async function main() {
 
   console.log("\n== 2. Enter Preview navigates to the Sanctum ==");
   await click("#btn-preview");
-  await sleep(500);
+  // Wait for the doors to actually render (the Sanctum draws them after the gate metadata loads).
+  await waitFor(
+    `["crypt","vault","abyss"].every(g => { const d = document.getElementById("door-"+g);
+       const e = d && d.querySelector(".door-enter"); return e && !e.hidden; })`,
+    15000,
+    "all three preview doors rendered",
+  );
   const sanctum = await visible("#sanctum");
   check("sanctum visible after preview", sanctum.shown, JSON.stringify(sanctum));
   const banner = await visible("#preview-banner");
@@ -207,7 +232,7 @@ async function main() {
 
   console.log("\n== 4. play The Crypt (candle sequence 2,0,3,1) ==");
   await click("#door-crypt .door-enter");
-  await sleep(300);
+  await waitFor(`(() => { const c = document.getElementById("chamber-crypt"); return c && !c.hidden; })()`, 10000, "crypt chamber open");
   check("crypt chamber visible", (await visible("#chamber-crypt")).shown);
   const cryptBefore = await evaluate(`document.querySelectorAll("#crypt-candles .candle").length`);
   check("four candles present", cryptBefore === 4, "n=" + cryptBefore);
@@ -217,7 +242,7 @@ async function main() {
   const wrongReset = await evaluate(`document.querySelectorAll("#crypt-candles .candle.lit").length`);
   check("wrong candle order resets the vigil", wrongReset === 0, "lit=" + wrongReset);
   await evaluate(`(() => { for (const i of [2,0,3,1]) document.querySelectorAll("#crypt-candles .candle")[i].click(); })()`);
-  await sleep(400);
+  await waitFor(`(() => { const r = document.getElementById("relic-overlay"); return r && !r.hidden; })()`, 10000, "crypt reward dialog");
   const relicAfterCrypt = await visible("#relic-overlay");
   check("crypt reward dialog appears after solving", relicAfterCrypt.shown, JSON.stringify(relicAfterCrypt));
   const relicTitle = await evaluate(`document.querySelector("#relic-title")?.textContent || ""`);
@@ -228,7 +253,7 @@ async function main() {
 
   console.log("\n== 5. play The Forgotten Vault (rings T,T,G) ==");
   await click("#door-vault .door-enter");
-  await sleep(300);
+  await waitFor(`(() => { const c = document.getElementById("chamber-vault"); return c && !c.hidden; })()`, 10000, "vault chamber open");
   check("vault chamber visible", (await visible("#chamber-vault")).shown);
   // click each ring until its target glyph sits under the pointer (T,T,G), via the on-screen state line
   const solvedVault = await evaluate(`(async () => {
@@ -247,7 +272,7 @@ async function main() {
     }
     return document.getElementById("vault-state").textContent;
   })()`);
-  await sleep(400);
+  await waitFor(`(() => { const r = document.getElementById("relic-overlay"); return r && !r.hidden; })()`, 10000, "vault reward dialog");
   check("vault rings solved", solvedVault === true, String(solvedVault));
   check("vault reward dialog appears", (await visible("#relic-overlay")).shown);
   await click("#relic-close");
@@ -260,33 +285,41 @@ async function main() {
   await goto(GAME);
   await sleep(400);
   await click("#btn-preview");
-  await sleep(400);
+  await waitFor(`["crypt","vault","abyss"].every(g => { const d = document.getElementById("door-"+g);
+       const e = d && d.querySelector(".door-enter"); return e && !e.hidden; })`, 15000, "preview doors rendered");
   await click("#door-abyss .door-enter");
-  await sleep(300);
+  await waitFor(`(() => { const c = document.getElementById("chamber-abyss"); return c && !c.hidden; })()`, 10000, "abyss chamber open");
   check("abyss chamber visible", (await visible("#chamber-abyss")).shown);
   const solvedAbyss = await evaluate(`(async () => {
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     const hint = document.getElementById("abyss-hint");
-    // The recorder may already hold echoes from the round that was playing when we walked in. Track
-    // the round from the "Round N of 4" text shown during each watch phase, then on "Your turn"
-    // press exactly that many echoes (the game replays the whole cumulative sequence each round).
-    let round = 0;
-    for (let guard = 0; guard < 600; guard++) {
+    // Self-synchronising: the recorder holds every echo since the last drain, so on "Your turn"
+    // exactly that list is the sequence to repeat -- no need to guess the round number from the
+    // "Round N of 4" text, which may already have scrolled past. \`pressed\` stops a second drain
+    // inside the same turn (the hint stays "Your turn." until the next round starts watching).
+    let pressed = false;
+    for (let guard = 0; guard < 900; guard++) {
       const txt = hint.textContent;
-      const m = txt.match(/Round (\\d+) of/);
-      if (m) round = parseInt(m[1], 10);
       if (txt.includes("stops asking")) return true;
-      if (txt.includes("Your turn") && window.__echoRec.length && round > 0) {
-        const tail = window.__echoRec.slice(-round);
-        window.__echoRec.length = 0;
-        for (const i of tail) { document.querySelector("#abyss-pads .echo[data-i=\\"" + i + "\\"]").click(); await sleep(60); }
-        await sleep(500);
+      const yourTurn = txt.includes("Your turn");
+      if (!yourTurn) pressed = false;
+      if (yourTurn && !pressed && window.__echoRec.length) {
+        const toPress = window.__echoRec.splice(0, window.__echoRec.length);
+        window.__echoIgnore = true;   // our own presses must not be recorded as sequence echoes
+        for (const i of toPress) { document.querySelector("#abyss-pads .echo[data-i=\\"" + i + "\\"]").click(); await sleep(60); }
+        // MutationObserver delivers asynchronously, so let the queued records drain into the
+        // (ignored) recorder before lowering the flag, or a press is captured a tick too late.
+        await sleep(0);
+        await sleep(0);
+        window.__echoIgnore = false;
+        pressed = true;
+        await sleep(300);
       }
       await sleep(40);
     }
     return hint.textContent;
   })()`);
-  await sleep(300);
+  await waitFor(`(() => { const r = document.getElementById("relic-overlay"); return r && !r.hidden; })()`, 10000, "abyss reward dialog");
   check("abyss solved (watch & repeat)", solvedAbyss === true, String(solvedAbyss));
   check("abyss reward dialog appears", (await visible("#relic-overlay")).shown);
   await click("#relic-close");
