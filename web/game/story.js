@@ -21,7 +21,7 @@ export const PHANTOM_TAUNTS = [
   "Ah, visitors. Please sign the guest ledger. Nobody has signed it since the epoch went missing.",
   "I would offer you tea, but the kettle is pending. It has been pending for eight hundred years.",
   "Welcome to the vault. Everything here is final except the atmosphere.",
-  "You are about to touch my evidence. I have polish it myself. With regret.",
+  "You are about to touch my evidence. I polished it myself. With regret.",
 ];
 
 /** One line per chapter, spoken on first entry. */
