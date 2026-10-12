@@ -34,7 +34,7 @@ GAME_URL="http://127.0.0.1:7799/game"
 NODE="/mnt/c/Program Files/nodejs/node.exe"
 [ -x "$NODE" ] || { echo "no Windows node at $NODE"; exit 1; }
 [ -f "$EDGE" ] || { echo "no Edge binary at $EDGE"; exit 1; }
-WIN_SCRIPT="D:\\Codex\\ghost-gate-workspace\\ghost-gate\\scripts\\cdp-game-check.mjs"
+WIN_SCRIPT="D:\\Codex\\ghost-gate-workspace\\ghost-gate\\scripts\\cdp-story-check.mjs"
 
 # Refresh the served assets are current (bridge serves from disk, but be explicit for operators).
 echo "== game served: $(curl -s -o /dev/null -w '%{http_code}' "$GAME_URL") =="

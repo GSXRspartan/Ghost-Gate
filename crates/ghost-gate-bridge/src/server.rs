@@ -252,6 +252,8 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
                 | "vendor/tari-dapp.d.ts"
                 | "game/index.html"
                 | "game/sanctum.js"
+                | "game/story.js"
+                | "game/chapters.js"
                 | "game/game.css"
                 | "telegram/join.html"
                 | "telegram/claim.js"

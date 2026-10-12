@@ -135,6 +135,8 @@ impl<'a> Route<'a> {
             // The Haunted Vault. Same fixed-name rule as every other asset.
             ("GET", ["game"]) => Route::Asset("game/index.html"),
             ("GET", ["game", "sanctum.js"]) => Route::Asset("game/sanctum.js"),
+            ("GET", ["game", "story.js"]) => Route::Asset("game/story.js"),
+            ("GET", ["game", "chapters.js"]) => Route::Asset("game/chapters.js"),
             ("GET", ["game", "game.css"]) => Route::Asset("game/game.css"),
             // The Telegram join flow, served same-origin so the credential flow works.
             ("GET", ["telegram", "join"]) => Route::Asset("telegram/join.html"),

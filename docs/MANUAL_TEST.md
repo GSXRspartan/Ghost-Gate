@@ -116,23 +116,45 @@ neither may name a UTXO in its error.
 
 ## The Haunted Vault (game) manual pass
 
-On the demo machine, after `scripts/start_vault.sh`:
+On the demo machine, after `scripts/start_vault.sh` (the game is now **The Lost Epoch** — three
+chapters, one story):
 
-1. **Preview walk-through** — open `/game`, choose "Preview without a wallet", verify the banner
-   says PREVIEW in three places, walk all three chambers, solve all three puzzles, find all three
-   whisper glyphs, watch a door-opening animation. Confirm nothing on the Network tab hits
-   `/gate/*/challenge`, `/gate/*/prove` or `/gate/*/credential` during preview.
-2. **Sealed-from-scratch** — reload the page with progress cleared: all doors sealed again (an
-   unlock is a session fact, never a stored one).
-3. **Real proof, consensus path** — with a standing localnet + walletd behind the bridge: pick the
-   Local walletd adapter, break The Crypt's seal, approve in walletd, watch the door open. The
+1. **Startup** — open `/game`: the title screen must be the FIRST thing visible (no dialog over
+   it), offering "Connect a wallet" and "Enter Preview".
+2. **Preview walk-through** — choose "Enter Preview", verify the banner says PREVIEW, then play all
+   three chapters in order:
+   - **Chapter I (Crypt of Lost Transactions):** hear all three witnesses, examine the stones, accuse
+     an innocent stone first (the game must explain WHY it checks out), then accuse the right one —
+     the dossier reward must reveal the 𝕶 mark.
+   - **Chapter II (Vault of Forked Epochs):** read the rules on screen, rotate the shelves, note that
+     a wrong alignment names its own violation, then rebuild heights 5→6→7 with no 𝕶-marked block.
+     The "Consult the ledger" hints reveal clues progressively, never the answer.
+   - **Chapter III (The Phantom Validator):** four stages. Pale flashes are lies (stage 2+), answer
+     in REVERSE (stage 3+). A mistake retries the SAME stage and says which rule was broken. One
+     click must count once — double-click during "Watch" should do nothing. The finale requires
+     Fragments I and II; without them the Phantom refuses the final audit.
+   - The ending plays as a staged sequence (not another card) and returns to the Sanctum.
+3. **Navigation** — repeatedly: Crypt → Sanctum → Vault → Sanctum → Abyss → Sanctum → Leave. Works
+   mid-puzzle, after failure, after success, after rewards.
+4. **Persistence** — fragments/whispers survive a reload (cosmetic); doors are sealed again after a
+   reload (an unlock is a session fact, never a stored one).
+5. **No-wallet path** — "Connect a wallet" with no walletd must land in the Sanctum with an honest
+   status line, and pressing a door must leave no uncloseable overlay.
+6. **No proof requests during preview** — DevTools Network: nothing hits `/gate/*/challenge`,
+   `/gate/*/prove` or `/gate/*/credential` during preview or any puzzle.
+7. **Real proof, consensus path** — with a standing localnet + walletd behind the bridge: pick the
+   Local walletd adapter, break a chapter's seal, approve in walletd, watch the door open. The
    proof overlay's step list must match the actual flow; the failure case (wallet holds too
    little) must land as a clean refusal with the gate's own reason.
-4. **Foreign-origin join links** — a join link edited to point `claim=` at a non-loopback host
+8. **Mobile** — 390×844: no horizontal overflow on the title or the Sanctum; all buttons reachable.
+9. **Foreign-origin join links** — a join link edited to point `claim=` at a non-loopback host
    must be refused by the join page before any wallet is involved.
-5. **Telegram** — with the bot running: `/join` → open the link → approve twice in the wallet →
-   the bot grants a single-seat invite; wait out `GG_TG_ACCESS_TTL` (test with a short value) and
-   confirm revocation + the re-verification message; confirm a replayed join link refuses.
+10. **Telegram** — with the bot running: `/join` → open the link → approve twice in the wallet →
+    the bot grants a single-seat invite; wait out `GG_TG_ACCESS_TTL` (test with a short value) and
+    confirm revocation + the re-verification message; confirm a replayed join link refuses.
+
+Automated coverage of 1–6 and 8 lives in `scripts/browser_game_check.sh` (headless Edge via CDP;
+74 checks, three consecutive green runs at the time of writing).
 
 ## The question this test is really asking
 

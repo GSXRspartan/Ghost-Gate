@@ -449,6 +449,66 @@ test("a transfer-only wallet is refused with a burn-free explanation", () => {
   assert.match(u.reason, /never requires a burn/i);
 });
 
+/* ------------------------------------------------------------------ */
+/* The Lost Epoch — clue/solution consistency, proven from the data      */
+/* ------------------------------------------------------------------ */
+
+// story.js is DOM-free on purpose, so the game's own rules can be tested directly.
+const { CHAPTER1_CASE, chapter1Violations, CHAPTER2_DIAL, chapter2Evaluate, CHAPTER3_STAGES, chapter3Expectation } = await import("../../game/story.js");
+
+test("chapter I: exactly one stone violates the witnesses, and the UI names the same one", () => {
+  // The operator's original bug: the accepted order disagreed with the displayed clue. This test
+  // pins the whole case down: every stone the UI presents is checked against every rule the
+  // witnesses state, so a clue edit that desyncs the answer fails here instead of in someone's
+  // evening.
+  const verdicts = CHAPTER1_CASE.stones.map((s) => ({ id: s.id, v: chapter1Violations(s.id) }));
+  const guilty = verdicts.filter((x) => x.v.length > 0);
+  assert.equal(guilty.length, 1, "exactly one stone is altered");
+  assert.equal(guilty[0].id, CHAPTER1_CASE.forgedId, "the guilty stone is the one the UI reveals");
+  // The forgery is provable two independent ways: borrowed sigil AND impossible epoch.
+  assert.equal(guilty[0].v.length, 2, "the altered stone violates exactly two rules");
+  assert.deepEqual(guilty[0].v.map((x) => x.rule).sort(), ["bell", "registry"]);
+  // The honest stones are consistent with EVERY witness — wrong accusations always get a reason.
+  for (const { id, v } of verdicts) {
+    if (id !== CHAPTER1_CASE.forgedId) assert.equal(v.length, 0, `${id} must be fully consistent`);
+  }
+});
+
+test("chapter II: the dial has exactly one solution and the decoys each fail legibly", () => {
+  const rotations = CHAPTER2_DIAL.rings.map((r) => r.length);
+  const solutions = [];
+  for (let a = 0; a < rotations[0]; a++)
+    for (let b = 0; b < rotations[1]; b++)
+      for (let c = 0; c < rotations[2]; c++) {
+        const r = chapter2Evaluate([a, b, c]);
+        if (r.solved) solutions.push([a, b, c]);
+      }
+  assert.equal(solutions.length, 1, "exactly one window reconstructs the Lost Epoch");
+  const [a, b, c] = solutions[0];
+  const f = chapter2Evaluate([a, b, c]).fragments;
+  assert.deepEqual(f.map((x) => x.h), CHAPTER2_DIAL.span, "heights ascend exactly as the span requires");
+  assert.equal(f[1].parent, f[0].id, "the middle block's parent is the foundation");
+  assert.equal(f[2].parent, f[1].id, "the tip's parent is the middle");
+  assert.ok(f.every((x) => !x.corrupt), "nothing under the Phantom's mark is in the spine");
+  // The dial RESTS at offsets [0,0,0]; that resting state must not already be the answer, or the
+  // puzzle solves itself the moment the chamber opens (a real bug this test caught).
+  assert.equal(chapter2Evaluate([0, 0, 0]).solved, false, "the resting dial must not be solved");
+});
+
+test("chapter III: stages escalate and the reverse rule flips the expectation", () => {
+  assert.equal(CHAPTER3_STAGES.length, 4, "four audits");
+  for (let i = 1; i < CHAPTER3_STAGES.length; i++) {
+    const prev = CHAPTER3_STAGES[i - 1], cur = CHAPTER3_STAGES[i];
+    assert.ok(cur.length >= prev.length, "sequences never shrink");
+    assert.ok(cur.decoys >= prev.decoys, "interference never eases off");
+  }
+  const seq = [3, 1, 0, 2];
+  assert.equal(chapter3Expectation(seq, 0, false), 3, "forward: first press is the first echo");
+  assert.equal(chapter3Expectation(seq, 0, true), 2, "reverse: first press is the LAST echo");
+  assert.equal(chapter3Expectation(seq, 3, true), 3, "reverse: last press is the FIRST echo");
+  assert.equal(chapter3Expectation(seq, 4, false), null, "nothing is expected past the end");
+});
+
 test("the compatibility matrix holds: no wallet implies both modes", () => {
   const sapientLocal = walletUsability(sapientCapabilities("local")).modes.map((m) => m.mode);
   const sapientDaemon = walletUsability(sapientCapabilities("daemon")).modes.map((m) => m.mode);

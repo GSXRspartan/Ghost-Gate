@@ -211,42 +211,160 @@ body.vault {
 .chamber-body { display: grid; gap: 1.2rem; justify-items: center; }
 .puzzle-hint { text-align: center; }
 
-/* Crypt candles */
-.candles { display: flex; gap: 2.2rem; padding: 1.6rem 1rem; flex-wrap: wrap; justify-content: center; }
-.candle {
-  width: 46px; cursor: pointer; user-select: none; text-align: center; position: relative;
-  transition: transform .25s ease;
+/* Chapter I — the investigation scene */
+.phantom-say {
+  min-height: 1.4em; max-width: 62ch; text-align: center; margin: 0 auto;
+  color: #cdb9e8; font-style: italic; line-height: 1.55;
 }
-.candle:hover { transform: translateY(-3px); }
-.candle .stick {
-  height: 84px; width: 22px; margin: 0 auto; border-radius: 6px 6px 3px 3px;
-  background: linear-gradient(180deg, #e7dcc4, #b7a888);
-  box-shadow: inset -4px 0 6px rgba(0,0,0,.25);
-  position: relative;
+.crypt-scene { display: grid; gap: 1.2rem; width: 100%; justify-items: center; }
+.stones { display: flex; gap: .9rem; flex-wrap: wrap; justify-content: center; }
+.stone {
+  display: grid; gap: .3rem; justify-items: center; width: 168px; padding: 1rem .8rem;
+  background: linear-gradient(180deg, #23262f, #191c24); border: 1px solid #3a4052;
+  border-radius: 12px; cursor: pointer; font: inherit; color: var(--text); text-align: center;
+  transition: border-color .2s ease, transform .15s ease, box-shadow .2s ease;
 }
-.candle .stick::after {
-  content: ""; position: absolute; top: -10px; left: 50%; width: 2px; height: 10px;
-  background: #6b6252; transform: translateX(-50%);
+.stone:hover { border-color: #525b74; transform: translateY(-2px); }
+.stone.selected { border-color: var(--ember); box-shadow: 0 0 22px rgba(255,157,69,.16); }
+.stone.cracked { border-color: #8a4b3a; background: linear-gradient(180deg, #2c2020, #1a1414); }
+.stone-sigil { font-size: 1.9rem; }
+.stone-name { font-weight: 600; letter-spacing: .04em; }
+.stone-line { color: var(--text-dim); font-size: .85rem; }
+.witnesses { display: flex; gap: .9rem; flex-wrap: wrap; justify-content: center; }
+.witness {
+  display: grid; gap: .2rem; justify-items: center; padding: .8rem 1.1rem; min-width: 180px;
+  background: rgba(35,32,52,.75); border: 1px dashed #4a4160; border-radius: 12px;
+  cursor: pointer; font: inherit; color: var(--text);
+  transition: border-color .2s ease, box-shadow .2s ease;
 }
-.candle .flame {
-  position: absolute; top: -26px; left: 50%; transform: translateX(-50%);
-  width: 12px; height: 20px; border-radius: 50% 50% 42% 42%;
-  background: radial-gradient(closest-side at 50% 78%, #fff6d8, var(--ember) 62%, transparent 100%);
-  opacity: 0; transition: opacity .35s ease;
-  animation: flicker .42s infinite alternate;
+.witness:hover { border-color: #8f7fc0; box-shadow: 0 0 18px rgba(143,127,192,.14); }
+.witness.heard { border-style: solid; color: var(--text-dim); }
+.witness-ghost { font-size: 1.5rem; color: #cdb9e8; }
+.witness-name { font-size: .85rem; }
+.dossier {
+  width: min(720px, 94vw); background: rgba(20,22,30,.8); border: 1px solid #343a4c;
+  border-radius: 12px; padding: 1rem 1.2rem;
 }
-.candle.lit .flame { opacity: 1; }
-.candle.lit .stick { box-shadow: 0 0 34px rgba(255,157,69,.35), inset -4px 0 6px rgba(0,0,0,.25); }
-.candle .label { margin-top: .5rem; color: var(--text-dim); font-size: .8rem; }
-.candle.awake { animation: candle-shake .4s; }
-@keyframes candle-shake {
-  0%,100% { transform: translateX(0);} 25% { transform: translateX(-4px);}
-  50% { transform: translateX(4px);} 75% { transform: translateX(-3px);}
+.dossier h4 { margin: 0 0 .5rem; letter-spacing: .18em; text-transform: uppercase; font-size: .8rem; color: var(--text-dim); }
+.dossier ul { margin: 0; padding-left: 1.1rem; display: grid; gap: .45rem; }
+.dossier li { line-height: 1.5; color: var(--text-dim); }
+.dossier li.accuse-line { color: #ffd9a8; }
+.dossier li.violation { color: #ff9d8a; }
+.dossier li.reveal { color: #d9c9a8; font-style: italic; }
+.accuse-row {
+  display: flex; gap: .8rem; align-items: center; flex-wrap: wrap; justify-content: center;
 }
-@keyframes flicker {
-  from { transform: translateX(-50%) scale(1) rotate(-1.5deg); }
-  to   { transform: translateX(-52%) scale(.94) rotate(2deg); }
+
+/* Chapter II — the chain dial */
+.finality-window {
+  width: min(560px, 92vw); min-height: 168px; display: grid; gap: .45rem; justify-items: stretch;
+  background: rgba(12,13,19,.75); border: 1px solid #343a4c; border-radius: 14px; padding: .9rem 1rem;
 }
+.finality-window.sealing { animation: seal-pulse 1.4s ease; }
+@keyframes seal-pulse { 0%,100% { box-shadow: none; } 45% { box-shadow: 0 0 46px rgba(124,227,139,.3); } }
+.chain-block {
+  display: flex; justify-content: space-between; align-items: baseline; gap: .8rem;
+  background: linear-gradient(180deg, #232838, #1a1e2a); border: 1px solid #3a4152;
+  border-radius: 9px; padding: .5rem .8rem;
+}
+.chain-block.marked { border-color: #7a3b52; background: linear-gradient(180deg, #2a1e26, #1c1620); }
+.chain-block.sealed { border-color: rgba(124,227,139,.5); }
+.block-id { font-weight: 700; letter-spacing: .06em; }
+.block-line { color: var(--text-dim); font-size: .85rem; }
+.chain-link { text-align: center; color: var(--text-dim); font-size: .85rem; min-height: 1.1em; }
+.chain-link.good { color: var(--ok); }
+.chain-link.broken { color: #ff9d8a; }
+.dial { display: grid; gap: .7rem; width: min(680px, 94vw); }
+.dial-row { display: flex; align-items: center; gap: .5rem; }
+.ring-track {
+  flex: 1; display: flex; gap: .45rem; overflow-x: auto; padding: .55rem .6rem;
+  background: radial-gradient(120% 160% at 50% 120%, rgba(90,80,140,.12), transparent 60%), rgba(20,22,30,.7);
+  border: 1px solid #343a4c; border-radius: 999px; scroll-snap-type: x proximity;
+}
+.shelf-label { position: absolute; left: -9999px; }
+.chip {
+  flex: 0 0 auto; scroll-snap-align: center; display: grid; gap: .1rem; justify-items: center;
+  min-width: 96px; padding: .45rem .6rem; background: #1a1e2a; border: 1px solid #3a4052;
+  border-radius: 10px; cursor: pointer; font: inherit; color: var(--text);
+}
+.chip:hover { border-color: #525b74; }
+.chip.active { border-color: var(--ember); box-shadow: 0 0 18px rgba(255,157,69,.18); }
+.chip.marked .chip-id::after { content: " 𝕶"; color: #c86f92; }
+.chip-id { font-weight: 700; }
+.chip-line { color: var(--text-dim); font-size: .78rem; white-space: nowrap; }
+.dial-controls { display: flex; gap: .8rem; }
+
+/* Chapter III — the Phantom's stage */
+.phantom-stage { display: grid; gap: 1rem; justify-items: center; width: 100%; }
+.stage-banner {
+  margin: 0; letter-spacing: .22em; text-transform: uppercase; color: #dfe3ec; font-size: .9rem;
+}
+.echo {
+  width: 74px; height: 74px; border-radius: 50%; cursor: pointer; border: 2px solid #3a4152;
+  background: radial-gradient(closest-side at 50% 40%, #232838, #14161d);
+  transition: transform .12s ease, box-shadow .3s ease, border-color .3s ease;
+}
+.echo:hover { transform: translateY(-2px); }
+.echo.lit { border-color: var(--ember); box-shadow: 0 0 34px rgba(255,157,69,.4); animation: echo-flash .46s; }
+.echo.pale {
+  border-color: #9aa4c0; background: radial-gradient(closest-side at 50% 40%, #2c3040, #171a22);
+  box-shadow: 0 0 26px rgba(160,172,204,.25); animation: echo-flash .46s;
+}
+@keyframes echo-flash { from { transform: scale(.92); } to { transform: none; } }
+
+/* Fragment presentations — deliberately distinct per chapter */
+#fragment-overlay {
+  position: fixed; inset: 0; z-index: 60; display: grid; place-items: center;
+  background: rgba(4,5,9,.75); backdrop-filter: blur(3px);
+}
+.fragment-box {
+  width: min(620px, 92vw); max-height: 86vh; overflow-y: auto; text-align: center;
+  background: var(--stone-2); border: 1px solid #3a4052; border-radius: 14px;
+  padding: 1.6rem 1.5rem; box-shadow: 0 30px 90px rgba(0,0,0,.65);
+}
+.fragment-kicker { letter-spacing: .26em; text-transform: uppercase; color: var(--ember); font-size: .8rem; margin: 0 0 .4rem; }
+.fragment-body { display: grid; gap: .7rem; margin: 1rem 0 1.3rem; color: var(--text-dim); line-height: 1.6; text-align: left; }
+.dossier-presentation .fragment-box { border-color: #6b5a34; background: linear-gradient(180deg, #241f14, #191712); }
+.chain-presentation .fragment-body { counter-reset: link; }
+.chain-presentation .fragment-body p:first-child {
+  border-left: 3px solid var(--ok); padding-left: .7rem; font-family: ui-monospace, monospace;
+}
+
+/* Case file */
+#casefile-overlay {
+  position: fixed; inset: 0; z-index: 60; display: grid; place-items: center;
+  background: rgba(4,5,9,.75); backdrop-filter: blur(3px);
+}
+.casefile-box {
+  width: min(560px, 92vw); background: var(--stone-2); border: 1px solid #3a4052;
+  border-radius: 14px; padding: 1.4rem 1.5rem; box-shadow: 0 30px 80px rgba(0,0,0,.6);
+}
+.casefile-box h3 { margin-top: 0; letter-spacing: .2em; text-transform: uppercase; }
+.casefile-box p { color: var(--text-dim); line-height: 1.55; }
+
+/* The ending */
+#ending-overlay {
+  position: fixed; inset: 0; z-index: 70; display: grid; place-items: center;
+  background: rgba(3,4,8,.92); backdrop-filter: blur(4px);
+}
+.ending-box { width: min(680px, 94vw); text-align: center; }
+#ending-text {
+  display: grid; gap: .8rem; min-height: 9em; justify-items: center; margin-bottom: 1.2rem;
+  max-height: 62vh; overflow-y: auto; padding: 0 .4rem;
+}
+.ending-beat {
+  margin: 0; color: #d9c9a8; line-height: 1.65; max-width: 58ch;
+  animation: ending-fade .9s ease both;
+}
+.ending-beat.finale {
+  font-size: 1.25rem; letter-spacing: .3em; text-transform: uppercase; color: var(--ember);
+  text-shadow: 0 0 24px rgba(255,157,69,.4);
+}
+@keyframes ending-fade { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+/* Door fragment line */
+.door-frag { margin: .15rem 0 0; font-size: .82rem; color: #cdb9e8; }
+
 
 /* Vault sigil */
 .sigil { position: relative; width: 300px; height: 300px; }
@@ -349,6 +467,6 @@ body.vault {
 .error { color: #ff8080; }
 
 @media (prefers-reduced-motion: reduce) {
-  #fog, .game-title, .candle .flame, .abyss-eye::after { animation: none; }
+  #fog, .game-title, .echo.lit, .echo.pale, .abyss-eye::after { animation: none; }
   .door.opening .door-left, .door.opening .door-right { transition-duration: .2s; }
 }
