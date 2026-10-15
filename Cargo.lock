@@ -2898,6 +2898,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ghost-gate-admin"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "ghost-gate-core",
+ "ghost-gate-registry",
+ "hex",
+ "p256",
+ "rand 0.10.3",
+ "rand_core 0.9.5",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tari_crypto",
+ "tokio",
+]
+
+[[package]]
 name = "ghost-gate-bridge"
 version = "0.1.0"
 dependencies = [
