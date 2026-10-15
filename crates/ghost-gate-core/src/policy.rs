@@ -55,8 +55,34 @@ pub const SUGGESTED_COMMUNITY_TTL: std::time::Duration = std::time::Duration::fr
 /// is not a long challenge.
 pub const CHALLENGE_TTL: std::time::Duration = std::time::Duration::from_secs(180);
 
+/// u128 as a JSON number or an exact decimal string. Strings are accepted — and preferred on the
+/// wire — because dashboard JavaScript cannot hold a threshold above 2^53 in a number without
+/// losing integer precision, and a threshold that silently rounds is a threshold nobody can audit.
+mod u128_flexible {
+    use serde::{Deserialize, Deserializer, Serializer};
+    pub fn serialize<S: Serializer>(v: &u128, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&v.to_string())
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<u128, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = u128;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "a decimal string or number")
+            }
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<u128, E> { Ok(v as u128) }
+            fn visit_u128<E: serde::de::Error>(self, v: u128) -> Result<u128, E> { Ok(v) }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<u128, E> {
+                v.parse::<u128>().map_err(|_| serde::de::Error::custom(format!("not an exact unsigned integer: {v:?}")))
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
 /// The proof machinery a gate demands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum ProofMode {
     /// The wallet daemon builds a proof transaction; the network attests a public floor.
     Consensus,
@@ -88,6 +114,7 @@ impl ProofMode {
 
 /// How gates relate to each other inside one application.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum GateTopology {
     /// Qualifying for one gate grants that gate only.
     Independent,
@@ -99,6 +126,7 @@ pub enum GateTopology {
 /// One gate, as administered. This is the canonical record; the bridge builds its runtime bindings
 /// from these and never from browser input.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GatePolicy {
     /// Stable, unique within the application. Never reused after a removal, so an old proof or
     /// policy version can never be reinterpreted as a different gate.
@@ -113,7 +141,9 @@ pub struct GatePolicy {
     pub symbol: String,
     /// Decimal places for display and for the dashboard's conversion only.
     pub divisibility: u8,
-    /// Exact minimum in **raw integer units**.
+    /// Exact minimum in **raw integer units**. Serialised as a decimal string (or accepted as a
+    /// JSON number) so dashboard JavaScript never has to round a threshold.
+    #[serde(with = "u128_flexible")]
     pub threshold_raw: u128,
     pub proof_mode: ProofMode,
     /// The relying-site / challenge domain this gate is bound to.
@@ -194,6 +224,7 @@ impl GatePolicy {
 
 /// An application: a named set of gates with one owner and one default session duration.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Application {
     pub application_id: String,
     pub display_name: String,
@@ -394,7 +425,7 @@ fn validate_gate(g: &GatePolicy, app: &Application) -> Result<(), String> {
     // An enabled gate must be deployed: the component is where consensus keeps the gate's state.
     if g.enabled && g.proof_mode.is_activatable() {
         match &g.component_address {
-            Some(a) if a.starts_with("component_") && a.len() > 12 => {}
+            Some(a) if a.starts_with("component_") && a.len() > "component_".len() => {}
             _ => return Err(format!(
                 "gate {:?} is enabled but has no deployed gate component address",
                 g.gate_id
@@ -413,6 +444,7 @@ fn validate_gate(g: &GatePolicy, app: &Application) -> Result<(), String> {
 /// A frozen, hashed policy version. The hash is what a challenge binds to, so a proof can only be
 /// verified against the exact policy it was issued under.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PolicyVersion {
     pub application_id: String,
     pub gate_id: String,
@@ -506,6 +538,7 @@ impl GateTopology {
 /// Replacement bookkeeping, so changing a threshold or a resource is an explicit, authorized
 /// event with outstanding work accounted for — never a silent mutation of a live component.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ReplacementRecord {
     pub gate_id: String,
     pub from_version: u64,

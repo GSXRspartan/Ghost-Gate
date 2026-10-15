@@ -20,7 +20,7 @@
 //! - Sessions are bound to a policy hash at issue time. A session issued under version N proves
 //!   nothing about version N+1: re-verification needs fresh evidence.
 
-use ghost_gate_core::policy::{
+pub use ghost_gate_core::policy::{
     hash_policy, now_unix, Application, PolicyHasher, PolicyVersion, ReplacementRecord,
     MAX_SESSION_TTL, MIN_SESSION_TTL,
 };
@@ -263,6 +263,26 @@ impl Registry {
             self.audit_tail.drain(0..excess);
         }
     }
+}
+
+/// Opaque 32-byte token, hex. Used for admin sessions and their CSRF tokens.
+pub fn new_token() -> String {
+    let mut b = [0u8; 32];
+    rand::fill(&mut b);
+    hex::encode(b)
+}
+
+/// The live admin session for a cookie token, or None. Expired sessions are dead here.
+pub fn admin_session_for(reg: &Registry, token: &str, now: u64) -> Option<AdminSession> {
+    reg.admin_sessions
+        .iter()
+        .find(|s| s.token == token && s.expires_unix > now)
+        .cloned()
+}
+
+/// Drop expired admin sessions. Called under the store lock, so it never races a login.
+pub fn expire_admin_sessions(reg: &mut Registry, now: u64) {
+    reg.admin_sessions.retain(|s| s.expires_unix > now);
 }
 
 /// blake3 hasher backed by tari_core, which is on the bridge/admin side of the dependency line.

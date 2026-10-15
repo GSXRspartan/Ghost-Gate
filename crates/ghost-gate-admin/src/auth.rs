@@ -19,7 +19,6 @@
 
 use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
 use sha2::{Digest, Sha256};
-use tari_crypto::keys::{PublicKey, SecretKey};
 use tari_crypto::signatures::{SchnorrSigChallenge, SchnorrSignature};
 use tari_crypto::ristretto::{RistrettoPublicKey, RistrettoSecretKey};
 use tari_crypto::tari_utilities::ByteArray;
@@ -146,7 +145,7 @@ fn cbor_map_get_fmt_and_authdata(bytes: &[u8]) -> Result<(&str, &[u8]), String> 
                 auth = Some(v);
             }
             "attStmt" => {
-                let (c) = skip_cbor_item(bytes.get(i..).ok_or("truncated attestation")?)?;
+                let c = skip_cbor_item(bytes.get(i..).ok_or("truncated attestation")?)?;
                 i += c;
             }
             _ => return Err(format!("unexpected attestation key {key:?}")),
@@ -530,7 +529,8 @@ pub fn verify_wallet_signature(
 
 /// The challenge is bound to the admin domain before hashing, so a signature over a gate
 /// credential challenge can never be replayed as an admin authentication (and vice versa).
-fn hash_challenge(challenge: &str) -> Vec<u8> {
+/// Public because it is part of the wire contract: wallets sign exactly this digest.
+pub fn hash_challenge(challenge: &str) -> Vec<u8> {
     Sha256::digest(format!("ghost-gate-admin:v1:{challenge}").as_bytes()).to_vec()
 }
 

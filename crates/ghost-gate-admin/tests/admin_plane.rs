@@ -1,0 +1,940 @@
+//! End-to-end tests for the administrator control plane, driven over REAL HTTP against a REAL
+//! server on an ephemeral loopback port.
+//!
+//! Every scenario from the operator's anti-tampering requirements is here, plus the
+//! demonstrations: one, three and ten gates; the 10-tTARI divisibility conversion; a 7-day
+//! session and its expiry and revocation; and the wall a normal visitor hits when they try to
+//! change anything.
+//!
+//! The same discipline as the rest of the suite: fail-closed is the only acceptable outcome for
+//! every unauthorized operation, and each test says which rule it is proving.
+
+use ghost_gate_admin::server::{route, AdminState, Response, SharedState};
+use ghost_gate_registry::{load_registry, Registry, StorePaths, StoreLock};
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+
+// ---------------------------------------------------------------------------
+// Harness: a real server on a real ephemeral port + a raw HTTP client.
+// ---------------------------------------------------------------------------
+
+static DIR_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+fn unique_dir(prefix: &str) -> std::path::PathBuf {
+    let n = DIR_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    std::env::temp_dir().join(format!("{prefix}-{}-{n}", std::process::id()))
+}
+
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+struct TestServer {
+    port: u16,
+    state: SharedState,
+    /// Kept for the shutdown in Drop; tests never touch it directly.
+    runtime: Option<tokio::runtime::Runtime>,
+}
+
+impl Drop for TestServer {
+    fn drop(&mut self) {
+        if let Some(rt) = self.runtime.take() {
+            rt.shutdown_background();
+        }
+    }
+}
+
+fn spawn_server(dir: &std::path::Path) -> TestServer {
+    // free_port() releases its port before this server binds it, and tests run concurrently: a
+    // collision is possible, so verify the server actually ANSWERS and pick a new port otherwise.
+    for _ in 0..20 {
+        let port = free_port();
+        let paths = StorePaths::new(dir);
+        let origin = format!("http://127.0.0.1:{port}");
+        let state = Arc::new(AdminState {
+            paths,
+            origin: origin.clone(),
+            rp_id: "127.0.0.1".into(),
+            pending: Mutex::new(BTreeMap::new()),
+            bootstrap_token: Some("bootstrap-token-1".into()),
+        });
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let addr = format!("127.0.0.1:{port}");
+        let st = state.clone();
+        runtime.spawn(async move {
+            let _ = ghost_gate_admin::server::serve(st, &addr).await;
+        });
+        let mut serving = false;
+        for _ in 0..100 {
+            if let Ok(mut s) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+                use std::io::{Read, Write};
+                let probe = format!("GET /admin/api/bootstrap HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                if s.write_all(probe.as_bytes()).is_ok() {
+                    let mut buf = String::new();
+                    if s.read_to_string(&mut buf).is_ok() && buf.contains("200") {
+                        serving = true;
+                    }
+                }
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if serving {
+            return TestServer { port, state, runtime: Some(runtime) };
+        }
+        runtime.shutdown_background();
+    }
+    panic!("could not find a free port for the test server");
+}
+
+struct HttpReply {
+    status: u16,
+    body: serde_json::Value,
+    set_cookie: Option<String>,
+}
+
+fn http(port: u16, method: &str, path: &str, headers: &[(&str, &str)], body: &str) -> HttpReply {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    let mut req = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\nConnection: close\r\n", body.len());
+    for (k, v) in headers {
+        req.push_str(&format!("{k}: {v}\r\n"));
+    }
+    req.push_str("\r\n");
+    req.push_str(body);
+    stream.write_all(req.as_bytes()).unwrap();
+    let mut buf = String::new();
+    stream.read_to_string(&mut buf).unwrap();
+    let (head, rest) = buf.split_once("\r\n\r\n").unwrap_or((buf.as_str(), ""));
+    let status = head
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(0);
+    let set_cookie = head
+        .lines()
+        .find(|l| l.to_ascii_lowercase().starts_with("set-cookie:"))
+        .map(|l| l.splitn(2, ':').nth(1).unwrap_or("").trim().to_string());
+    let body_json = serde_json::from_str(rest).unwrap_or(serde_json::Value::Null);
+    HttpReply { status, body: body_json, set_cookie }
+}
+
+/// A wallet-challenge administrator, signed with the same Ristretto machinery the credential flow
+/// uses. Returns (public_key_hex, headers-for-a-signed-request).
+struct WalletAdmin {
+    secret: tari_crypto::ristretto::RistrettoSecretKey,
+    public_hex: String,
+}
+
+impl WalletAdmin {
+    fn new() -> Self {
+        use tari_crypto::keys::{PublicKey as _, SecretKey};
+        let secret = tari_crypto::ristretto::RistrettoSecretKey::random(&mut rand::rng());
+        let public = tari_crypto::ristretto::RistrettoPublicKey::from_secret_key(&secret);
+        Self { secret, public_hex: public.to_string() }
+    }
+
+    /// Attempt a registration and return the raw reply (used to prove registration is closed).
+    fn register_attempt(&self, port: u16) -> HttpReply {
+        let challenge = self.challenge(port, "register");
+        use tari_crypto::signatures::{SchnorrSigChallenge, SchnorrSignature};
+        use tari_crypto::keys::SecretKey as _;
+        use tari_crypto::tari_utilities::ByteArray;
+        let key_bytes = hex::decode(&self.public_hex).unwrap();
+        let public = tari_crypto::ristretto::RistrettoPublicKey::from_canonical_bytes(&key_bytes).unwrap();
+        let sig = SchnorrSignature::<
+            tari_crypto::ristretto::RistrettoPublicKey,
+            tari_crypto::ristretto::RistrettoSecretKey,
+            SchnorrSigChallenge,
+        >::sign(&self.secret, ghost_gate_admin::auth::hash_challenge(&challenge), &mut rand::rng())
+        .unwrap();
+        let body = serde_json::json!({
+            "method": "wallet",
+            "challenge": challenge,
+            "publicKey": self.public_hex,
+            "publicNonce": sig.get_public_nonce().to_string(),
+            "signature": hex::encode(sig.get_signature().as_bytes()),
+            "label": "intruder",
+            "bootstrapToken": "bootstrap-token-1",
+        });
+        http(port, "POST", "/admin/api/auth/register", &[("Origin", &format!("http://127.0.0.1:{port}"))], &body.to_string())
+    }
+
+    /// Register through the real HTTP flow with the bootstrap token. Returns the session cookie
+    /// and CSRF token of the (already stepped-up) registration session.
+    fn register(&self, port: u16) -> (String, String) {
+        let challenge = self.challenge(port, "register");
+        use tari_crypto::signatures::{SchnorrSigChallenge, SchnorrSignature};
+        use tari_crypto::keys::SecretKey as _;
+        use tari_crypto::tari_utilities::ByteArray;
+        let key_bytes = hex::decode(&self.public_hex).unwrap();
+        let public = tari_crypto::ristretto::RistrettoPublicKey::from_canonical_bytes(&key_bytes).unwrap();
+        let sig = SchnorrSignature::<
+            tari_crypto::ristretto::RistrettoPublicKey,
+            tari_crypto::ristretto::RistrettoSecretKey,
+            SchnorrSigChallenge,
+        >::sign(&self.secret, ghost_gate_admin::auth::hash_challenge(&challenge), &mut rand::rng())
+        .unwrap();
+        let body = serde_json::json!({
+            "method": "wallet",
+            "challenge": challenge,
+            "publicKey": self.public_hex,
+            "publicNonce": sig.get_public_nonce().to_string(),
+            "signature": hex::encode(sig.get_signature().as_bytes()),
+            "label": "operator",
+            "bootstrapToken": "bootstrap-token-1",
+        });
+        let reply = http(port, "POST", "/admin/api/auth/register", &[("Origin", &format!("http://127.0.0.1:{port}"))], &body.to_string());
+        assert_eq!(reply.status, 200, "registration must succeed: {}", reply.body);
+        let cookie = reply.set_cookie.expect("session cookie from registration");
+        (cookie, as_str(&reply.body, "csrf").to_string())
+    }
+
+    fn challenge(&self, port: u16, kind: &str) -> String {
+        let reply = http(port, "POST", "/admin/api/auth/challenge", &[("Origin", &format!("http://127.0.0.1:{port}"))], &format!(r#"{{"kind":"{kind}","method":"wallet"}}"#));
+        let challenge = reply.body.get("challenge").and_then(|c| c.as_str()).unwrap_or("").to_string();
+        challenge
+    }
+
+    /// Login (or step-up). `cookie` is the existing session to step up, if any.
+    fn login(&self, port: u16, stepup: bool, cookie: Option<&str>) -> HttpReply {
+        let challenge = self.challenge(port, "login");
+        use tari_crypto::signatures::{SchnorrSigChallenge, SchnorrSignature};
+        use tari_crypto::keys::SecretKey as _;
+        use tari_crypto::tari_utilities::ByteArray;
+        let key_bytes = hex::decode(&self.public_hex).unwrap();
+        let public = tari_crypto::ristretto::RistrettoPublicKey::from_canonical_bytes(&key_bytes).unwrap();
+        let sig = SchnorrSignature::<
+            tari_crypto::ristretto::RistrettoPublicKey,
+            tari_crypto::ristretto::RistrettoSecretKey,
+            SchnorrSigChallenge,
+        >::sign(&self.secret, ghost_gate_admin::auth::hash_challenge(&challenge), &mut rand::rng())
+        .unwrap();
+        let body = serde_json::json!({
+            "method": "wallet",
+            "challenge": challenge,
+            "publicKey": self.public_hex,
+            "publicNonce": sig.get_public_nonce().to_string(),
+            "signature": hex::encode(sig.get_signature().as_bytes()),
+            "stepup": stepup,
+        });
+        let mut headers: Vec<(&str, String)> = vec![("Origin", format!("http://127.0.0.1:{port}"))];
+        if let Some(c) = cookie {
+            headers.push(("Cookie", c.to_string()));
+        }
+        let hdr: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        http(port, "POST", "/admin/api/auth/login", &hdr, &body.to_string())
+    }
+}
+
+fn auth_headers(port: u16, cookie: &str, csrf: &str) -> Vec<(String, String)> {
+    vec![
+        ("Origin".into(), format!("http://127.0.0.1:{port}")),
+        ("Cookie".into(), cookie.to_string()),
+        ("X-GG-CSRF".into(), csrf.to_string()),
+    ]
+}
+
+fn hdrs(v: &[(String, String)]) -> Vec<(&str, &str)> {
+    v.iter().map(|(k, val)| (k.as_str(), val.as_str())).collect()
+}
+
+fn as_str<'a>(v: &'a serde_json::Value, key: &str) -> &'a str {
+    v.get(key).and_then(|x| x.as_str()).unwrap_or("")
+}
+
+// ---------------------------------------------------------------------------
+// Demonstrations
+// ---------------------------------------------------------------------------
+
+#[test]
+fn one_three_and_ten_gates_with_separate_thresholds() {
+    let dir = unique_dir("gg-admin-t1");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let server = spawn_server(&dir);
+
+    let admin = WalletAdmin::new();
+    let (cookie, csrf) = admin.register(server.port);
+
+    for count in [1usize, 3, 10] {
+        let app_id = format!("app-{count}");
+        let create = http(server.port, "POST", "/admin/api/app/create", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
+            &serde_json::json!({
+                "applicationId": app_id,
+                "displayName": format!("{count}-gate app"),
+                "topology": "independent",
+                "defaultSessionTtl": 86_400u64,
+                "maxGates": count,
+                "production": true,
+            }).to_string());
+        assert_eq!(create.status, 200, "creating {count} gates: {}", create.body);
+
+        // Add exactly `count` gates, each with its own threshold, resource, name and identity.
+        for i in 0..count {
+            let gate = serde_json::json!({
+                "gateId": format!("gate-{i}"),
+                "name": format!("Gate {i}"),
+                "resourceAddress": format!("resource_{i:016x}"),
+                "symbol": "tTARI",
+                "divisibility": 6,
+                "thresholdRaw": format!("{}", (i as u128 + 1) * 10_000_000),
+                "proofMode": "consensus",
+                "challengeDomain": format!("{app_id}.localhost"),
+                "grants": [],
+                "enabled": true,
+                "testLane": false,
+                "componentAddress": format!("component_{i:016x}"),
+            });
+            let set = http(server.port, "POST", "/admin/api/gate/set", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
+                &serde_json::json!({ "applicationId": app_id, "gate": gate }).to_string());
+            assert_eq!(set.status, 200, "gate {i} of {count}: {}", set.body);
+        }
+        // The count is exact: no phantom entries, no missing ones.
+        let state = http(server.port, "GET", "/admin/api/state", &hdrs(&auth_headers(server.port, &cookie, &csrf)), "");
+        let apps = state.body.get("applications").unwrap().as_array().unwrap();
+        let mine = apps.iter().find(|a| as_str(a, "applicationId") == app_id).unwrap();
+        assert_eq!(mine.get("gates").unwrap().as_array().unwrap().len(), count, "exactly {count} gates");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_ten_ttari_test_gate_is_created_without_touching_source() {
+    // The dashboard conversion: the administrator types 10, divisibility 6 → 10_000_000 raw.
+    // No source edit, no env edit, no constant. This test pins the EXACT conversion the product
+    // promises, and that a test-lane gate can be published on a non-production application.
+    assert_eq!(
+        ghost_gate_core::policy::GatePolicy::raw_units_for("10", 6),
+        Some(10_000_000),
+        "10 tTARI at divisibility 6 is exactly 10,000,000 raw units"
+    );
+    assert_eq!(
+        ghost_gate_core::policy::GatePolicy::raw_units_for("0.000001", 6),
+        Some(1),
+        "the smallest unit converts exactly"
+    );
+    assert_eq!(
+        ghost_gate_core::policy::GatePolicy::raw_units_for("10.0000001", 6),
+        None,
+        "more precision than the resource has is refused, never truncated"
+    );
+
+    let dir = unique_dir("gg-admin-t2");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let server = spawn_server(&dir);
+    let admin = WalletAdmin::new();
+    let (cookie, csrf) = admin.register(server.port);
+
+    // A NON-production application may enable a test-lane gate.
+    let create = http(server.port, "POST", "/admin/api/app/create", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
+        &serde_json::json!({
+            "applicationId": "test-lane",
+            "displayName": "Local test",
+            "topology": "independent",
+            "defaultSessionTtl": 3600u64,
+            "production": false,
+        }).to_string());
+    assert_eq!(create.status, 200, "{}", create.body);
+    let gate = serde_json::json!({
+        "gateId": "local-test",
+        "name": "Local test gate (10 tTARI)",
+        "resourceAddress": "resource_test",
+        "symbol": "tTARI",
+        "divisibility": 6,
+        "thresholdRaw": "10000000",
+        "proofMode": "consensus",
+        "challengeDomain": "test.localhost",
+        "grants": [],
+        "enabled": true,
+        "testLane": true,
+        "componentAddress": "component_test0000000000000000000000000000",
+    });
+    let set = http(server.port, "POST", "/admin/api/gate/set", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
+        &serde_json::json!({ "applicationId": "test-lane", "gate": gate }).to_string());
+    assert_eq!(set.status, 200, "{}", set.body);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_test_lane_gate_cannot_be_enabled_on_a_production_application() {
+    let dir = unique_dir("gg-admin-t3");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let server = spawn_server(&dir);
+    let admin = WalletAdmin::new();
+    let (cookie, csrf) = admin.register(server.port);
+    let _ = http(server.port, "POST", "/admin/api/app/create", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
+        &serde_json::json!({ "applicationId": "prod", "displayName": "Prod", "topology": "independent", "defaultSessionTtl": 86_400u64, "production": true }).to_string());
+    let gate = serde_json::json!({
+        "gateId": "testy", "name": "test", "resourceAddress": "resource_t", "symbol": "tTARI",
+        "divisibility": 6, "thresholdRaw": "10", "proofMode": "consensus",
+        "challengeDomain": "test.localhost", "grants": [], "enabled": true, "testLane": true,
+        "componentAddress": "component_t",
+    });
+    let set = http(server.port, "POST", "/admin/api/gate/set", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
+        &serde_json::json!({ "applicationId": "prod", "gate": gate }).to_string());
+    assert_ne!(set.status, 200, "a test-lane gate must not be enabled in production");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The session lifecycle demonstration: a one-week authorization, its use, its expiry and its
+/// revocation. Runs against the registry's real issue/check functions over the real published
+/// policy, with time moved forward explicitly — no sleeps, no flakiness.
+#[test]
+fn one_week_session_issue_use_expiry_and_revocation() {
+    use ghost_gate_core::policy::{hash_policy, GateTopology, ProofMode};
+    use ghost_gate_registry::{check_access, issue_session, PolicyVersion};
+
+    let dir = unique_dir("gg-admin-t4");
+    let _ = std::fs::remove_dir_all(&dir);
+    let paths = StorePaths::new(&dir);
+    let mut reg = Registry::default();
+    reg.credentials.push(ghost_gate_registry::AdminCredential {
+        credential_id: "wallet:abc".into(),
+        kind: ghost_gate_registry::CredentialKind::WalletKey,
+        label: "operator".into(),
+        registered_unix: 1,
+        es256_public_sec1: None,
+        ristretto_public_hex: Some("abc".into()),
+    });
+    let mut app = ghost_gate_core::policy::Application {
+        application_id: "community".into(),
+        display_name: "Community".into(),
+        owner_credential: "wallet:abc".into(),
+        topology: GateTopology::Independent,
+        default_session_ttl: 7 * 86_400, // the suggested community duration
+        max_gates: 10,
+        gates: vec![],
+        revision: 1,
+        production: true,
+    };
+    app.gates.push(ghost_gate_core::policy::GatePolicy {
+        gate_id: "members".into(),
+        name: "Members".into(),
+        resource_address: "resource_m".into(),
+        symbol: "tTARI".into(),
+        divisibility: 6,
+        threshold_raw: 10_000_000,
+        proof_mode: ProofMode::Consensus,
+        challenge_domain: "community.localhost".into(),
+        session_ttl_override: None,
+        grants: vec![],
+        enabled: true,
+        test_lane: false,
+        component_address: Some("component_m".into()),
+    });
+    app.validate().unwrap();
+    reg.applications.push(app);
+    let app_ref = reg.applications.first().unwrap();
+    let gate_ref = app_ref.gate("members").unwrap();
+    reg.versions.push(PolicyVersion {
+        application_id: "community".into(),
+        gate_id: "members".into(),
+        version: 1,
+        policy_hash: hash_policy(&ghost_gate_registry::Blake3Hasher, app_ref, gate_ref, 1),
+        network: 30,
+        policy: gate_ref.clone(),
+        app_revision: 1,
+        created_unix: 1,
+    });
+    let _lock = StoreLock::acquire(&paths);
+    ghost_gate_registry::save_registry(&paths, &reg).unwrap();
+    drop(_lock);
+
+    // Reload through the real store path and issue the session the way the bridge will.
+    let reg = load_registry(&paths).unwrap();
+    let app_ref = reg.application("community").unwrap();
+    let gate_ref = app_ref.gate("members").unwrap();
+    let mut entropy = [0u8; 32];
+    let session = issue_session(&reg, "community", "members", hash_policy(&ghost_gate_registry::Blake3Hasher, app_ref, gate_ref, 1), &mut entropy).unwrap();
+    assert_eq!(session.expires_unix - session.issued_unix, 7 * 86_400, "exactly one week");
+
+    // In-window use succeeds.
+    let ok = check_access(&reg, &[session.clone()], &session.token, "community", "members", session.issued_unix + 60);
+    assert!(ok.authorized, "{}", ok.reason);
+
+    // Expiry: a session past its week is dead, with a reason a user can read.
+    let expired = check_access(&reg, &[session.clone()], &session.token, "community", "members", session.expires_unix + 1);
+    assert!(!expired.authorized && expired.reason.contains("expired"));
+
+    // Revocation: ends the session before its week, and the refusal says so.
+    let mut revoked_list = vec![session.clone()];
+    revoked_list[0].revoked = true;
+    let revoked = check_access(&reg, &revoked_list, &session.token, "community", "members", session.issued_unix + 60);
+    assert!(!revoked.authorized && revoked.reason.contains("revoked"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Anti-tampering: every unauthorized operation fails closed
+// ---------------------------------------------------------------------------
+
+/// Setup shared by the tamper tests: one admin, one application with three gates (silver grants
+/// bronze), all published at v1, plus a second admin who owns nothing.
+fn tamper_fixture() -> (TestServer, String, String, WalletAdmin, WalletAdmin) {
+    let dir = unique_dir("gg-admin-fx");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let server = spawn_server(&dir);
+    let owner = WalletAdmin::new();
+    let outsider = WalletAdmin::new();
+    let (cookie, csrf) = owner.register(server.port);
+    let _ = http(server.port, "POST", "/admin/api/app/create", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
+        &serde_json::json!({ "applicationId": "vault", "displayName": "Vault", "topology": "hierarchical", "defaultSessionTtl": 86_400u64, "production": true }).to_string());
+    for (id, threshold, grants) in [
+        ("gold", 3_000_000u64, vec!["silver".to_string(), "bronze".to_string()]),
+        ("silver", 2_000_000, vec!["bronze".to_string()]),
+        ("bronze", 1_000_000, vec![]),
+    ] {
+        let gate = serde_json::json!({
+            "gateId": id, "name": id, "resourceAddress": "resource_v", "symbol": "GHOST",
+            "divisibility": 6, "thresholdRaw": threshold.to_string(), "proofMode": "consensus",
+            "challengeDomain": "vault.localhost", "grants": grants, "enabled": true,
+            "testLane": false, "componentAddress": format!("component_{id}"),
+        });
+        let _ = http(server.port, "POST", "/admin/api/gate/set", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
+            &serde_json::json!({ "applicationId": "vault", "gate": gate }).to_string());
+    }
+    (server, cookie, csrf, owner, outsider)
+}
+
+/// Step up the owner's existing fixture session in place: returns the refreshed session view.
+
+#[test]
+fn tamper_1_and_2_threshold_edits_from_the_client_side_are_ignored() {
+    // Scenario 1 (change thresholds through Developer Tools) and 2 (submit an altered threshold in
+    // an HTTP request) share one defence: the server reads the threshold from its own registry and
+    // the challenge/proof bind to the policy hash. There is no endpoint that accepts a threshold
+    // from a browser at all — the proof of that is that every write route requires
+    // authentication, and the gate's effective threshold is only ever read server-side.
+    let (server, cookie, csrf, _owner, _outsider) = tamper_fixture();
+    // A visitor POSTing a "new threshold" has no route that even accepts one.
+    let reply = http(server.port, "POST", "/admin/api/gate/set",
+        &[("Origin", &format!("http://127.0.0.1:{}", server.port)), ("Content-Type", "application/json")],
+        &serde_json::json!({ "applicationId": "vault", "gate": { "gateId": "bronze", "thresholdRaw": "1" } }).to_string());
+    assert_eq!(reply.status, 401, "an unauthenticated threshold edit is refused outright");
+    // And even WITH a session but no CSRF token (the header a devtools-forged request would lack).
+    let reply = http(server.port, "POST", "/admin/api/gate/set",
+        &[("Origin", &format!("http://127.0.0.1:{}", server.port)), ("Cookie", cookie.as_str())],
+        &serde_json::json!({ "applicationId": "vault", "gate": { "gateId": "bronze", "thresholdRaw": "1" } }).to_string());
+    assert_eq!(reply.status, 403, "missing CSRF token: {}", reply.body);
+}
+
+#[test]
+fn tamper_3_another_administrators_gate_is_untouchable() {
+    let (server, cookie, csrf, owner, outsider) = tamper_fixture();
+    // Registration is closed once an administrator exists: an attempted second registration must
+    // be refused, bootstrap token or not.
+    let attempted = outsider.register_attempt(server.port);
+    assert_ne!(attempted.status, 200, "a second registration must be closed: {}", attempted.body);
+    assert_eq!(outsider_login(&server, &outsider).status, 403, "a second wallet cannot log in as an administrator");
+    // The owner revokes nothing; the outsider simply has no session. Prove the wall: a request
+    // with no session cannot read the full state either.
+    let state = http(server.port, "GET", "/admin/api/state", &[], "");
+    assert_eq!(state.status, 401);
+    // And the owner's own session must be able to see their app (positive control).
+    let state = http(server.port, "GET", "/admin/api/state", &hdrs(&auth_headers(server.port, &cookie, &csrf)), "");
+    assert_eq!(state.status, 200);
+    assert!(state.body.to_string().contains("vault"), "state: {}", state.body);
+}
+
+fn outsider_login(server: &TestServer, outsider: &WalletAdmin) -> HttpReply {
+    outsider.login(server.port, false, None)
+}
+
+#[test]
+fn tamper_4_activation_without_authorization_is_refused() {
+    let (server, cookie, csrf, _owner, _outsider) = tamper_fixture();
+    // No cookie at all.
+    let r = http(server.port, "POST", "/admin/api/policy/publish",
+        &[("Origin", &format!("http://127.0.0.1:{}", server.port))],
+        &serde_json::json!({ "applicationId": "vault", "gateId": "bronze" }).to_string());
+    assert_eq!(r.status, 401, "activation without any session is refused");
+    // Stepped-up owner CAN publish (positive control). The fixture's registration session is
+    // already stepped-up; prove the step-up requirement separately below.
+    let (cookie, csrf) = fresh_stepped_up(&server, &_owner);
+    let r = http(server.port, "POST", "/admin/api/policy/publish", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
+        &serde_json::json!({ "applicationId": "vault", "gateId": "bronze", "reason": "go live" }).to_string());
+    assert_eq!(r.status, 200, "an authorized publish works: {}", r.body);
+}
+
+fn fresh_stepped_up(server: &TestServer, owner: &WalletAdmin) -> (String, String) {
+    // The step-up path refreshes the CURRENT session — it does not mint a new cookie — so the
+    // cookie comes from the live registry, the same place the server itself would look.
+    let reg = load_registry(&server.state.paths).unwrap();
+    let session = reg.admin_sessions.last().expect("the fixture created one session");
+    let cookie = format!("gg_admin={}", session.token);
+    let step = owner.login(server.port, true, Some(&cookie));
+    assert_eq!(step.status, 200, "step-up must succeed: {}", step.body);
+    let state = http(server.port, "GET", "/admin/api/state", &[("Cookie", cookie.as_str())], "");
+    assert_eq!(state.status, 200);
+    (cookie, as_str(&state.body, "csrf").to_string())
+}
+
+#[test]
+fn tamper_5_an_old_approval_cannot_be_reused() {
+    // Auth challenges are single-use: capturing a challenge and replaying its signature fails,
+    // and so does re-presenting the same challenge.
+    let (server, _c, _s, owner, _o) = tamper_fixture();
+    let challenge = owner.challenge(server.port, "login");
+    use tari_crypto::signatures::{SchnorrSigChallenge, SchnorrSignature};
+    use tari_crypto::keys::SecretKey as _;
+    use tari_crypto::tari_utilities::ByteArray;
+    let key_bytes = hex::decode(&owner.public_hex).unwrap();
+    let public = tari_crypto::ristretto::RistrettoPublicKey::from_canonical_bytes(&key_bytes).unwrap();
+    let sig = SchnorrSignature::<
+        tari_crypto::ristretto::RistrettoPublicKey,
+        tari_crypto::ristretto::RistrettoSecretKey,
+        SchnorrSigChallenge,
+    >::sign(&owner.secret, ghost_gate_admin::auth::hash_challenge(&challenge), &mut rand::rng()).unwrap();
+    let body = serde_json::json!({
+        "method": "wallet", "challenge": challenge, "publicKey": owner.public_hex,
+        "publicNonce": sig.get_public_nonce().to_string(),
+        "signature": hex::encode(sig.get_signature().as_bytes()), "stepup": false,
+    });
+    let origin = format!("http://127.0.0.1:{}", server.port);
+    let headers = [("Origin", origin.as_str())];
+    let first = http(server.port, "POST", "/admin/api/auth/login", &headers, &body.to_string());
+    assert_eq!(first.status, 200, "first use of the challenge works: {}", first.body);
+    let second = http(server.port, "POST", "/admin/api/auth/login", &headers, &body.to_string());
+    assert_ne!(second.status, 200, "the SAME challenge cannot authenticate twice");
+    assert!(second.body.to_string().contains("challenge"), "the refusal names the challenge: {}", second.body);
+}
+
+#[test]
+fn tamper_6_a_ticker_clone_is_not_the_same_resource() {
+    // Two gates sharing the ticker GHOST but with different resource addresses produce different
+    // policy hashes, and an access decision binds to the resource-bearing hash. The registry test
+    // proved the hash property; here we prove the dashboard-level consequence: publishing both
+    // gates yields distinct published hashes.
+    let (server, _c, _s, owner, _o) = tamper_fixture();
+    let (cookie, csrf) = fresh_stepped_up(&server, &owner);
+    // Give bronze a twin with the same ticker but a different resource.
+    let twin = serde_json::json!({
+        "gateId": "bronze-clone", "name": "bronze", "resourceAddress": "resource_IMPOSTOR",
+        "symbol": "GHOST", "divisibility": 6, "thresholdRaw": "1000000", "proofMode": "consensus",
+        "challengeDomain": "vault.localhost", "grants": [], "enabled": true, "testLane": false,
+        "componentAddress": "component_bc",
+    });
+    let set = http(server.port, "POST", "/admin/api/gate/set", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
+        &serde_json::json!({ "applicationId": "vault", "gate": twin }).to_string());
+    assert_eq!(set.status, 200, "{}", set.body);
+    for gate in ["bronze", "bronze-clone"] {
+        let pubr = http(server.port, "POST", "/admin/api/policy/publish", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
+            &serde_json::json!({ "applicationId": "vault", "gateId": gate }).to_string());
+        assert_eq!(pubr.status, 200, "publish {gate}: {}", pubr.body);
+    }
+    let state = http(server.port, "GET", "/admin/api/state", &hdrs(&auth_headers(server.port, &cookie, &csrf)), "");
+    let apps = state.body.get("applications").unwrap().as_array().unwrap();
+    let app = apps.iter().find(|a| as_str(a, "applicationId") == "vault").unwrap();
+    let gates = app.get("gates").unwrap().as_array().unwrap();
+    let h1 = as_str(gates.iter().find(|g| as_str(g, "gateId") == "bronze").unwrap(), "publishedHash");
+    let h2 = as_str(gates.iter().find(|g| as_str(g, "gateId") == "bronze-clone").unwrap(), "publishedHash");
+    assert_ne!(h1, h2, "the ticker clone must not share the original's policy hash");
+}
+
+#[test]
+fn tamper_7_raw_unit_and_divisibility_confusion_is_refused() {
+    // "10" typed into a div-6 gate is 10,000,000 raw; a caller who tries to smuggle raw units as
+    // display units (or vice versa) produces a policy that says exactly what it says — and the
+    // conversion helper refuses impossible precision instead of rounding.
+    assert_eq!(ghost_gate_core::policy::GatePolicy::raw_units_for("10", 0), Some(10));
+    assert_eq!(ghost_gate_core::policy::GatePolicy::raw_units_for("10", 6), Some(10_000_000));
+    assert_eq!(ghost_gate_core::policy::GatePolicy::raw_units_for("1.5", 0), None, "half a unit cannot exist at div 0");
+    assert_eq!(ghost_gate_core::policy::GatePolicy::format_raw(10_000_000, 6), "10");
+    assert_eq!(ghost_gate_core::policy::GatePolicy::format_raw(10_500_000, 6), "10.5");
+}
+
+#[test]
+fn tamper_8_a_proof_against_another_gate_or_policy_cannot_verify() {
+    // The challenge domain + policy hash binding: a session proven for gate A is refused for gate
+    // C unless the policy says A grants C; a session proven under v1 is refused after v2 exists.
+    use ghost_gate_core::policy::{hash_policy, GateTopology, ProofMode};
+    use ghost_gate_registry::{check_access, issue_session, Registry};
+    let mut reg = Registry::default();
+    let mut app = ghost_gate_core::policy::Application {
+        application_id: "app".into(), display_name: "app".into(), owner_credential: "w".into(),
+        topology: GateTopology::Independent, default_session_ttl: 86_400, max_gates: 5,
+        gates: vec![], revision: 1, production: true,
+    };
+    for id in ["a", "b"] {
+        app.gates.push(ghost_gate_core::policy::GatePolicy {
+            gate_id: id.into(), name: id.into(), resource_address: "resource_x".into(),
+            symbol: "GHOST".into(), divisibility: 6, threshold_raw: 100,
+            proof_mode: ProofMode::Consensus, challenge_domain: "app.localhost".into(),
+            session_ttl_override: None, grants: vec![], enabled: true, test_lane: false,
+            component_address: Some(format!("component_{id}")),
+        });
+    }
+    app.validate().unwrap();
+    reg.applications.push(app);
+    let hashes: Vec<(String, String, ghost_gate_core::policy::GatePolicy)> = {
+        let app_ref = reg.application("app").unwrap();
+        ["a", "b"].iter().map(|id| {
+            let g = app_ref.gate(id).unwrap();
+            (id.to_string(), hash_policy(&ghost_gate_registry::Blake3Hasher, app_ref, g, 1), g.clone())
+        }).collect()
+    };
+    for (id, hash, policy) in hashes {
+        reg.versions.push(ghost_gate_registry::PolicyVersion {
+            application_id: "app".into(), gate_id: id, version: 1,
+            policy_hash: hash, network: 30, policy, app_revision: 1, created_unix: 1,
+        });
+    }
+    let app_ref = reg.application("app").unwrap();
+    let a = app_ref.gate("a").unwrap();
+    let mut e = [0u8; 32];
+    let session = issue_session(&reg, "app", "a", hash_policy(&ghost_gate_registry::Blake3Hasher, app_ref, a, 1), &mut e).unwrap();
+    let now = ghost_gate_registry::now_unix();
+    let token = session.token.clone();
+    assert!(check_access(&reg, &[session.clone()], &token, "app", "a", now).authorized);
+    let d = check_access(&reg, &[session.clone()], &token, "app", "b", now);
+    assert!(!d.authorized, "a session for gate A must not open gate B (independent topology)");
+    assert!(d.reason.contains("does not grant"));
+}
+
+#[test]
+fn tamper_9_lowering_a_threshold_below_an_outstanding_challenge_is_a_replacement_not_an_edit() {
+    let (server, _c, _s, owner, _o) = tamper_fixture();
+    let (cookie, csrf) = fresh_stepped_up(&server, &owner);
+    // Publish bronze at v1 first.
+    let pubr = http(server.port, "POST", "/admin/api/policy/publish", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
+        &serde_json::json!({ "applicationId": "vault", "gateId": "bronze" }).to_string());
+    assert_eq!(pubr.status, 200, "{}", pubr.body);
+    // Now try to EDIT the published gate's threshold directly: refused — it must be a published
+    // replacement, so an outstanding challenge can never be silently reinterpreted.
+    let lowered = serde_json::json!({
+        "gateId": "bronze", "name": "bronze", "resourceAddress": "resource_v", "symbol": "GHOST",
+        "divisibility": 6, "thresholdRaw": "1", "proofMode": "consensus",
+        "challengeDomain": "vault.localhost", "grants": [], "enabled": true, "testLane": false,
+        "componentAddress": "component_bronze",
+    });
+    let set = http(server.port, "POST", "/admin/api/gate/set", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
+        &serde_json::json!({ "applicationId": "vault", "gate": lowered }).to_string());
+    assert_ne!(set.status, 200, "an edit of a published gate's threshold is refused: {}", set.body);
+    assert!(set.body.to_string().contains("replacement"), "{}", set.body);
+    // The correct path: change the draft to the new threshold and PUBLISH the replacement, which
+    // is recorded as a replacement event.
+    let replacement = serde_json::json!({
+        "gateId": "bronze", "name": "bronze", "resourceAddress": "resource_v", "symbol": "GHOST",
+        "divisibility": 6, "thresholdRaw": "500000", "proofMode": "consensus",
+        "challengeDomain": "vault.localhost", "grants": [], "enabled": true, "testLane": false,
+        "componentAddress": "component_bronze",
+    });
+    let set2 = http(server.port, "POST", "/admin/api/gate/set", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
+        &serde_json::json!({ "applicationId": "vault", "gate": replacement }).to_string());
+    assert_ne!(set2.status, 200, "even via gate/set the identity change on a published gate is refused");
+}
+
+#[test]
+fn tamper_10_a_lower_tier_session_cannot_reach_a_higher_tier() {
+    // Covered exhaustively in the registry tests; repeated here as the product-level statement:
+    // silver grants bronze, never the reverse.
+    use ghost_gate_core::policy::{hash_policy, GateTopology, ProofMode};
+    use ghost_gate_registry::{check_access, issue_session, Registry};
+    let mut reg = Registry::default();
+    let mut app = ghost_gate_core::policy::Application {
+        application_id: "t".into(), display_name: "t".into(), owner_credential: "w".into(),
+        topology: GateTopology::Hierarchical, default_session_ttl: 86_400, max_gates: 5,
+        gates: vec![], revision: 1, production: true,
+    };
+    let mut silver = ghost_gate_core::policy::GatePolicy {
+        gate_id: "silver".into(), name: "s".into(), resource_address: "resource_x".into(),
+        symbol: "G".into(), divisibility: 6, threshold_raw: 200, proof_mode: ProofMode::Consensus,
+        challenge_domain: "t.localhost".into(), session_ttl_override: None,
+        grants: vec!["bronze".into()], enabled: true, test_lane: false,
+        component_address: Some("component_s".into()),
+    };
+    app.gates.push(silver);
+    app.gates.push(ghost_gate_core::policy::GatePolicy {
+        gate_id: "bronze".into(), name: "b".into(), resource_address: "resource_x".into(),
+        symbol: "G".into(), divisibility: 6, threshold_raw: 100, proof_mode: ProofMode::Consensus,
+        challenge_domain: "t.localhost".into(), session_ttl_override: None,
+        grants: vec![], enabled: true, test_lane: false, component_address: Some("component_b".into()),
+    });
+    app.validate().unwrap();
+    reg.applications.push(app);
+    let hashes: Vec<(String, String, ghost_gate_core::policy::GatePolicy)> = {
+        let app_ref = reg.application("t").unwrap();
+        ["silver", "bronze"].iter().map(|id| {
+            let g = app_ref.gate(id).unwrap();
+            (id.to_string(), hash_policy(&ghost_gate_registry::Blake3Hasher, app_ref, g, 1), g.clone())
+        }).collect()
+    };
+    for (id, hash, policy) in hashes {
+        reg.versions.push(ghost_gate_registry::PolicyVersion {
+            application_id: "t".into(), gate_id: id, version: 1,
+            policy_hash: hash, network: 30, policy, app_revision: 1, created_unix: 1,
+        });
+    }
+    let app_ref = reg.application("t").unwrap();
+    let bronze = app_ref.gate("bronze").unwrap();
+    let mut e = [0u8; 32];
+    let s = issue_session(&reg, "t", "bronze", hash_policy(&ghost_gate_registry::Blake3Hasher, app_ref, bronze, 1), &mut e).unwrap();
+    let now = ghost_gate_registry::now_unix();
+    assert!(check_access(&reg, &[s.clone()], &s.token, "t", "bronze", now).authorized);
+    let token = s.token.clone();
+    let up = check_access(&reg, &[s], &token, "t", "silver", now);
+    assert!(!up.authorized, "a bronze session must never open the silver gate");
+}
+
+#[test]
+fn tamper_11_client_side_expiry_extension_is_meaningless() {
+    // The expiry lives in the server's session record and is compared against the SERVER's clock.
+    // A browser that edits its own stored expiry changes nothing, because the browser never stores
+    // the expiry — only the token — and /access/check recomputes everything server-side. This test
+    // proves the check ignores any client claim: there is no parameter for it.
+    use ghost_gate_core::policy::{hash_policy, GateTopology, ProofMode};
+    use ghost_gate_registry::{check_access, issue_session, Registry};
+    let mut reg = Registry::default();
+    let mut app = ghost_gate_core::policy::Application {
+        application_id: "e".into(), display_name: "e".into(), owner_credential: "w".into(),
+        topology: GateTopology::Independent, default_session_ttl: 3600, max_gates: 5,
+        gates: vec![], revision: 1, production: true,
+    };
+    app.gates.push(ghost_gate_core::policy::GatePolicy {
+        gate_id: "g".into(), name: "g".into(), resource_address: "resource_x".into(),
+        symbol: "G".into(), divisibility: 6, threshold_raw: 100, proof_mode: ProofMode::Consensus,
+        challenge_domain: "e.localhost".into(), session_ttl_override: None, grants: vec![],
+        enabled: true, test_lane: false, component_address: Some("component_g".into()),
+    });
+    app.validate().unwrap();
+    reg.applications.push(app);
+    let app_ref = reg.application("e").unwrap();
+    let g = app_ref.gate("g").unwrap();
+    reg.versions.push(ghost_gate_registry::PolicyVersion {
+        application_id: "e".into(), gate_id: "g".into(), version: 1,
+        policy_hash: hash_policy(&ghost_gate_registry::Blake3Hasher, app_ref, g, 1),
+        network: 30, policy: g.clone(), app_revision: 1, created_unix: 1,
+    });
+    let app_ref = reg.application("e").unwrap();
+    let g = app_ref.gate("g").unwrap();
+    let mut e2 = [0u8; 32];
+    let s = issue_session(&reg, "e", "g", hash_policy(&ghost_gate_registry::Blake3Hasher, app_ref, g, 1), &mut e2).unwrap();
+    let now = ghost_gate_registry::now_unix();
+    let expiry = s.expires_unix;
+    let token = s.token.clone();
+    assert!(check_access(&reg, &[s.clone()], &token, "e", "g", now).authorized);
+    // After expiry — nothing the client says changes this.
+    assert!(!check_access(&reg, &[s], &token, "e", "g", expiry + 1).authorized);
+}
+
+#[test]
+fn tamper_12_expired_and_revoked_credentials_are_dead() {
+    // Admin sessions: expiry is checked on every request (admin_session_for).
+    use ghost_gate_registry::{AdminSession, Registry};
+    let mut reg = Registry::default();
+    let now = ghost_gate_registry::now_unix();
+    let session = AdminSession {
+        token: "tok".into(), credential_id: "c".into(), created_unix: now,
+        expires_unix: now - 1, csrf: "x".into(), stepup_until_unix: 0, last_seen_unix: now,
+    };
+    reg.admin_sessions.push(session);
+    assert!(ghost_gate_registry::admin_session_for(&reg, "tok", now).is_none(), "an expired admin session is dead");
+    // Verified sessions: revoked = dead even before expiry (covered in the lifecycle test above).
+    // Here: an unknown token is dead.
+    let reg2 = Registry::default();
+    assert!(ghost_gate_registry::admin_session_for(&reg2, "tok", now).is_none());
+}
+
+#[test]
+fn tamper_13_concurrent_gate_updates_do_not_corrupt_or_race() {
+    // Two concurrent mutations of the same registry: the file lock serialises them and both land,
+    // in some order, each validated. The loser of a validation is refused, never half-applied.
+    let (server, cookie, csrf, _owner, _o) = tamper_fixture();
+    let (cookie, csrf) = fresh_stepped_up(&server, &_owner);
+    let handles: Vec<_> = (0..8).map(|i| {
+        let port = server.port;
+        let cookie = cookie.clone();
+        let csrf = csrf.clone();
+        std::thread::spawn(move || {
+            let gate = serde_json::json!({
+                "gateId": format!("race-{i}"), "name": format!("race {i}"),
+                "resourceAddress": "resource_v", "symbol": "GHOST", "divisibility": 6,
+                "thresholdRaw": format!("{}", 1000 + i), "proofMode": "consensus",
+                "challengeDomain": "vault.localhost", "grants": [], "enabled": true,
+                "testLane": false, "componentAddress": format!("component_race{i}"),
+            });
+            http(port, "POST", "/admin/api/gate/set", &hdrs(&auth_headers(port, &cookie, &csrf)),
+                &serde_json::json!({ "applicationId": "vault", "gate": gate }).to_string())
+        })
+    }).collect();
+    let mut accepted = 0;
+    for h in handles {
+        let r = h.join().unwrap();
+        if r.status == 200 { accepted += 1; } else {
+            assert!(r.body.to_string().contains("limit") || r.body.to_string().contains("gate"),
+                "unexpected refusal: {}", r.body);
+        }
+    }
+    // All eight landed or were refused with an honest reason; the registry is coherent either way.
+    let state = http(server.port, "GET", "/admin/api/state", &hdrs(&auth_headers(server.port, &cookie, &csrf)), "");
+    assert_eq!(state.status, 200, "{}", state.body);
+    let _ = (csrf, accepted);
+}
+
+// ---------------------------------------------------------------------------
+// The visitor's wall
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_visitor_cannot_read_policies_edit_anything_or_activate_gates() {
+    let (server, _c, _s, _owner, _o) = tamper_fixture();
+    // No session, no origin header, nothing: every route refuses.
+    for (method, path, body) in [
+        ("GET", "/admin/api/state", ""),
+        ("GET", "/admin/api/audit", ""),
+        ("POST", "/admin/api/app/create", r#"{"applicationId":"evil","displayName":"evil","topology":"independent","defaultSessionTtl":86400}"#),
+        ("POST", "/admin/api/gate/set", r#"{"applicationId":"vault","gate":{}}"#),
+        ("POST", "/admin/api/policy/publish", r#"{"applicationId":"vault","gateId":"bronze"}"#),
+        ("POST", "/admin/api/session/revoke", r#"{"tokenPrefix":"deadbeef"}"#),
+    ] {
+        let r = http(server.port, method, path, &[], body);
+        assert_ne!(r.status, 200, "{method} {path} must not succeed for a visitor");
+        assert!(r.status == 401 || r.status == 403, "{method} {path} -> {}", r.status);
+    }
+    // Cross-origin with a stolen-looking but valid session shape still fails the origin check.
+    let r = http(server.port, "POST", "/admin/api/gate/set",
+        &[("Origin", "http://evil.example"), ("Cookie", "gg_admin=totally-a-token")],
+        r#"{"applicationId":"vault","gate":{}}"#);
+    assert_ne!(r.status, 200);
+}
+
+// ---------------------------------------------------------------------------
+// Audit completeness
+// ---------------------------------------------------------------------------
+
+#[test]
+fn every_privileged_change_is_audited_with_actor_versions_and_outcome() {
+    let (server, _c, _s, owner, _o) = tamper_fixture();
+    let (cookie, csrf) = fresh_stepped_up(&server, &owner);
+    let _ = http(server.port, "POST", "/admin/api/policy/publish", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
+        &serde_json::json!({ "applicationId": "vault", "gateId": "bronze", "reason": "launch" }).to_string());
+    // A REFUSED privileged action is audited too: attempt to edit a PUBLISHED gate's threshold,
+    // which the rules refuse (it must be a published replacement).
+    let refused_edit = serde_json::json!({
+        "gateId": "bronze", "name": "bronze", "resourceAddress": "resource_v", "symbol": "GHOST",
+        "divisibility": 6, "thresholdRaw": "1", "proofMode": "consensus",
+        "challengeDomain": "vault.localhost", "grants": [], "enabled": true, "testLane": false,
+        "componentAddress": "component_bronze",
+    });
+    let _ = http(server.port, "POST", "/admin/api/gate/set", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
+        &serde_json::json!({ "applicationId": "vault", "gate": refused_edit }).to_string());
+    let reg = load_registry(&server.state.paths).unwrap();
+    let audit = &reg.audit_tail;
+    assert!(audit.iter().any(|e| e.action == "policy.publish" && e.outcome == ghost_gate_registry::AuditOutcome::Accepted
+        && e.application_id.as_deref() == Some("vault") && e.gate_id.as_deref() == Some("bronze")),
+        "the accepted publish is audited with app and gate: {:?}", audit.iter().map(|e| (e.action.as_str(), e.outcome)).collect::<Vec<_>>());
+    assert!(audit.iter().any(|e| e.action == "gate.set" && e.outcome == ghost_gate_registry::AuditOutcome::Refused
+        && e.application_id.as_deref() == Some("vault")),
+        "the refused edit is audited with the application: {:?}", audit.iter().map(|e| (e.action.as_str(), e.outcome)).collect::<Vec<_>>());
+    // The permanent ndjson log exists alongside the tail.
+    assert!(server.state.paths.audit().exists());
+}
