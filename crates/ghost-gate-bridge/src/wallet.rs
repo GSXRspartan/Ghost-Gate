@@ -157,6 +157,8 @@ pub enum WalletError {
     WalletSelectionUnsupported(&'static str),
     #[error("GG: no unspent output of {resource} holds at least {required}")]
     NoQualifyingOutput { resource: String, required: u64 },
+    #[error("GG: the wallet could not construct a qualifying proof transaction")]
+    CannotConstructProof,
     #[error("GG: the wallet is on network {found} but this gate is on {expected}")]
     WrongNetwork { expected: u8, found: u8 },
     #[error("GG: timed out waiting for the network: {0}")]

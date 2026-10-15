@@ -5,6 +5,7 @@ members = [
     "crates/ghost-gate-verifier",
     "crates/ghost-gate-wallet",
     "crates/ghost-gate-bridge",
+    "crates/ghost-gate-minotari",
     "crates/ghost-gate-tests",
     "crates/ghost-gate-walletd",
     "crates/ghost-gate-telegram",

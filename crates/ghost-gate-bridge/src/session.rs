@@ -15,8 +15,10 @@
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use ghost_gate_core::xtm::XtmChallenge;
 use ghost_gate_core::Challenge;
 use serde::{Deserialize, Serialize};
+use tari_template_lib_types::Hash32;
 
 /// A random 32-byte nonce from the OS RNG.
 pub fn random_nonce() -> [u8; 32] {
@@ -28,10 +30,86 @@ pub fn random_nonce() -> [u8; 32] {
 /// How long a prover has to answer a challenge the bridge minted.
 pub const DEFAULT_CHALLENGE_TTL: Duration = Duration::from_secs(180);
 
+/// Either proof machinery's challenge.
+///
+/// The two cannot be confused: each variant carries its own fields and its own verification path,
+/// and every consumer matches on the variant it can handle. This is the type-level half of the
+/// cross-network guarantee — an Ootle proof answers an `Ootle` challenge or nothing, and an XTM
+/// proof answers a `MinotariXtm` challenge or nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnyChallenge {
+    Ootle(Challenge),
+    MinotariXtm(XtmChallenge),
+}
+
+impl AnyChallenge {
+    /// The single-use nonce, whichever machinery the challenge belongs to.
+    pub fn nonce(&self) -> Hash32 {
+        match self {
+            Self::Ootle(c) => c.nonce,
+            Self::MinotariXtm(c) => c.nonce,
+        }
+    }
+
+    pub fn network(&self) -> u8 {
+        match self {
+            Self::Ootle(c) => c.network,
+            Self::MinotariXtm(c) => c.network,
+        }
+    }
+
+    pub fn threshold(&self) -> u64 {
+        match self {
+            Self::Ootle(c) => c.threshold,
+            Self::MinotariXtm(c) => c.threshold_micro,
+        }
+    }
+
+    pub fn session_commitment(&self) -> &[u8] {
+        match self {
+            Self::Ootle(c) => c.session_commitment.as_slice(),
+            Self::MinotariXtm(c) => c.session_commitment.as_slice(),
+        }
+    }
+
+    pub fn relying_site(&self) -> &[u8] {
+        match self {
+            Self::Ootle(c) => c.relying_site.as_slice(),
+            Self::MinotariXtm(c) => c.relying_site.as_slice(),
+        }
+    }
+
+    /// The Ootle challenge, if this is one.
+    pub fn ootle(&self) -> Option<&Challenge> {
+        match self {
+            Self::Ootle(c) => Some(c),
+            Self::MinotariXtm(_) => None,
+        }
+    }
+
+    /// The Ootle gate component, if this is an Ootle challenge.
+    pub fn ootle_gate(&self) -> Option<tari_template_lib_types::ComponentAddress> {
+        self.ootle().map(|c| c.gate)
+    }
+
+    /// The Ootle resource, if this is an Ootle challenge.
+    pub fn ootle_resource(&self) -> Option<tari_template_lib_types::ResourceAddress> {
+        self.ootle().map(|c| c.resource)
+    }
+
+    /// The L1 XTM challenge, if this is one.
+    pub fn minotari_xtm(&self) -> Option<&XtmChallenge> {
+        match self {
+            Self::Ootle(_) => None,
+            Self::MinotariXtm(c) => Some(c),
+        }
+    }
+}
+
 /// A challenge the bridge issued and has not yet consumed.
 #[derive(Debug, Clone)]
 pub struct IssuedChallenge {
-    pub challenge: Challenge,
+    pub challenge: AnyChallenge,
     /// When this bridge stops considering it answerable. Not the gate's rule; see the module docs.
     pub expires_at: SystemTime,
     /// The browser origin the challenge was minted for, as this bridge observed it.
@@ -89,11 +167,11 @@ impl ChallengeBook {
     /// session somebody already holds.
     pub fn insert(
         &mut self,
-        challenge: Challenge,
+        challenge: AnyChallenge,
         ttl: Duration,
         issued_to_origin: Option<String>,
     ) -> Result<(), BookError> {
-        let nonce = challenge.nonce.into_array();
+        let nonce = challenge.nonce().into_array();
         if self.entries.contains_key(&nonce) {
             return Err(BookError::Consumed);
         }
@@ -157,7 +235,7 @@ impl ChallengeBook {
     /// session; burning the nonce on failure would turn every mistake into a support ticket.
     pub fn check_live(&self, nonce: &[u8; 32], session_commitment: &[u8]) -> Result<(), BookError> {
         let entry = self.peek(nonce)?;
-        if entry.challenge.session_commitment.as_slice() != session_commitment {
+        if entry.challenge.session_commitment() != session_commitment {
             return Err(BookError::SessionMismatch);
         }
         Ok(())
@@ -248,9 +326,9 @@ pub enum ProofStatus {
 pub struct PublicProof {
     /// The gate that accepted it.
     pub gate_id: String,
-    /// The gate component's address, so a site can read the gate itself.
+    /// The gate component's address, so a site can read the gate itself. Empty on an L1 proof.
     pub gate_address: String,
-    /// The resource the threshold was denominated in, by address.
+    /// The resource the threshold was denominated in, by address. Empty on an L1 proof.
     pub resource_address: String,
     /// The raw threshold the gate required.
     pub required_minimum: u64,
@@ -262,7 +340,14 @@ pub struct PublicProof {
     pub challenge_nonce: String,
     /// The transaction the network committed.
     pub transaction_id: String,
+    /// Which proof machinery produced this. Present so a relying site can display it and a client
+    /// can tell an L1 proof from an Ootle one by type; nothing branches on it for access decisions
+    /// — the gate that accepted it already did that.
+    pub proof_kind: ProofKindName,
 }
+
+/// The proof machinery's name on the wire. A string alias, not a free-form string.
+pub type ProofKindName = crate::gate_registry::ProofKind;
 
 /// A proof the bridge is working on, and the only thing a caller may poll.
 #[derive(Debug, Clone)]
@@ -272,6 +357,10 @@ pub struct ProofJob {
     pub challenge_nonce: [u8; 32],
     pub status: ProofStatus,
     pub started_at: SystemTime,
+    /// The L1 artifact this job is proving with, when the gate is a native XTM gate. Not serialised:
+    /// it never leaves the process. The reconciliation reads the kernel signature and output hash
+    /// from here rather than from anywhere a caller could influence.
+    pub xtm_artifact: Option<crate::xtm::XtmProofArtifact>,
 }
 
 /// Seconds since the Unix epoch.
@@ -287,8 +376,8 @@ mod tests {
     use super::*;
     use tari_template_lib_types::{ComponentAddress, Hash32, MaxBytes, ObjectKey, ResourceAddress};
 
-    fn challenge(nonce: u8) -> Challenge {
-        Challenge {
+    pub fn challenge(nonce: u8) -> AnyChallenge {
+        AnyChallenge::Ootle(Challenge {
             gate: ComponentAddress::new(ObjectKey::from_array([1u8; 32])),
             resource: ResourceAddress::new(ObjectKey::from_array([7u8; 32])),
             threshold: 10_000,
@@ -297,7 +386,7 @@ mod tests {
             expires_epoch: 1_000,
             relying_site: MaxBytes::new_checked(b"vip.example".to_vec()).unwrap(),
             session_commitment: MaxBytes::new_checked(b"session-1".to_vec()).unwrap(),
-        }
+        })
     }
 
     const TTL: Duration = Duration::from_secs(60);
@@ -379,11 +468,12 @@ mod tests {
             input_count: 1,
             challenge_nonce: "ab..".into(),
             transaction_id: "cd..".into(),
+            proof_kind: crate::gate_registry::ProofKind::Ootle,
         };
         let json = serde_json::to_string(&proof).unwrap();
         assert_eq!(
             json,
-            r#"{"gate_id":"g1","gate_address":"component_..","resource_address":"resource_..","required_minimum":10000,"attested_minimum":10000,"input_count":1,"challenge_nonce":"ab..","transaction_id":"cd.."}"#,
+            r#"{"gate_id":"g1","gate_address":"component_..","resource_address":"resource_..","required_minimum":10000,"attested_minimum":10000,"input_count":1,"challenge_nonce":"ab..","transaction_id":"cd..","proof_kind":"ootle"}"#,
             "the serialised public result must be exactly these fields"
         );
     }

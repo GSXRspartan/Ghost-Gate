@@ -20,25 +20,77 @@
 //! on every proof request, so a challenge minted elsewhere -- or edited in transit -- does not become a
 //! proof here.
 
-use ghost_gate_core::{Challenge, network};
-use tari_template_lib_types::{ComponentAddress, Hash32, MaxBytes, ResourceAddress};
+use ghost_gate_core::xtm::XtmChallenge;
+use ghost_gate_core::network;
+use tari_template_lib_types::{ComponentAddress, Hash32 as TemplateHash32, MaxBytes, ResourceAddress};
 
-use crate::session::{ChallengeBook, IssuedChallenge};
+use crate::session::{AnyChallenge, ChallengeBook, IssuedChallenge};
+
+/// Which proof machinery a gate requires.
+///
+/// A deliberate type, not a string comparison. The bridge dispatches on it, the challenge records
+/// it, and a proof produced by one machinery can never answer a gate of the other: the challenge
+/// types differ, the verification differs, and everything downstream of this enum is typed to
+/// match. This is the property `docs/THREAT_MODEL.md` §3 leans on: cross-network substitution is
+/// refused by construction, not by convention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProofKind {
+    /// The Ootle stealth-fungible path: a consensus-committed statement at a gate component.
+    Ootle,
+    /// The native Minotari L1 path: a pay-to-self transaction with a consensus-enforced minimum
+    /// value promise, verified against base-node data.
+    MinotariXtm,
+}
+
+/// The typed condition a gate watches.
+///
+/// The Ootle condition names the on-chain gate component and the resource the threshold is
+/// denominated in; the L1 condition is a native-XTM threshold only — XTM has no resource address
+/// and no component, and inventing one would invite exactly the substitution the type exists to
+/// prevent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GateCondition {
+    Ootle {
+        /// The gate component's address on chain.
+        component: ComponentAddress,
+        /// The resource the threshold is denominated in. Authority.
+        resource: ResourceAddress,
+        /// The raw threshold, in the resource's smallest unit.
+        threshold: u64,
+    },
+    MinotariXtm {
+        /// The threshold in micro-Minotari (base units; 1 XTM = 1,000,000 micro).
+        threshold_micro: u64,
+    },
+}
+
+impl GateCondition {
+    pub fn threshold(&self) -> u64 {
+        match self {
+            Self::Ootle { threshold, .. } => *threshold,
+            Self::MinotariXtm { threshold_micro } => *threshold_micro,
+        }
+    }
+
+    pub fn kind(&self) -> ProofKind {
+        match self {
+            Self::Ootle { .. } => ProofKind::Ootle,
+            Self::MinotariXtm { .. } => ProofKind::MinotariXtm,
+        }
+    }
+}
 
 /// Everything a registered gate is, as the bridge understands it.
 ///
-/// The resource address is the asset's identity. `symbol` is display only and is never compared, never
-/// matched, and never returned as authority: it is carried so a UI can render something a person can
-/// read, and a caller cannot change it.
+/// The condition's addresses are the asset's identity. `symbol` is display only and is never
+/// compared, never matched, and never returned as authority: it is carried so a UI can render
+/// something a person can read, and a caller cannot change it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GateBinding {
-    /// The gate component's address on chain.
-    pub address: ComponentAddress,
-    /// The resource the threshold is denominated in. Authority.
-    pub resource: ResourceAddress,
-    /// The raw threshold, in the resource's smallest unit.
-    pub threshold: u64,
-    /// The Ootle cohort byte the gate is bound to.
+    /// What the gate requires, typed by proof machinery.
+    pub condition: GateCondition,
+    /// The network byte the gate is bound to. The same table serves both networks.
     pub network: u8,
     /// Opaque relying-site identity the gate compares. Opaque here too.
     pub relying_site: MaxBytes<64>,
@@ -46,6 +98,63 @@ pub struct GateBinding {
     pub divisibility: u8,
     /// Display name for a UI. Never authority.
     pub symbol: String,
+}
+
+impl GateBinding {
+    /// An Ootle gate, the original shape.
+    pub fn ootle(
+        address: ComponentAddress,
+        resource: ResourceAddress,
+        threshold: u64,
+        network: u8,
+        relying_site: MaxBytes<64>,
+        divisibility: u8,
+        symbol: String,
+    ) -> Self {
+        Self {
+            condition: GateCondition::Ootle { component: address, resource, threshold },
+            network,
+            relying_site,
+            divisibility,
+            symbol,
+        }
+    }
+
+    /// A native Minotari L1 XTM gate.
+    pub fn minotari_xtm(threshold_micro: u64, network: u8, relying_site: MaxBytes<64>, symbol: String) -> Self {
+        Self {
+            condition: GateCondition::MinotariXtm { threshold_micro },
+            network,
+            // An L1 amount has six decimal places, always: 1 XTM = 10^6 micro. Display only.
+            divisibility: ghost_gate_core::xtm::MICRO_PER_XTM.ilog10() as u8,
+            symbol,
+            relying_site,
+        }
+    }
+
+    pub fn threshold(&self) -> u64 {
+        self.condition.threshold()
+    }
+
+    pub fn kind(&self) -> ProofKind {
+        self.condition.kind()
+    }
+
+    /// The gate component's address, for the Ootle kinds. `None` on L1, which has no component.
+    pub fn component(&self) -> Option<&ComponentAddress> {
+        match &self.condition {
+            GateCondition::Ootle { component, .. } => Some(component),
+            GateCondition::MinotariXtm { .. } => None,
+        }
+    }
+
+    /// The resource the threshold is denominated in, for the Ootle kinds.
+    pub fn resource(&self) -> Option<&ResourceAddress> {
+        match &self.condition {
+            GateCondition::Ootle { resource, .. } => Some(resource),
+            GateCondition::MinotariXtm { .. } => None,
+        }
+    }
 }
 
 /// Why a gate could not be registered.
@@ -85,7 +194,7 @@ impl GateRegistry {
         if self.gates.contains_key(&id) {
             return Err(GateRegistrationError::DuplicateGate(id));
         }
-        if binding.threshold == 0 {
+        if binding.threshold() == 0 {
             return Err(GateRegistrationError::ZeroThreshold);
         }
         if !network::is_known(binding.network) {
@@ -119,12 +228,13 @@ impl GateRegistry {
     pub fn public_metadata(&self, id: &str) -> Option<PublicGate> {
         self.gates.get(id).map(|g| PublicGate {
             gate_id: id.to_string(),
-            gate_address: g.address.to_string(),
-            resource_address: g.resource.to_string(),
-            threshold: g.threshold,
+            gate_address: g.component().map(|a| a.to_string()).unwrap_or_default(),
+            resource_address: g.resource().map(|a| a.to_string()).unwrap_or_default(),
+            threshold: g.threshold(),
             network: g.network,
             divisibility: g.divisibility,
             symbol: g.symbol.clone(),
+            proof_kind: g.kind(),
         })
     }
 
@@ -137,6 +247,10 @@ impl GateRegistry {
     /// other `Err` cases (unknown gate, bad session encoding) are operator problems and reach it
     /// as a 500. Collapsing them into one `Option` would have turned the DoS cap into a generic
     /// "internal error", which is how a real limit hides.
+    ///
+    /// For an L1 XTM gate the challenge also records `tip_height_at_issue`, read from the chain
+    /// reader the caller passes; `None` for that reader is a refusal — an L1 challenge minted
+    /// without chain access could not be checked for freshness, so it is not minted at all.
     pub fn issue_challenge(
         &self,
         id: &str,
@@ -145,26 +259,51 @@ impl GateRegistry {
         expires_in: std::time::Duration,
         issued_to_origin: Option<String>,
         expires_epoch: u64,
+        xtm_tip_height: Option<u64>,
     ) -> Result<IssuedChallenge, crate::session::BookError> {
         let gate = self.gates.get(id).ok_or(crate::session::BookError::Unknown)?;
-        let challenge = Challenge {
-            gate: gate.address,
-            resource: gate.resource,
-            threshold: gate.threshold,
-            network: gate.network,
-            nonce: Hash32::from_array(crate::session::random_nonce()),
-            // The epoch bound is defence in depth; the wall-clock TTL above is the operative
-            // liveness limit and the nonce burn is the single-use guarantee. The second-pass audit
-            // caught the hard-coded 0: on any chain at epoch > 0 the gate would refuse every
-            // bridge-minted challenge, which is fail-closed but functionally dead.
-            expires_epoch,
-            relying_site: gate.relying_site.clone(),
-            session_commitment: max_bytes(session_commitment).ok_or(crate::session::BookError::Unknown)?,
+        let session = max_bytes(session_commitment).ok_or(crate::session::BookError::Unknown)?;
+        let now = std::time::SystemTime::now();
+        let challenge = match &gate.condition {
+            crate::gate_registry::GateCondition::Ootle { component, resource, threshold } => {
+                AnyChallenge::Ootle(ghost_gate_core::Challenge {
+                    gate: *component,
+                    resource: *resource,
+                    threshold: *threshold,
+                    network: gate.network,
+                    nonce: TemplateHash32::from_array(crate::session::random_nonce()),
+                    // The epoch bound is defence in depth; the wall-clock TTL above is the operative
+                    // liveness limit and the nonce burn is the single-use guarantee. The second-pass audit
+                    // caught the hard-coded 0: on any chain at epoch > 0 the gate would refuse every
+                    // bridge-minted challenge, which is fail-closed but functionally dead.
+                    expires_epoch,
+                    relying_site: gate.relying_site.clone(),
+                    session_commitment: session.clone(),
+                })
+            },
+            crate::gate_registry::GateCondition::MinotariXtm { threshold_micro } => {
+                let tip_height = xtm_tip_height.ok_or(crate::session::BookError::Unknown)?;
+                let issued_at = now
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or_default();
+                AnyChallenge::MinotariXtm(XtmChallenge {
+                    gate_id: max_bytes(id.as_bytes()).ok_or(crate::session::BookError::Unknown)?,
+                    threshold_micro: *threshold_micro,
+                    network: gate.network,
+                    nonce: TemplateHash32::from_array(crate::session::random_nonce()),
+                    issued_at_unix: issued_at,
+                    expires_at_unix: issued_at + expires_in.as_secs(),
+                    relying_site: gate.relying_site.clone(),
+                    session_commitment: session.clone(),
+                    tip_height_at_issue: tip_height,
+                })
+            },
         };
         book.insert(challenge.clone(), expires_in, issued_to_origin.clone())?;
         Ok(IssuedChallenge {
             challenge,
-            expires_at: std::time::SystemTime::now() + expires_in,
+            expires_at: now + expires_in,
             issued_to_origin,
         })
     }
@@ -174,12 +313,17 @@ impl GateRegistry {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PublicGate {
     pub gate_id: String,
+    /// The gate component's address, empty on an L1 gate (which has no component).
     pub gate_address: String,
+    /// The resource address, empty on an L1 gate (native XTM has no resource address).
     pub resource_address: String,
     pub threshold: u64,
     pub network: u8,
     pub divisibility: u8,
     pub symbol: String,
+    /// Which proof machinery this gate requires. Typed, and the browser renders it; it decides
+    /// nothing.
+    pub proof_kind: ProofKind,
 }
 
 /// Copies a session commitment into the bounded form the challenge carries.
@@ -199,15 +343,25 @@ mod tests {
     const NETWORK: u8 = network::LOCALNET;
 
     fn binding() -> GateBinding {
-        GateBinding {
-            address: ComponentAddress::new(ObjectKey::from_array([1u8; 32])),
-            resource: ResourceAddress::new(ObjectKey::from_array([7u8; 32])),
-            threshold: 1_000_000,
-            network: NETWORK,
-            relying_site: MaxBytes::new_checked(b"vip.example".to_vec()).unwrap(),
-            divisibility: 2,
-            symbol: "GHOSTTEST".to_string(),
-        }
+        GateBinding::ootle(
+            ComponentAddress::new(ObjectKey::from_array([1u8; 32])),
+            ResourceAddress::new(ObjectKey::from_array([7u8; 32])),
+            1_000_000,
+            NETWORK,
+            MaxBytes::new_checked(b"vip.example".to_vec()).unwrap(),
+            2,
+            "GHOSTTEST".to_string(),
+        )
+    }
+
+    /// The million-XTM gate, as the final gate is configured: native L1, threshold in base units.
+    fn xtm_binding() -> GateBinding {
+        GateBinding::minotari_xtm(
+            ghost_gate_core::xtm::MICRO_PER_XTM * 1_000_000,
+            NETWORK,
+            MaxBytes::new_checked(b"vip.example".to_vec()).unwrap(),
+            "XTM".to_string(),
+        )
     }
 
     fn registry() -> GateRegistry {
@@ -223,7 +377,7 @@ mod tests {
         assert_eq!(meta.threshold, 1_000_000);
         assert_eq!(meta.divisibility, 2);
         assert_eq!(meta.symbol, "GHOSTTEST");
-        assert_eq!(meta.resource_address, binding().resource.to_string());
+        assert_eq!(meta.resource_address, binding().resource().copied().unwrap().to_string());
         assert_eq!(r.ids().collect::<Vec<_>>(), vec!["g1"]);
     }
 
@@ -246,10 +400,26 @@ mod tests {
     #[test]
     fn a_zero_threshold_gate_is_refused() {
         let mut r = GateRegistry::new();
-        let mut b = binding();
-        b.threshold = 0;
+        let b = GateBinding::ootle(
+            *binding().component().unwrap(),
+            *binding().resource().unwrap(),
+            0,
+            NETWORK,
+            MaxBytes::new_checked(b"vip.example".to_vec()).unwrap(),
+            2,
+            "GHOSTTEST".to_string(),
+        );
         assert_eq!(
             r.register("bad", b),
+            Err(GateRegistrationError::ZeroThreshold)
+        );
+    }
+
+    #[test]
+    fn a_zero_threshold_xtm_gate_is_refused() {
+        let mut r = GateRegistry::new();
+        assert_eq!(
+            r.register("bad", GateBinding::minotari_xtm(0, NETWORK, MaxBytes::new_checked(b"vip.example".to_vec()).unwrap(), "XTM".into())),
             Err(GateRegistrationError::ZeroThreshold)
         );
     }
@@ -266,23 +436,42 @@ mod tests {
     }
 
     #[test]
+    fn an_xtm_gate_records_its_typed_condition() {
+        let mut r = GateRegistry::new();
+        r.register("otherside", xtm_binding()).unwrap();
+        let meta = r.public_metadata("otherside").unwrap();
+        assert_eq!(meta.proof_kind, ProofKind::MinotariXtm);
+        assert_eq!(meta.threshold, ghost_gate_core::xtm::MICRO_PER_XTM * 1_000_000);
+        assert_eq!(meta.symbol, "XTM");
+        assert_eq!(meta.divisibility, 6);
+        assert!(meta.gate_address.is_empty(), "an L1 gate has no component");
+        assert!(meta.resource_address.is_empty(), "native XTM has no resource address");
+    }
+
+    #[test]
+    fn an_ootle_gate_records_its_typed_condition() {
+        let r = registry();
+        assert_eq!(r.public_metadata("g1").unwrap().proof_kind, ProofKind::Ootle);
+    }
+
+    #[test]
     fn two_fresh_challenges_differ() {
         let r = registry();
         let mut book = ChallengeBook::new();
         let a = r
-            .issue_challenge("g1", &mut book, b"s", std::time::Duration::from_secs(60), None, 1_000)
+            .issue_challenge("g1", &mut book, b"s", std::time::Duration::from_secs(60), None, 1_000, None)
             .unwrap();
         let b = r
-            .issue_challenge("g1", &mut book, b"s", std::time::Duration::from_secs(60), None, 1_000)
+            .issue_challenge("g1", &mut book, b"s", std::time::Duration::from_secs(60), None, 1_000, None)
             .unwrap();
         assert_ne!(
-            a.challenge.nonce, b.challenge.nonce,
+            a.challenge.nonce(), b.challenge.nonce(),
             "each challenge needs its own nonce"
         );
-        assert_eq!(a.challenge.gate, binding().address);
-        assert_eq!(a.challenge.resource, binding().resource);
-        assert_eq!(a.challenge.threshold, binding().threshold);
-        assert_eq!(a.challenge.network, binding().network);
+        assert_eq!(a.challenge.ootle_gate(), Some(*binding().component().unwrap()));
+        assert_eq!(a.challenge.ootle_resource(), Some(*binding().resource().unwrap()));
+        assert_eq!(a.challenge.threshold(), binding().threshold());
+        assert_eq!(a.challenge.network(), binding().network);
     }
 
     #[test]
@@ -291,11 +480,46 @@ mod tests {
         let mut book = ChallengeBook::new();
         assert!(
             matches!(
-                r.issue_challenge("nope", &mut book, b"s", std::time::Duration::from_secs(60), None, 1_000),
+                r.issue_challenge("nope", &mut book, b"s", std::time::Duration::from_secs(60), None, 1_000, None),
                 Err(crate::session::BookError::Unknown)
             ),
             "an unregistered gate is an operator error, distinct from a saturated book"
         );
         assert_eq!(book.live(), 0, "and nothing is left behind in the book");
+    }
+
+    #[test]
+    fn an_xtm_challenge_cannot_be_issued_without_a_chain_reader() {
+        // Fail closed: without a tip height there is no freshness check, so there is no challenge.
+        let r = registry();
+        let mut r2 = GateRegistry::new();
+        r2.register("otherside", xtm_binding()).unwrap();
+        let mut book = ChallengeBook::new();
+        assert!(
+            matches!(
+                r2.issue_challenge("otherside", &mut book, b"s", std::time::Duration::from_secs(60), None, 1_000, None),
+                Err(crate::session::BookError::Unknown)
+            ),
+            "an XTM challenge without chain access is refused, not minted unchecked"
+        );
+        assert_eq!(book.live(), 0);
+    }
+
+    #[test]
+    fn an_xtm_challenge_records_the_tip_it_was_issued_at() {
+        let mut r = GateRegistry::new();
+        r.register("otherside", xtm_binding()).unwrap();
+        let mut book = ChallengeBook::new();
+        let issued = r
+            .issue_challenge("otherside", &mut book, b"s", std::time::Duration::from_secs(60), None, 1_000, Some(77))
+            .unwrap();
+        match &issued.challenge {
+            AnyChallenge::MinotariXtm(x) => {
+                assert_eq!(x.tip_height_at_issue, 77);
+                assert_eq!(x.threshold_micro, ghost_gate_core::xtm::MICRO_PER_XTM * 1_000_000);
+                assert!(x.expires_at_unix > x.issued_at_unix);
+            },
+            other => panic!("expected an XTM challenge, got {other:?}"),
+        }
     }
 }

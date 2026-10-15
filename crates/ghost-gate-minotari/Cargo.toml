@@ -1,0 +1,52 @@
+[package]
+name = "ghost-gate-minotari"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Native Minotari L1 XTM threshold proving: the wallet daemon service, the bridge channel and the base-node verifier"
+
+[dependencies]
+ghost-gate-core = { path = "../ghost-gate-core" }
+ghost-gate-bridge = { path = "../ghost-gate-bridge" }
+
+# The Minotari 6.0.1-pre.2 stack, the same versions the Ootle v0.42.0 cohort pins, so both
+# proof paths agree on the crypto and the wire formats.
+minotari_wallet = "6.0.1-pre.2"
+minotari_node_grpc_client = "6.0.1-pre.2"
+tari_comms = "6.0.1-pre.2"
+tari_comms_dht = "6.0.1-pre.2"
+tari_p2p = "6.0.1-pre.2"
+tari_common = "6.0.1-pre.2"
+tari_common_sqlite = "6.0.1-pre.2"
+tari_common_types = "6.0.1-pre.2"
+tari_transaction_components = "6.0.1-pre.2"
+tari_transaction_key_manager = "6.0.1-pre.2"
+tari_crypto = "0.23.4"
+tari_utilities = "0.10"
+tari_script = "6.0.1-pre.2"
+tari_shutdown = "6.0.1-pre.2"
+
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+rand.workspace = true
+tokio.workspace = true
+sha2.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+# An in-process base node for the end-to-end tests. It compiles the whole node stack, which is
+# why it is a dev-dependency: the shipped library and binary never pull it in.
+minotari_node = "6.0.1-pre.2"
+tempfile = "3"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "ghost-gate-minotari-wallet"
+path = "src/bin/ghost-gate-minotari-wallet.rs"

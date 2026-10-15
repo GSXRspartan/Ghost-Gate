@@ -14,6 +14,10 @@ tari_ootle_wallet_crypto = { workspace = true }
 # The ownership-proof message and the Schnorr verification, both the same primitives the wallets
 # themselves use. The domain framing in credential.rs is byte-checked against the reference verifier.
 tari_crypto = { workspace = true }
+# The L1 spend-key signature construction. The same crate the Minotari wallet's key manager uses
+# for `sign_script_message`, so the bridge verifies byte-for-byte what was signed, and the same
+# tari_crypto version (0.23.4) as the whole 6.0.1-pre.2 stack.
+tari_script = "6.0.1-pre.2"
 blake2 = "0.10.6"
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -30,4 +34,6 @@ tokio = { workspace = true, features = ["macros", "rt", "net", "io-util"] }
 # server tests need a real, minimal statement for the fake wallet to return.
 tari_crypto = { workspace = true }
 blake2 = "0.10.6"
+# xtm.rs's tests are async.
+tokio = { workspace = true, features = ["macros", "rt", "net", "io-util", "time"] }
 

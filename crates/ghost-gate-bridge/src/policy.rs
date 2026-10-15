@@ -71,6 +71,8 @@ pub enum ProofRefusal {
     NetworkMismatch,
     #[error("GG: challenge names a different relying site than the gate's policy")]
     RelyingSiteMismatch,
+    #[error("GG: this challenge's proof machinery does not match the gate's")]
+    KindMismatch,
 }
 
 impl From<BookError> for ProofRefusal {
@@ -97,7 +99,7 @@ pub fn validate_prove_request(
     book: &ChallengeBook,
     request: &ProveRequest,
     caller_origin: Option<&str>,
-) -> Result<ghost_gate_core::Challenge, ProofRefusal> {
+) -> Result<crate::session::AnyChallenge, ProofRefusal> {
     let nonce = parse_nonce(&request.challenge_nonce)?;
     let session = parse_session(&request.session_commitment)?;
 
@@ -122,19 +124,33 @@ pub fn validate_prove_request(
 
     let issued = issued.challenge.clone();
 
-    if issued.gate != gate.address {
+    // The machinery must match before any field is compared: an Ootle challenge can never answer an
+    // XTM gate and vice versa, whatever its fields say.
+    match (&gate.condition, &issued) {
+        (
+            crate::gate_registry::GateCondition::Ootle { .. },
+            crate::session::AnyChallenge::Ootle(_),
+        )
+        | (
+            crate::gate_registry::GateCondition::MinotariXtm { .. },
+            crate::session::AnyChallenge::MinotariXtm(_),
+        ) => {},
+        _ => return Err(ProofRefusal::KindMismatch),
+    }
+
+    if issued.ootle_gate() != gate.component().copied() {
         return Err(ProofRefusal::GateMismatch);
     }
-    if issued.resource != gate.resource {
+    if issued.ootle_resource() != gate.resource().copied() {
         return Err(ProofRefusal::ResourceMismatch);
     }
-    if issued.threshold != gate.threshold {
+    if issued.threshold() != gate.threshold() {
         return Err(ProofRefusal::ThresholdMismatch);
     }
-    if issued.network != gate.network {
+    if issued.network() != gate.network {
         return Err(ProofRefusal::NetworkMismatch);
     }
-    if issued.relying_site.as_slice() != gate.relying_site.as_slice() {
+    if issued.relying_site() != gate.relying_site.as_slice() {
         return Err(ProofRefusal::RelyingSiteMismatch);
     }
 
@@ -167,28 +183,28 @@ mod tests {
     const NETWORK: u8 = ghost_gate_core::network::LOCALNET;
 
     fn binding() -> GateBinding {
-        GateBinding {
-            address: ComponentAddress::new(ObjectKey::from_array([1u8; 32])),
-            resource: ResourceAddress::new(ObjectKey::from_array([7u8; 32])),
-            threshold: 10_000,
-            network: NETWORK,
-            relying_site: MaxBytes::new_checked(b"vip.example".to_vec()).unwrap(),
-            divisibility: 6,
-            symbol: "GHOSTTEST".into(),
-        }
+        GateBinding::ootle(
+            ComponentAddress::new(ObjectKey::from_array([1u8; 32])),
+            ResourceAddress::new(ObjectKey::from_array([7u8; 32])),
+            10_000,
+            NETWORK,
+            MaxBytes::new_checked(b"vip.example".to_vec()).unwrap(),
+            6,
+            "GHOSTTEST".into(),
+        )
     }
 
-    fn challenge(nonce: u8) -> ghost_gate_core::Challenge {
-        ghost_gate_core::Challenge {
-            gate: binding().address,
-            resource: binding().resource,
-            threshold: binding().threshold,
+    fn challenge(nonce: u8) -> crate::session::AnyChallenge {
+        crate::session::AnyChallenge::Ootle(ghost_gate_core::Challenge {
+            gate: *binding().component().unwrap(),
+            resource: *binding().resource().unwrap(),
+            threshold: binding().threshold(),
             network: NETWORK,
             nonce: Hash32::from_array([nonce; 32]),
             expires_epoch: 1_000,
             relying_site: binding().relying_site.clone(),
             session_commitment: MaxBytes::new_checked(b"aa".to_vec()).unwrap(),
-        }
+        })
     }
 
     fn request(nonce: u8) -> ProveRequest {
@@ -209,7 +225,7 @@ mod tests {
     fn a_request_for_a_gate_the_bridge_serves_is_accepted() {
         let book = book(1);
         let issued = validate_prove_request(&binding(), &book, &request(1), None).expect("accepted");
-        assert_eq!(issued.nonce.into_array(), [1u8; 32]);
+        assert_eq!(issued.nonce().into_array(), [1u8; 32]);
     }
 
     #[test]
@@ -261,21 +277,33 @@ mod tests {
         // and one mismatch cannot mask the next.
         let base = binding();
         let mut gate = base.clone();
-        gate.address = ComponentAddress::new(ObjectKey::from_array([2u8; 32]));
+        gate.condition = crate::gate_registry::GateCondition::Ootle {
+            component: ComponentAddress::new(ObjectKey::from_array([2u8; 32])),
+            resource: *base.resource().unwrap(),
+            threshold: base.threshold(),
+        };
         assert_eq!(
             validate_prove_request(&gate, &book(1), &request(1), None).unwrap_err(),
             ProofRefusal::GateMismatch
         );
 
         let mut gate = base.clone();
-        gate.resource = ResourceAddress::new(ObjectKey::from_array([8u8; 32]));
+        gate.condition = crate::gate_registry::GateCondition::Ootle {
+            component: *base.component().unwrap(),
+            resource: ResourceAddress::new(ObjectKey::from_array([8u8; 32])),
+            threshold: base.threshold(),
+        };
         assert_eq!(
             validate_prove_request(&gate, &book(1), &request(1), None).unwrap_err(),
             ProofRefusal::ResourceMismatch
         );
 
         let mut gate = base.clone();
-        gate.threshold = 1;
+        gate.condition = crate::gate_registry::GateCondition::Ootle {
+            component: *base.component().unwrap(),
+            resource: *base.resource().unwrap(),
+            threshold: 1,
+        };
         assert_eq!(
             validate_prove_request(&gate, &book(1), &request(1), None).unwrap_err(),
             ProofRefusal::ThresholdMismatch
@@ -293,6 +321,47 @@ mod tests {
         assert_eq!(
             validate_prove_request(&gate, &book(1), &request(1), None).unwrap_err(),
             ProofRefusal::RelyingSiteMismatch
+        );
+    }
+
+    /// The cross-machinery substitution: an Ootle challenge presented to an XTM gate, and an XTM
+    /// challenge presented to an Ootle gate. Neither is a threshold comparison — it is a type error,
+    /// refused before any field is read.
+    #[test]
+    fn an_ootle_challenge_cannot_answer_an_xtm_gate() {
+        use crate::gate_registry::{GateBinding, GateCondition};
+        let xtm_gate = GateBinding::minotari_xtm(
+            10_000,
+            NETWORK,
+            MaxBytes::new_checked(b"vip.example".to_vec()).unwrap(),
+            "XTM".into(),
+        );
+        assert_eq!(
+            validate_prove_request(&xtm_gate, &book(1), &request(1), None).unwrap_err(),
+            ProofRefusal::KindMismatch
+        );
+
+        let mut xtm_book = ChallengeBook::new();
+        xtm_book
+            .insert(
+                crate::session::AnyChallenge::MinotariXtm(ghost_gate_core::xtm::XtmChallenge {
+                    gate_id: MaxBytes::new_checked(b"g1".to_vec()).unwrap(),
+                    threshold_micro: 10_000,
+                    network: NETWORK,
+                    nonce: Hash32::from_array([1u8; 32]),
+                    issued_at_unix: 0,
+                    expires_at_unix: u64::MAX,
+                    relying_site: MaxBytes::new_checked(b"vip.example".to_vec()).unwrap(),
+                    session_commitment: MaxBytes::new_checked(b"aa".to_vec()).unwrap(),
+                    tip_height_at_issue: 0,
+                }),
+                Duration::from_secs(60),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            validate_prove_request(&binding(), &xtm_book, &request(1), None).unwrap_err(),
+            ProofRefusal::KindMismatch
         );
     }
 
@@ -371,11 +440,11 @@ mod tests {
             issued_to_origin: None,
         };
         let gate = binding();
-        assert_eq!(issued.challenge.resource, gate.resource);
-        assert_eq!(issued.challenge.threshold, gate.threshold);
-        assert_eq!(issued.challenge.network, gate.network);
+        assert_eq!(issued.challenge.ootle_resource(), Some(*gate.resource().unwrap()));
+        assert_eq!(issued.challenge.threshold(), gate.threshold());
+        assert_eq!(issued.challenge.network(), gate.network);
         assert_eq!(
-            issued.challenge.relying_site.as_slice(),
+            issued.challenge.relying_site(),
             gate.relying_site.as_slice()
         );
     }

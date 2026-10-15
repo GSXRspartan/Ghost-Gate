@@ -52,9 +52,16 @@ pub const RECONCILE_WAIT: Duration = Duration::from_secs(3);
 pub const MAX_JOBS: usize = 1_000;
 
 /// Everything the server needs, assembled once at startup.
+///
+/// Four channels, one per chain and direction: `W` is the Ootle wallet daemon (consensus proofs),
+/// `R` the Ootle indexer (credential proofs), `X` the Minotari wallet daemon (native L1 proofs)
+/// and `XR` the Minotari base node (L1 evidence). The L1 pair defaults to `NoXtm`/`NoXtmChainReader`
+/// so a bridge built without them still serves its Ootle gates and *refuses* L1 work loudly.
 pub struct Bridge<
     W: WalletChannel,
     R: crate::credential::ChainReader = crate::credential::NoChainReader,
+    X: crate::xtm::XtmChannel = crate::xtm::NoXtm,
+    XR: crate::xtm::XtmChainReader = crate::xtm::NoXtmChainReader,
 > {
     pub gates: GateRegistry,
     pub challenges: ChallengeBook,
@@ -83,10 +90,25 @@ pub struct Bridge<
     /// before the route is read. Host matching is name-only and case-insensitive; the port is not
     /// part of the check, because the bind port is already fixed by the listener.
     pub permitted_hosts: std::collections::BTreeSet<String>,
+    /// The Minotari wallet daemon channel, for native L1 XTM proofs.
+    pub xtm: X,
+    /// The Minotari base node reader, for L1 evidence. `None` means no L1 verification is possible,
+    /// and L1 challenges are then refused at issue time.
+    pub xtm_chain: Option<XR>,
 }
 
-impl<W: WalletChannel> Bridge<W, crate::credential::NoChainReader> {
-    pub fn new(gates: GateRegistry, wallet: W, origins: OriginPolicy) -> Self {
+impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChannel, XR: crate::xtm::XtmChainReader>
+    Bridge<W, R, X, XR>
+{
+    /// Assembles a bridge over every channel at once. The narrower constructors below are sugar
+    /// for the common deployments; this is the one the L1-enabled bridge binary uses.
+    pub fn assemble(
+        gates: GateRegistry,
+        wallet: W,
+        origins: OriginPolicy,
+        xtm: X,
+        xtm_chain: Option<XR>,
+    ) -> Self {
         Self {
             gates,
             challenges: ChallengeBook::new(),
@@ -98,7 +120,15 @@ impl<W: WalletChannel> Bridge<W, crate::credential::NoChainReader> {
             asset_dir: std::path::PathBuf::from("web"),
             chain: None,
             permitted_hosts: default_permitted_hosts(),
+            xtm,
+            xtm_chain,
         }
+    }
+}
+
+impl<W: WalletChannel> Bridge<W, crate::credential::NoChainReader, crate::xtm::NoXtm, crate::xtm::NoXtmChainReader> {
+    pub fn new(gates: GateRegistry, wallet: W, origins: OriginPolicy) -> Self {
+        Self::assemble(gates, wallet, origins, crate::xtm::NoXtm, None)
     }
 }
 
@@ -138,7 +168,7 @@ fn host_name(host: &str) -> String {
     .to_ascii_lowercase()
 }
 
-impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
+impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R, crate::xtm::NoXtm, crate::xtm::NoXtmChainReader> {
     /// Serves the credential proof mode alongside the consensus one.
     ///
     /// Deliberately a separate constructor rather than a second generic on `new`: a bridge that
@@ -161,9 +191,47 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
             chain: Some(chain),
             permitted_hosts: default_permitted_hosts(),
             challenge_expires_epoch: DEFAULT_CHALLENGE_EXPIRES_EPOCH,
+            xtm: crate::xtm::NoXtm,
+            xtm_chain: None,
         }
     }
+}
 
+/// A bridge that serves the native Minotari L1 XTM path: an `XtmChannel` to the user's wallet
+/// daemon, and a base-node reader for the evidence. The Ootle channels stay as built.
+impl<W: WalletChannel, X: crate::xtm::XtmChannel, XR: crate::xtm::XtmChainReader>
+    Bridge<W, crate::credential::NoChainReader, X, XR>
+{
+    pub fn with_xtm(
+        gates: GateRegistry,
+        wallet: W,
+        origins: OriginPolicy,
+        xtm: X,
+        xtm_chain: Option<XR>,
+    ) -> Self {
+        Self {
+            gates,
+            challenges: ChallengeBook::new(),
+            jobs: Vec::new(),
+            wallet,
+            origins,
+            challenge_ttl: crate::session::DEFAULT_CHALLENGE_TTL,
+            asset_dir: std::path::PathBuf::from("web"),
+            chain: None,
+            permitted_hosts: default_permitted_hosts(),
+            challenge_expires_epoch: DEFAULT_CHALLENGE_EXPIRES_EPOCH,
+            xtm,
+            xtm_chain,
+        }
+    }
+}
+
+/// The routes and the reconciliation, over every channel combination. All the security-relevant
+/// logic lives here so it is written once: a bridge with or without chain readers runs the same
+/// handlers, and the difference is only which constructor assembled it.
+impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChannel, XR: crate::xtm::XtmChainReader>
+    Bridge<W, R, X, XR>
+{
     /// Handles one request. Pure with respect to the process: it returns what to send.
     pub async fn handle(&mut self, request: &Request) -> Response {
         // The Host check comes first, and for the reason above: a rebound name arrives as a
@@ -211,7 +279,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
             },
 
             Route::Asset(name) => self.serve_asset(name),
-            Route::Challenge(id) => self.issue_challenge(id, request),
+            Route::Challenge(id) => self.issue_challenge(id, request).await,
             Route::Prove(id) => self.prove(id, request).await,
             Route::Credential(id) => self.credential(id, request).await,
             Route::ProofStatus(id) => {
@@ -292,10 +360,39 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
     /// challenge. A caller that supplies its own session value could reuse one session across gates; a
     /// value this bridge generates per challenge is bound to that challenge and to the browser that
     /// asked for it.
-    fn issue_challenge(&mut self, id: &str, request: &Request) -> Response {
+    ///
+    /// An L1 XTM gate additionally records the chain tip at issue time, read from this bridge's own
+    /// base-node reader. If the reader is absent or unreachable, the challenge is refused: an L1
+    /// challenge without a recorded tip could not be checked for freshness, so none is minted.
+    async fn issue_challenge(&mut self, id: &str, request: &Request) -> Response {
         if self.gates.get(id).is_none() {
             return Response::error(404, "GG: no such gate");
         }
+        // The tip for an L1 challenge, before anything is minted.
+        let xtm_tip = if let Some(gate) = self.gates.get(id) {
+            if gate.kind() == crate::gate_registry::ProofKind::MinotariXtm {
+                let Some(reader) = self.xtm_chain.as_mut() else {
+                    return Response::error(
+                        503,
+                        "GG: this bridge has no Minotari base node configured, so an XTM challenge \
+                         cannot be issued. Set the L1 base node endpoint to enable the native XTM path.",
+                    );
+                };
+                match reader.tip().await {
+                    Ok(tip) => Some(tip.height),
+                    Err(_) => {
+                        return Response::error(
+                            503,
+                            "GG: the Minotari base node could not be reached, so no XTM challenge was issued",
+                        );
+                    },
+                }
+            } else {
+                None
+            }
+        } else {
+            unreachable!("gate existence was checked above")
+        };
         let session = random_nonce();
         let issued = match self
             .gates
@@ -306,6 +403,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
                 self.challenge_ttl,
                 request.origin.clone(),
                 self.challenge_expires_epoch,
+                xtm_tip,
             )
         {
             Ok(issued) => issued,
@@ -324,20 +422,36 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
         };
         // The challenge's own fields are named rather than serialised as a blob, so a relying site reads
         // the binding it is about to rely on. `gate` and `resource` are addresses, not names.
+        let challenge_json = match &issued.challenge {
+            crate::session::AnyChallenge::Ootle(c) => serde_json::json!({
+                "kind": "ootle",
+                "gate": c.gate.to_string(),
+                "resource": c.resource.to_string(),
+                "threshold": c.threshold,
+                "network": c.network,
+                "nonce": crate::policy::nonce_to_hex(&c.nonce),
+                "expires_epoch": c.expires_epoch,
+                "relying_site": hex::encode(c.relying_site.as_slice()),
+                "session_commitment": hex::encode(c.session_commitment.as_slice()),
+            }),
+            crate::session::AnyChallenge::MinotariXtm(c) => serde_json::json!({
+                "kind": "minotari_xtm",
+                "gate_id": String::from_utf8_lossy(c.gate_id.as_slice()),
+                "threshold_micro": c.threshold_micro,
+                "network": c.network,
+                "nonce": crate::policy::nonce_to_hex(&c.nonce),
+                "issued_at_unix": c.issued_at_unix,
+                "expires_at_unix": c.expires_at_unix,
+                "relying_site": hex::encode(c.relying_site.as_slice()),
+                "session_commitment": hex::encode(c.session_commitment.as_slice()),
+                "tip_height_at_issue": c.tip_height_at_issue,
+            }),
+        };
         Response::json(
             200,
             &serde_json::json!({
-                "challenge": serde_json::json!({
-                    "gate": issued.challenge.gate.to_string(),
-                    "resource": issued.challenge.resource.to_string(),
-                    "threshold": issued.challenge.threshold,
-                    "network": issued.challenge.network,
-                    "nonce": crate::policy::nonce_to_hex(&issued.challenge.nonce),
-                    "expires_epoch": issued.challenge.expires_epoch,
-                    "relying_site": hex::encode(issued.challenge.relying_site.as_slice()),
-                    "session_commitment": hex::encode(issued.challenge.session_commitment.as_slice()),
-                }),
-                "challenge_nonce": crate::policy::nonce_to_hex(&issued.challenge.nonce),
+                "challenge": challenge_json,
+                "challenge_nonce": crate::policy::nonce_to_hex(&issued.challenge.nonce()),
                 "session_commitment": hex::encode(&session),
                 "expires_at_unix": issued
                     .expires_at
@@ -411,12 +525,12 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
 
         // The challenge string the wallet signed is the exact string the challenge route returned
         // and the page passed through: the lowercase hex of the nonce. Reconstruction, not trust.
-        let nonce_hex = crate::policy::nonce_to_hex(&challenge.nonce);
+        let nonce_hex = crate::policy::nonce_to_hex(&challenge.nonce());
         let verifier = crate::credential::CredentialVerifier {
             gate_id: id,
             network: gate.network,
-            threshold: gate.threshold,
-            resource: &gate.resource,
+            threshold: gate.threshold(),
+            resource: &gate.resource().copied().unwrap(),
             challenge_string: &nonce_hex,
         };
 
@@ -433,18 +547,19 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
                 if let Some(nonce_bytes) = nonce_bytes {
                     let _ = self.challenges.consume_on_acceptance(
                         &nonce_bytes,
-                        challenge.session_commitment.as_slice(),
+                        challenge.session_commitment(),
                     );
                 }
                 let job_id = hex::encode(&crate::session::random_nonce()[..8]);
                 self.jobs.push(ProofJob {
                     id: job_id.clone(),
                     gate_id: id.to_string(),
-                    challenge_nonce: challenge.nonce.into_array(),
+                    challenge_nonce: challenge.nonce().into_array(),
                     status: ProofStatus::CredentialAccepted {
                         result: Box::new(receipt.clone()),
                     },
                     started_at: std::time::SystemTime::now(),
+                    xtm_artifact: None,
                 });
                 Response::json(
                     200,
@@ -502,8 +617,26 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
             }
         };
 
+        // Dispatch on the gate's typed condition, not on a string: the two proof paths share the
+        // challenge bookkeeping and nothing else. The job id is minted once here so both paths
+        // answer with the same shape.
         let job_id_bytes = random_nonce();
         let job_id = hex::encode(&job_id_bytes[..8]);
+        match gate.kind() {
+            crate::gate_registry::ProofKind::Ootle => self.prove_ootle(id, challenge, job_id).await,
+            crate::gate_registry::ProofKind::MinotariXtm => self.prove_xtm(id, challenge, job_id).await,
+        }
+    }
+
+    /// The Ootle path: build a stealth statement and submit it through walletd.
+    async fn prove_ootle(&mut self, id: &str, challenge: crate::session::AnyChallenge, job_id: String) -> Response {
+        let gate = self.gates.get(id).cloned();
+        let Some(challenge) = challenge.ootle().cloned() else {
+            return Response::error(500, "GG: internal dispatch error: Ootle proof for a non-Ootle challenge");
+        };
+        let Some(gate) = gate else {
+            return Response::error(500, "GG: internal dispatch error: gate vanished mid-request");
+        };
         let nonce = challenge.nonce.into_array();
         self.push_job(ProofJob {
             id: job_id.clone(),
@@ -511,6 +644,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
             challenge_nonce: nonce,
             status: ProofStatus::Preparing,
             started_at: std::time::SystemTime::now(),
+            xtm_artifact: None,
         });
 
         // An empty `Named` rather than `WalletSelected`. `Named(vec![])` is the honest encoding of what
@@ -522,9 +656,9 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
         // because the engine resolves a spent input under the gate's resource and refuses a transaction
         // that does not declare every substate it spends -- see `wallet::InputChoice`.
         let statement = StatementRequest {
-            resource: gate.resource,
-            input_revealed: tari_template_lib_types::Amount::from(gate.threshold),
-            minimum_value_promise: gate.threshold,
+            resource: gate.resource().copied().unwrap(),
+            input_revealed: tari_template_lib_types::Amount::from(gate.threshold()),
+            minimum_value_promise: gate.threshold(),
             selection: crate::wallet::InputChoice::Named(Vec::new()),
         };
 
@@ -544,7 +678,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
         match self
             .wallet
             .submit(
-                &gate.address.to_string(),
+                &gate.component().copied().unwrap().to_string(),
                 &challenge,
                 &reply.statement,
                 &reply.lock_id,
@@ -561,6 +695,62 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
                 Response::json(
                     202,
                     &serde_json::json!({ "proof_id": job_id, "transaction_id": transaction_id }),
+                )
+            }
+            Err(e) => {
+                self.set_status(
+                    &job_id,
+                    ProofStatus::Failed {
+                        reason: e.to_string(),
+                    },
+                );
+                Response::json(202, &serde_json::json!({ "proof_id": job_id }))
+            }
+        }
+    }
+
+    /// The native Minotari L1 XTM path: one pay-to-self transaction, initiated by this bridge for
+    /// this challenge, verified against base-node consensus data.
+    ///
+    /// The browser supplies three strings and nothing else. It never names a transaction: the
+    /// artifact this route records is the one the wallet daemon produced in answer to this
+    /// challenge, and only that artifact is ever verified. If the wallet cannot afford a qualifying
+    /// transaction, the challenge stays live and the refusal names no balance.
+    async fn prove_xtm(&mut self, id: &str, challenge: crate::session::AnyChallenge, job_id: String) -> Response {
+        let Some(xtm_challenge) = challenge.minotari_xtm().cloned() else {
+            return Response::error(500, "GG: internal dispatch error: XTM proof for a non-XTM challenge");
+        };
+        self.push_job(ProofJob {
+            id: job_id.clone(),
+            gate_id: id.to_string(),
+            challenge_nonce: xtm_challenge.nonce.into_array(),
+            status: ProofStatus::Preparing,
+            started_at: std::time::SystemTime::now(),
+            xtm_artifact: None,
+        });
+
+        let request = crate::xtm::XtmProofRequest {
+            threshold_micro: xtm_challenge.threshold_micro,
+            challenge_nonce: xtm_challenge.nonce.into_array(),
+        };
+        match self.xtm.create_proof_transaction(request).await {
+            Ok(artifact) => {
+                self.jobs.iter_mut().find(|j| j.id == job_id).map(|j| {
+                    j.xtm_artifact = Some(artifact.clone());
+                });
+                self.set_status(
+                    &job_id,
+                    ProofStatus::Submitted {
+                        transaction_id: artifact.transaction_id.to_string(),
+                    },
+                );
+                Response::json(
+                    202,
+                    &serde_json::json!({
+                        "proof_id": job_id,
+                        "transaction_id": artifact.transaction_id.to_string(),
+                        "network": "minotari",
+                    }),
                 )
             }
             Err(e) => {
@@ -593,12 +783,17 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
     /// Polls the network for one submitted proof and retires the challenge only on acceptance.
     ///
     /// Jobs that are not `Submitted` are untouched, so repeated polls of a settled proof are free.
+    /// An XTM job reconciles against the base node (its wallet channel has no wait of its own); an
+    /// Ootle job waits on the wallet daemon's transaction result as before.
     pub async fn reconcile_job(&mut self, job_id: &str, timeout: Duration) {
         let Some(index) = self.jobs.iter().position(|j| j.id == job_id) else {
             return;
         };
         if !matches!(self.jobs[index].status, ProofStatus::Submitted { .. }) {
             return;
+        }
+        if let Some(artifact) = self.jobs[index].xtm_artifact.clone() {
+            return self.reconcile_xtm_job(job_id, artifact).await;
         }
         let transaction_id = match &self.jobs[index].status {
             ProofStatus::Submitted { transaction_id } => transaction_id.clone(),
@@ -621,7 +816,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
                             &self
                                 .challenges
                                 .peek(&nonce)
-                                .map(|e| e.challenge.session_commitment.as_slice().to_vec())
+                                .map(|e| e.challenge.session_commitment().to_vec())
                                 .unwrap_or_default(),
                         )
                         .ok();
@@ -631,20 +826,23 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
                             gate_id: gate_id.clone(),
                             gate_address: binding
                                 .as_ref()
-                                .map(|g| g.address.to_string())
+                                .and_then(|g| g.component())
+                                .map(|a| a.to_string())
                                 .unwrap_or_default(),
                             resource_address: binding
                                 .as_ref()
-                                .map(|g| g.resource.to_string())
+                                .and_then(|g| g.resource())
+                                .map(|a| a.to_string())
                                 .unwrap_or_default(),
                             required_minimum: binding
                                 .as_ref()
-                                .map(|g| g.threshold)
+                                .map(|g| g.threshold())
                                 .unwrap_or_default(),
                             attested_minimum,
                             input_count,
                             challenge_nonce: hex::encode(nonce),
                             transaction_id,
+                            proof_kind: crate::gate_registry::ProofKind::Ootle,
                         },
                     };
                 }
@@ -658,6 +856,86 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
                     };
                 }
             }
+    }
+
+    /// Polls the base node for the proving kernel, verifies the evidence, and retires the challenge
+    /// only on a full verdict.
+    ///
+    /// A "not mined yet" is left `Submitted` so the polling client drives completion, exactly as the
+    /// Ootle path's `Pending` does. An error inside a settled verification — stale kernel, short
+    /// floor, bad signature — is a `Refused`, which leaves the challenge live; the challenge is
+    /// consumed only by an acceptance, and one proof per challenge holds however many times the
+    /// user retries.
+    async fn reconcile_xtm_job(&mut self, job_id: &str, artifact: crate::xtm::XtmProofArtifact) {
+        let Some(index) = self.jobs.iter().position(|j| j.id == job_id) else {
+            return;
+        };
+        let gate_id = self.jobs[index].gate_id.clone();
+        let nonce = self.jobs[index].challenge_nonce;
+        let Some(gate) = self.gates.get(&gate_id).cloned() else {
+            self.jobs[index].status = ProofStatus::Failed {
+                reason: "GG: the gate behind this proof is no longer registered".to_string(),
+            };
+            return;
+        };
+        let Some(reader) = self.xtm_chain.as_mut() else {
+            self.jobs[index].status = ProofStatus::Failed {
+                reason: "GG: no Minotari base node is configured, so this proof cannot be verified".to_string(),
+            };
+            return;
+        };
+        // The challenge must still be live to be answered: an accepted proof from a challenge that
+        // has since expired would be a claim about a window nobody granted.
+        let challenge = match self.challenges.peek(&nonce) {
+            Ok(issued) => issued.challenge.clone(),
+            Err(_) => {
+                self.jobs[index].status = ProofStatus::Refused {
+                    reason: "GG: the challenge behind this proof is no longer answerable".to_string(),
+                };
+                return;
+            },
+        };
+        let Some(xtm_challenge) = challenge.minotari_xtm().cloned() else {
+            self.jobs[index].status = ProofStatus::Failed {
+                reason: "GG: internal dispatch error: XTM proof for a non-XTM challenge".to_string(),
+            };
+            return;
+        };
+        // One verification pass per poll; the polling client drives completion.
+        let now = crate::session::now_unix();
+        let outcome = crate::xtm::verify_xtm_proof(reader, &xtm_challenge, &artifact, now).await;
+        match outcome {
+            Ok(receipt) => {
+                let session_commitment = xtm_challenge.session_commitment.as_slice().to_vec();
+                self.challenges
+                    .consume_on_acceptance(&nonce, &session_commitment)
+                    .ok();
+                self.jobs[index].status = ProofStatus::Accepted {
+                    result: PublicProof {
+                        gate_id: gate_id.clone(),
+                        gate_address: String::new(),
+                        resource_address: String::new(),
+                        required_minimum: gate.threshold(),
+                        // The floor is `promise + fee`, in micro-Minotari. Truncated to u64 for
+                        // the wire type: a floor at or above `u64::MAX` is unreachable by any
+                        // real threshold, and saturating keeps it monotone rather than wrapping.
+                        attested_minimum: u64::try_from(receipt.attested_floor_micro).unwrap_or(u64::MAX),
+                        input_count: receipt.output_count,
+                        challenge_nonce: hex::encode(nonce),
+                        transaction_id: artifact.transaction_id.to_string(),
+                        proof_kind: crate::gate_registry::ProofKind::MinotariXtm,
+                    },
+                };
+            },
+            Err(ghost_gate_core::xtm::XtmProofError::NotMined) => {
+                // Still flying. The status stays Submitted and the next poll looks again.
+            },
+            Err(other) => {
+                self.jobs[index].status = ProofStatus::Refused {
+                    reason: other.to_string(),
+                };
+            },
+        }
     }
 
     /// Records a job, dropping the oldest once the cap is hit.
@@ -695,10 +973,12 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R> {
 const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-pub async fn serve<W, R>(addr: &str, bridge: Bridge<W, R>) -> std::io::Result<()>
+pub async fn serve<W, R, X, XR>(addr: &str, bridge: Bridge<W, R, X, XR>) -> std::io::Result<()>
 where
     W: WalletChannel + Send + 'static,
     R: crate::credential::ChainReader + Send + 'static,
+    X: crate::xtm::XtmChannel + Send + 'static,
+    XR: crate::xtm::XtmChainReader + Send + 'static,
 {
     let listener = TcpListener::bind(addr).await?;
     let bridge = Arc::new(tokio::sync::Mutex::new(bridge));
@@ -727,7 +1007,7 @@ where
         let response = match parse_request(&raw) {
             Some(request) => {
                 let mut bridge = bridge.lock().await;
-                bridge.handle(&request).await
+                (*bridge).handle(&request).await
             }
             None => Response::error(400, "GG: malformed request"),
         };
@@ -842,15 +1122,15 @@ mod tests {
     }
 
     fn binding() -> GateBinding {
-        GateBinding {
-            address: ComponentAddress::new(ObjectKey::from_array([1u8; 32])),
-            resource: ResourceAddress::new(ObjectKey::from_array([7u8; 32])),
-            threshold: 10_000,
-            network: network::LOCALNET,
-            relying_site: MaxBytes::new_checked(b"vip.example".to_vec()).unwrap(),
-            divisibility: 2,
-            symbol: "GHOSTTEST".into(),
-        }
+        GateBinding::ootle(
+            ComponentAddress::new(ObjectKey::from_array([1u8; 32])),
+            ResourceAddress::new(ObjectKey::from_array([7u8; 32])),
+            10_000,
+            network::LOCALNET,
+            MaxBytes::new_checked(b"vip.example".to_vec()).unwrap(),
+            2,
+            "GHOSTTEST".into(),
+        )
     }
 
     /// A syntactically complete statement with one promise-bearing output and no inputs.
@@ -998,7 +1278,7 @@ mod tests {
         let mut b = bridge(FakeWallet::new());
         let r = b.handle(&get("/gate/g1")).await;
         let v: serde_json::Value = serde_json::from_str(&r.body).unwrap();
-        assert_eq!(v["resource_address"], binding().resource.to_string());
+        assert_eq!(v["resource_address"], binding().resource().copied().unwrap().to_string());
         assert_eq!(v["threshold"], 10_000);
         assert_eq!(v["divisibility"], 2);
         assert_eq!(v["symbol"], "GHOSTTEST");
@@ -1073,7 +1353,7 @@ mod tests {
 
         assert_eq!(
             b.wallet.asked,
-            vec![(binding().resource, binding().threshold)]
+            vec![(*binding().resource().unwrap(), binding().threshold())]
         );
         // `Named(vec![])`, not `WalletSelected`: an empty named set means "no input was specified",
         // which is what a request body can actually say, and the adapter fills it in by qualifying the
@@ -1177,7 +1457,7 @@ mod tests {
         let expected = hex::decode(&nonce).expect("hex nonce");
         assert_eq!(b.wallet.submitted.len(), 1, "{:?}", b.wallet.submitted);
         let (gate, submitted_nonce) = &b.wallet.submitted[0];
-        assert_eq!(gate, &binding().address.to_string());
+        assert_eq!(gate, &binding().component().copied().unwrap().to_string());
         assert_eq!(
             submitted_nonce.as_slice(),
             expected.as_slice(),
@@ -1373,7 +1653,7 @@ mod tests {
     async fn a_credential_proof_from_a_real_signature_is_accepted_and_retires_the_challenge() {
         // End to end with the real verifier: issue a challenge, sign it the way the wallet does,
         // and require acceptance plus the single-use property.
-        let res = binding().resource;
+        let res = *binding().resource().unwrap();
         let sk = RistrettoSecretKey::random(&mut rng());
         let key_bytes = {
             let pk = RistrettoPublicKey::from_secret_key(&sk);
@@ -1470,7 +1750,7 @@ mod tests {
             FakeChain::with(substate_id.clone(), 9_999, key_bytes),
         );
         let (nonce, session) = issue(&mut b).await;
-        let res = binding().resource;
+        let res = *binding().resource().unwrap();
         let message = crate::credential::ownership_proof_message(
             ghost_gate_core::network::LOCALNET,
             &res,

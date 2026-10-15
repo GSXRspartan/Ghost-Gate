@@ -49,19 +49,21 @@ pub mod policy;
 pub mod server;
 pub mod session;
 pub mod wallet;
+pub mod xtm;
 
 pub use credential::{
     ChainReader, CredentialProofRequest, CredentialReceipt, CredentialRefusal, CredentialVerifier,
     NoChainReader, OwnershipProof, UtxoOnChain, ownership_proof_message,
     reported_key_is_the_auth_key,
 };
-pub use gate_registry::{GateBinding, GateRegistrationError, GateRegistry};
+pub use gate_registry::{GateBinding, GateCondition, GateRegistrationError, GateRegistry, ProofKind};
 pub use origin::{OriginPolicy, OriginRejection};
 pub use policy::{ProofRefusal, ProveRequest, validate_prove_request};
-pub use session::{ChallengeBook, IssuedChallenge, ProofJob, ProofStatus, PublicProof};
+pub use session::{AnyChallenge, ChallengeBook, IssuedChallenge, ProofJob, ProofStatus, PublicProof};
 pub use wallet::{
     CommitOutcome, InputChoice, StatementRequest, WalletChannel, WalletError, WalletStatus,
 };
+pub use xtm::{MinedKernel, XtmChainError, XtmChainReader, XtmChannel, XtmProofArtifact, XtmProofRequest, XtmWalletStatus, XtmTip, verify_xtm_proof};
 
 /// Server version, reported by `GET /health`.
 pub const BRIDGE_VERSION: &str = env!("CARGO_PKG_VERSION");

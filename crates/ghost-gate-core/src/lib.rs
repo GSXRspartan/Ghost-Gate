@@ -30,8 +30,9 @@
 #![deny(unsafe_code)]
 
 use minicbor::{CborLen, Decode, Encode};
+pub use tari_template_lib_types::Hash32;
 use tari_template_lib_types::{
-    ComponentAddress, Hash32, MaxBytes, ResourceAddress,
+    ComponentAddress, MaxBytes, ResourceAddress,
     stealth::{SpendAuthorization, StealthTransferStatement, StealthUnspentOutput},
 };
 
@@ -45,6 +46,12 @@ pub const MARK: &str = "GG";
 /// Bound into every challenge commitment so a value produced for Ghost Gate can never be replayed
 /// into another protocol, and vice versa.
 pub const GHOST_GATE_DOMAIN: &[u8] = b"tari.ghost_gate.v1";
+
+/// Domain separator for the L1 XTM challenge's binding hash.
+///
+/// Deliberately distinct from [`GHOST_GATE_DOMAIN`]: an Ootle challenge's commitment must not be
+/// interchangeable with an L1 one, even though both hash over similar fields.
+pub const XTM_DOMAIN: &[u8] = b"tari.ghost_gate.xtm.v1";
 
 /// Longest accepted relying-site identifier, in bytes.
 pub const MAX_RELYING_SITE_LEN: usize = 64;
@@ -531,6 +538,218 @@ pub fn is_key_spendable(auth: &SpendAuthorization) -> bool {
 /// this digest is not a security boundary — it binds public, already-committed fields. The
 /// single-use guarantee is the nonce being burned in gate state. Replacing this with SHA-256 is a
 /// tracked hardening item in `docs/THREAT_MODEL.md`.
+pub mod xtm {
+    //! Native Minotari L1 XTM proving: the challenge type and the provable-floor arithmetic.
+    //!
+    //! # How an L1 threshold is proven, precisely
+    //!
+    //! A Minotari confidential output publicly commits to a minimum value: `minimum_value_promise`
+    //! (`MicroMinotari`) is a consensus field of `TransactionOutput`, part of the output's hash, and
+    //! enforced by the bulletproof proving the hidden value lies in `[promise, 2^64)`. That alone
+    //! proves an output *held* value at mining time, not that the prover still controls it, and not
+    //! that the output is fresh. Three more pieces make it a Ghost Gate proof:
+    //!
+    //! 1. **The kernel fee.** A pay-to-self transaction's inputs minus its outputs equal the fee, so
+    //!    `output_value >= promise` and `inputs <= balance` together give
+    //!    `promise + fee <= balance_before`. The proof condition is therefore
+    //!    `promise + kernel_fee >= threshold`, which reads both figures off consensus data (the
+    //!    output and the kernel, both on chain) and is exact at the boundary: a wallet whose entire
+    //!    spendable balance is exactly the threshold can promise `threshold - fee` on the output and
+    //!    still prove the threshold. No fee headroom is demanded of the user.
+    //! 2. **A spend-key signature over the challenge nonce.** The proving wallet signs the
+    //!    challenge's 32-byte nonce with the qualifying output's script key; the bridge verifies
+    //!    that signature against the script public key read **from the mined output on chain**. The
+    //!    nonce is unknowable before the bridge issues the challenge, so no historical transaction
+    //!    and no third party's transaction can be presented in its place: whoever answers must have
+    //!    held the output's spend key at answer time.
+    //! 3. **Freshness from chain state.** The kernel must be mined in a block above the tip height
+    //!    recorded when the challenge was issued, with a block timestamp not earlier than the
+    //!    challenge's issue time (small slack for miner clock jitter). A transaction created or
+    //!    mined before the challenge existed is refused.
+    //!
+    //! What the bridge itself contributes: it initiates the transaction for each challenge and
+    //! records the kernel signature it expects, so a browser can never nominate a transaction. The
+    //! spend-key signature then makes that initiation belt-and-braces rather than load-bearing.
+    //!
+    //! # Units
+    //!
+    //! One XTM is 1,000,000 micro-Minotari (`tari_transaction_components::tari_amount`: `uT = 1`,
+    //! `T = 1_000_000`). All arithmetic here is integer base units; there is no floating point and
+    //! no display-figure rounding anywhere near a comparison.
+
+    use minicbor::{CborLen, Decode, Encode};
+    use tari_template_lib_types::{Hash32, MaxBytes};
+
+    use crate::binding_hash::BindingHash;
+
+    /// Micro-Minotari per XTM, from `tari_amount.rs`: `1 * T == 1_000_000 * uT`.
+    pub const MICRO_PER_XTM: u64 = 1_000_000;
+
+    /// Checked `micro_xtm -> u128` conversion for XTM display figures.
+    ///
+    /// Returns `None` when the XTM figure does not fit in base units — i.e. only when the caller
+    /// tried to express a number the chain cannot hold. Never rounds.
+    pub const fn xtm_to_micro(xtm: u64) -> Option<u128> {
+        // u128::MAX / MICRO_PER_XTM >> u64::MAX, so no u64 XTM value can overflow this.
+        Some(xtm as u128 * MICRO_PER_XTM as u128)
+    }
+
+    /// Longest accepted gate identifier, in bytes, matching the challenge's other string bounds.
+    pub const MAX_GATE_ID_LEN: usize = crate::MAX_RELYING_SITE_LEN;
+
+    /// How far behind a challenge's issue time a mining block's timestamp may fall and still count
+    /// as fresh, in seconds. Miners may timestamp a block up to the median-time rule behind their
+    /// wall clock; this slack absorbs that jitter without opening the door to pre-challenge
+    /// transactions, which the height check rejects outright.
+    pub const FRESHNESS_TIMESTAMP_SLACK_SECS: u64 = 120;
+
+    /// The L1 XTM challenge: the relying site's one-shot question about native XTM.
+    ///
+    /// Same shape as [`crate::Challenge`] but for the base layer: there is no Ootle component or
+    /// resource to name, so the gate is identified by its registered id, the threshold is in
+    /// micro-Minotari, and expiry is wall clock (the L1 chain has no Ghost Gate template to compare
+    /// epochs against). `tip_height_at_issue` is the base-layer tip when the challenge was minted;
+    /// a qualifying kernel must be mined above that height, which is what makes a pre-existing
+    /// transaction unusable.
+    #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, CborLen)]
+    pub struct XtmChallenge {
+        /// The bridge-registered gate id, so a challenge minted for one gate cannot answer another.
+        #[n(0)]
+        pub gate_id: MaxBytes<MAX_GATE_ID_LEN>,
+        /// The threshold in micro-Minotari (base units; 1 XTM = [`MICRO_PER_XTM`] micro).
+        #[n(1)]
+        pub threshold_micro: u64,
+        /// The Minotari network byte (same table as the Ootle cohorts: LocalNet 0x10, Esmeralda 0x26…).
+        #[n(2)]
+        pub network: u8,
+        /// Cryptographically random single-use value. What the spend key signs.
+        #[n(3)]
+        pub nonce: Hash32,
+        /// When the challenge was minted (Unix seconds). The freshness check reads it.
+        #[n(4)]
+        pub issued_at_unix: u64,
+        /// Last second at which the challenge may be answered.
+        #[n(5)]
+        pub expires_at_unix: u64,
+        /// Opaque relying-site identity, as on the Ootle challenge.
+        #[n(6)]
+        pub relying_site: MaxBytes<64>,
+        /// Opaque browser-session commitment, as on the Ootle challenge.
+        #[n(7)]
+        pub session_commitment: MaxBytes<64>,
+        /// The base-layer tip height when the challenge was minted. A qualifying kernel must be
+        /// mined strictly above this, so a transaction that already existed is not fresh.
+        #[n(8)]
+        pub tip_height_at_issue: u64,
+    }
+
+    impl XtmChallenge {
+        /// The digest binding every field of the challenge. Same role and same caveats as the
+        /// Ootle challenge's commitment: a binding device, not the single-use mechanism.
+        pub fn commitment(&self) -> Hash32 {
+            let mut hasher = BindingHash::new(crate::XTM_DOMAIN);
+            hasher.update(self.gate_id.as_slice());
+            hasher.update(&self.threshold_micro.to_le_bytes());
+            hasher.update(&[self.network]);
+            hasher.update(self.nonce.as_slice());
+            hasher.update(&self.issued_at_unix.to_le_bytes());
+            hasher.update(&self.expires_at_unix.to_le_bytes());
+            hasher.update(self.relying_site.as_slice());
+            hasher.update(self.session_commitment.as_slice());
+            hasher.update(&self.tip_height_at_issue.to_le_bytes());
+            hasher.finish()
+        }
+
+        /// Whether this challenge has passed its expiry second.
+        ///
+        /// `now` is the caller's clock. The boundary is exclusive: a challenge expires *after* its
+        /// last second, mirroring the Ootle challenge's inclusive epoch handling.
+        pub fn is_expired(&self, now_unix: u64) -> bool {
+            now_unix > self.expires_at_unix
+        }
+    }
+
+    /// Why an L1 proof was refused. Every variant is a rule, as on the Ootle side: a stable reason
+    /// string, a plain enum, no error-crate dependency — this crate compiles to WASM inside a
+    /// template too.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum XtmProofError {
+        /// The proving transaction was never mined within the verification window.
+        NotMined,
+        /// The proving kernel was mined below the challenge's tip height, so it is not fresh.
+        StaleKernel,
+        /// The proving block's timestamp predates the challenge.
+        BlockPredatesChallenge,
+        /// The wallet or chain is on a different network than the challenge names.
+        NetworkMismatch,
+        /// The qualifying output's promised floor plus the kernel fee is below the threshold.
+        BelowThreshold,
+        /// The spend-key signature over the challenge does not verify against the mined output.
+        BadSpendSignature,
+        /// The wallet could not construct a qualifying transaction at all.
+        CannotConstruct,
+        /// Arithmetic overflow computing the provable floor.
+        Overflow,
+    }
+
+    impl XtmProofError {
+        /// A stable, human-readable reason, mirroring `GateError::reason`.
+        pub const fn reason(self) -> &'static str {
+            match self {
+                Self::NotMined => "GG: the proving transaction was never mined within the verification window",
+                Self::StaleKernel => "GG: the proving kernel was mined below the challenge's tip height, so it is not fresh",
+                Self::BlockPredatesChallenge => "GG: the proving block predates the challenge",
+                Self::NetworkMismatch => "GG: the proving transaction is not on this challenge's network",
+                Self::BelowThreshold => "GG: the promised floor plus the kernel fee is below the threshold",
+                Self::BadSpendSignature => "GG: the spend-key signature over the challenge does not verify against the mined output",
+                Self::CannotConstruct => "GG: the wallet could not construct a qualifying transaction",
+                Self::Overflow => "GG: arithmetic overflow computing the provable floor",
+            }
+        }
+    }
+
+    impl core::fmt::Display for XtmProofError {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.write_str(self.reason())
+        }
+    }
+
+    /// The provable floor a mined pay-to-self transaction establishes, in micro-Minotari.
+    ///
+    /// `minimum_value_promise` is the qualifying output's public floor and `kernel_fee` is the fee
+    /// the transaction paid; inputs cover `output + fee`, so the wallet's balance before the
+    /// transaction was at least `promise + fee`. The sum is computed in `u128`, where two `u64`s
+    /// can never overflow, so the arithmetic is total and there is no error case to mis-handle.
+    pub const fn provable_floor(minimum_value_promise_micro: u64, kernel_fee_micro: u64) -> u128 {
+        minimum_value_promise_micro as u128 + kernel_fee_micro as u128
+    }
+
+    /// Whether the provable floor meets the threshold. The one L1 threshold comparison.
+    pub fn floor_meets_threshold(floor_micro: u128, threshold_micro: u64) -> bool {
+        floor_micro >= u128::from(threshold_micro)
+    }
+
+    /// The receipt an L1 proof leaves behind. Public, minimal, same discipline as
+    /// [`crate::ProofReceipt`]: a floor, a count and the challenge nonce. No balance, no address.
+    #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, CborLen)]
+    pub struct XtmProofReceipt {
+        /// The floor the chain data proved: `minimum_value_promise + kernel fee`, micro-Minotari.
+        /// A lower bound on what the wallet controlled; never the wallet's balance.
+        #[n(0)]
+        pub attested_floor_micro: u128,
+        /// How many outputs the proving transaction carried (1 is the norm: the promised output;
+        /// a self-transfer may also carry change, which is not part of the proof).
+        #[n(1)]
+        pub output_count: u32,
+        /// The challenge nonce this proof consumed.
+        #[n(2)]
+        pub challenge_nonce: Hash32,
+        /// Height of the block the proving kernel was mined into.
+        #[n(3)]
+        pub mined_height: u64,
+    }
+}
+
 pub mod binding_hash {
     use tari_template_lib_types::Hash32;
 
@@ -861,5 +1080,141 @@ mod tests {
         assert!(!network::is_known(0x03));
         // Distinct, so `wrong_network_is_refused` cannot accidentally pass on equal bytes.
         assert_ne!(network::ESMERALDA, network::LOCALNET);
+    }
+}
+#[cfg(test)]
+mod xtm_tests {
+    use super::*;
+
+    /// 1 XTM is 1,000,000 micro-Minotari, from `tari_amount.rs` (`1 * T == 1_000_000 * uT`).
+    #[test]
+    fn the_base_unit_conversion_is_canonical() {
+        assert_eq!(xtm::MICRO_PER_XTM, 1_000_000);
+        assert_eq!(xtm::xtm_to_micro(1), Some(1_000_000));
+        assert_eq!(xtm::xtm_to_micro(u64::MAX), Some(u64::MAX as u128 * 1_000_000));
+    }
+
+    fn xtm_challenge(nonce: [u8; 32]) -> xtm::XtmChallenge {
+        xtm::XtmChallenge {
+            gate_id: MaxBytes::new_checked(b"otherside".to_vec()).unwrap(),
+            threshold_micro: xtm::MICRO_PER_XTM * 1_000_000,
+            network: network::LOCALNET,
+            nonce: Hash32::from_array(nonce),
+            issued_at_unix: 1_000,
+            expires_at_unix: 1_180,
+            relying_site: MaxBytes::new_checked(b"vip.example".to_vec()).unwrap(),
+            session_commitment: MaxBytes::new_checked(b"session-1".to_vec()).unwrap(),
+            tip_height_at_issue: 42,
+        }
+    }
+
+    /// The binding: every field participates, so changing any one of them changes the commitment.
+    /// This is what makes an XTM challenge for one gate/session unusable at another.
+    #[test]
+    fn every_xtm_challenge_field_participates_in_the_commitment() {
+        let base = xtm_challenge([1u8; 32]);
+        let base_commitment = base.commitment();
+
+        let mut c = base.clone();
+        c.gate_id = MaxBytes::new_checked(b"othergate".to_vec()).unwrap();
+        assert_ne!(c.commitment(), base_commitment);
+
+        let mut c = base.clone();
+        c.threshold_micro += 1;
+        assert_ne!(c.commitment(), base_commitment);
+
+        let mut c = base.clone();
+        c.network = network::ESMERALDA;
+        assert_ne!(c.commitment(), base_commitment);
+
+        let mut c = base.clone();
+        c.nonce = Hash32::from_array([2u8; 32]);
+        assert_ne!(c.commitment(), base_commitment);
+
+        let mut c = base.clone();
+        c.issued_at_unix += 1;
+        assert_ne!(c.commitment(), base_commitment);
+
+        let mut c = base.clone();
+        c.expires_at_unix += 1;
+        assert_ne!(c.commitment(), base_commitment);
+
+        let mut c = base.clone();
+        c.relying_site = MaxBytes::new_checked(b"evil.example".to_vec()).unwrap();
+        assert_ne!(c.commitment(), base_commitment);
+
+        let mut c = base.clone();
+        c.session_commitment = MaxBytes::new_checked(b"session-2".to_vec()).unwrap();
+        assert_ne!(c.commitment(), base_commitment);
+
+        let mut c = base.clone();
+        c.tip_height_at_issue += 1;
+        assert_ne!(c.commitment(), base_commitment);
+    }
+
+    /// The two domains are distinct: an Ootle challenge's commitment is never an XTM one's, so a
+    /// value bound in one cannot be presented as bound in the other.
+    #[test]
+    fn the_xtm_domain_is_distinct_from_the_ootle_domain() {
+        assert_ne!(XTM_DOMAIN, GHOST_GATE_DOMAIN);
+        let xtm_c = xtm_challenge([1u8; 32]);
+        let ootle_c = Challenge {
+            gate: ComponentAddress::new(tari_template_lib_types::ObjectKey::from_array([1u8; 32])),
+            resource: ResourceAddress::new(tari_template_lib_types::ObjectKey::from_array([7u8; 32])),
+            threshold: 10_000,
+            network: network::LOCALNET,
+            nonce: Hash32::from_array([1u8; 32]),
+            expires_epoch: 100,
+            relying_site: MaxBytes::new_checked(b"vip.example".to_vec()).unwrap(),
+            session_commitment: MaxBytes::new_checked(b"session-1".to_vec()).unwrap(),
+        };
+        assert_ne!(xtm_c.commitment(), ootle_c.commitment());
+    }
+
+    #[test]
+    fn expiry_is_exclusive_on_the_last_second() {
+        let c = xtm_challenge([1u8; 32]);
+        assert!(!c.is_expired(c.expires_at_unix), "the last second is still answerable");
+        assert!(c.is_expired(c.expires_at_unix + 1));
+    }
+
+    /// The fee relation, at and around the million-XTM boundary. The four cases the fee-boundary
+    /// section of the task demands, in base units, with checked arithmetic throughout.
+    #[test]
+    fn the_provable_floor_arithmetic_is_exact_at_the_boundary() {
+        // Exactly at threshold: output promises threshold minus the fee, and the sum meets it.
+        let threshold = xtm::MICRO_PER_XTM as u128 * 1_000_000; // 1,000,000 XTM
+        let floor = xtm::provable_floor((threshold - 1) as u64, 1);
+        assert!(xtm::floor_meets_threshold(floor, threshold as u64));
+
+        // One micro short is refused.
+        let floor = xtm::provable_floor((threshold - 2) as u64, 1);
+        assert!(!xtm::floor_meets_threshold(floor, threshold as u64));
+
+        // Comfortably above.
+        let floor = xtm::provable_floor(u64::try_from(threshold).unwrap(), 0);
+        assert!(xtm::floor_meets_threshold(floor, u64::try_from(threshold).unwrap()));
+
+        // A fee at u64::MAX cannot overflow the u128 sum: the arithmetic is total.
+        let floor = xtm::provable_floor(u64::MAX, u64::MAX);
+        assert_eq!(floor, u64::MAX as u128 * 2);
+    }
+
+    #[test]
+    fn the_xtm_receipt_carries_a_floor_not_a_balance() {
+        // Structurally: the type has these three fields and nothing that could hold a balance,
+        // an address or a key. The receipt is CBOR-decodable by the wallet's proof readback, and
+        // its wire form is checked here so a new field is a visible change.
+        let receipt = xtm::XtmProofReceipt {
+            attested_floor_micro: 1_000_000_000_000,
+            output_count: 1,
+            challenge_nonce: Hash32::from_array([5u8; 32]),
+            mined_height: 77,
+        };
+        let bytes = minicbor::to_vec(&receipt).unwrap();
+        let back: xtm::XtmProofReceipt = minicbor::decode(&bytes).unwrap();
+        assert_eq!(back, receipt);
+        assert_eq!(back.attested_floor_micro, 1_000_000_000_000);
+        assert_eq!(back.output_count, 1);
     }
 }
