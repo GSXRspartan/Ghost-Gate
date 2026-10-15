@@ -52,8 +52,10 @@ pub const DEFAULT_FEE_PER_GRAM: u64 = 5;
 /// How long `prove` will wait for the wallet's own transaction protocol to accept the broadcast.
 pub const DEFAULT_BROADCAST_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// The request the bridge sends for a proof.
+/// The request the bridge sends for a proof. `deny_unknown_fields` is load-bearing: a caller that
+/// smuggles an amount or a key field into a proof request gets a refusal, not a silent ignore.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProveRequestWire {
     /// The threshold, in micro-Minotari. The only number a proof request carries.
     pub threshold_micro: u64,
@@ -62,7 +64,7 @@ pub struct ProveRequestWire {
 }
 
 /// The response to a proof request.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ProveResponseWire {
     /// The transaction was broadcast; the artifact is what the bridge will verify.

@@ -750,6 +750,8 @@ pub mod xtm {
     }
 }
 
+pub mod policy;
+
 pub mod binding_hash {
     use tari_template_lib_types::Hash32;
 

@@ -37,11 +37,19 @@ rand.workspace = true
 tokio.workspace = true
 sha2.workspace = true
 time.workspace = true
+# The proof service's loopback HTTP server and the bridge's client side.
+reqwest = { version = "0.12", features = ["json"] }
+# The same tonic the minotari_app_grpc 6.0.1-pre.2 stack resolves.
+tonic = "0.13.1"
 
 [dev-dependencies]
 # An in-process base node for the end-to-end tests. It compiles the whole node stack, which is
 # why it is a dev-dependency: the shipped library and binary never pull it in.
 minotari_node = "6.0.1-pre.2"
+minotari_app_grpc = "6.0.1-pre.2"
+tari_template_lib_types = { workspace = true, features = ["std"] }
+env_logger = "0.11"
+log = "0.4"
 tempfile = "3"
 
 [lib]

@@ -24,6 +24,7 @@ use ghost_gate_bridge::server::Bridge;
 use ghost_gate_bridge::wallet::{
     CommitOutcome, StatementReply, WalletChannel, WalletError, WalletStatus,
 };
+use ghost_gate_bridge::xtm::{XtmChannel, XtmProofArtifact, XtmProofRequest, XtmWalletStatus};
 use ghost_gate_bridge::{GateBinding, GateRegistry, OriginPolicy};
 use ghost_gate_walletd::IndexerChainReader;
 use tari_template_lib_types::stealth::StealthTransferStatement;
@@ -48,10 +49,20 @@ fn main() -> ExitCode {
     println!("ghost-gate-bridge listening on {}", config.bind);
     println!("  gate(s): {}", config.gates.len());
     for (id, binding) in &config.gates {
-        println!(
-            "    {id}: {} over {} (threshold {}, divisibility {})",
-            binding.address, binding.resource, binding.threshold, binding.divisibility
-        );
+        match binding.kind() {
+            ghost_gate_bridge::ProofKind::Ootle => println!(
+                "    {id}: [ootle] {} over {} (threshold {}, divisibility {})",
+                binding.component().copied().unwrap(),
+                binding.resource().copied().unwrap(),
+                binding.threshold(),
+                binding.divisibility
+            ),
+            ghost_gate_bridge::ProofKind::MinotariXtm => println!(
+                "    {id}: [minotari_xtm] threshold {} micro-XTM ({} XTM)",
+                binding.threshold(),
+                binding.threshold() / 1_000_000
+            ),
+        }
     }
     println!(
         "  permitted origins: {}",
@@ -133,6 +144,73 @@ fn main() -> ExitCode {
         ),
     }
 
+    // The native Minotari L1 channels. Optional by configuration; when absent, an L1 gate is
+    // served for metadata and refused for challenges with an honest message (fail closed).
+    let xtm_endpoint = std::env::var("GG_XTM_WALLET_ENDPOINT")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let l1_endpoint = std::env::var("GG_MINOTARI_BASE_NODE_ENDPOINT")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let has_xtm_gate = config
+        .gates
+        .iter()
+        .any(|(_, b)| b.kind() == ghost_gate_bridge::ProofKind::MinotariXtm);
+
+    let mut xtm_channel = AnyXtm::new(xtm_endpoint.clone(), Some(network_byte(&config.gates)));
+    let mut xtm_chain = match l1_endpoint {
+        Some(endpoint) => match tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("runtime: {e}"))
+            .and_then(|rt| {
+                rt.block_on(ghost_gate_minotari::chain_reader::BaseNodeXtmReader::connect(&endpoint))
+                    .map_err(|e| e.to_string())
+            }) {
+            Ok(reader) => {
+                println!("  minotari base node: {endpoint} (L1 XTM verification enabled)");
+                Some(reader)
+            },
+            Err(e) => {
+                if has_xtm_gate {
+                    eprintln!("ghost-gate-bridge: cannot connect to the Minotari base node at {endpoint}: {e}");
+                    return ExitCode::FAILURE;
+                }
+                eprintln!("  note: the Minotari base node at {endpoint} is unreachable ({e}); the L1 path is disabled.");
+                None
+            },
+        },
+        None => {
+            if has_xtm_gate {
+                eprintln!(
+                    "  note: GG_MINOTARI_BASE_NODE_ENDPOINT is not set, so L1 XTM challenges cannot be issued \
+                     or verified; register an Ootle gate or set the endpoint."
+                );
+            }
+            None
+        }
+    };
+    if xtm_endpoint.is_none() && has_xtm_gate {
+        eprintln!(
+            "  note: GG_XTM_WALLET_ENDPOINT is not set, so no Minotari wallet daemon is connected; \
+             XTM proofs will be refused with an honest message."
+        );
+    }
+
+    // Probed once at startup, so an L1 gate is visible as broken immediately rather than at the
+    // first proof.
+    if has_xtm_gate {
+        match runtime.block_on(xtm_channel.status()) {
+            Ok(status) => println!(
+                "  minotari wallet: reachable={} network={} spend_key={}",
+                status.reachable,
+                status.network,
+                status.spend_public_key.as_deref().unwrap_or("-")
+            ),
+            Err(e) => eprintln!("  warning: the Minotari wallet did not answer ({e}); XTM proofs will fail."),
+        }
+    }
+
     // The credential mode needs chain reads. Optional by configuration: a bridge pointed only at
     // walletd runs without it, and its credential route says exactly that instead of verifying
     // against nothing.
@@ -147,7 +225,7 @@ fn main() -> ExitCode {
         Some(endpoint) => match IndexerChainReader::connect(&endpoint) {
             Ok(reader) => {
                 println!("  indexer: {endpoint} (credential mode enabled)");
-                let bridge = Bridge::with_chain_reader(registry, wallet, config.origins, reader);
+                let bridge = Bridge::assemble_full(registry, wallet, config.origins, reader, xtm_channel, xtm_chain);
                 runtime.block_on(ghost_gate_bridge::server::serve(&config.bind, bridge))
             }
             Err(e) => {
@@ -160,7 +238,7 @@ fn main() -> ExitCode {
                 "  note: GG_INDEXER_ENDPOINT is not set, so the credential proof mode (browser \
                  wallets) is disabled; the consensus mode through walletd is unaffected."
             );
-            let bridge = Bridge::new(registry, wallet, config.origins);
+            let bridge = Bridge::<AnyWallet, ghost_gate_bridge::credential::NoChainReader, AnyXtm, _>::with_xtm_full(registry, wallet, config.origins, xtm_channel, xtm_chain);
             runtime.block_on(ghost_gate_bridge::server::serve(&config.bind, bridge))
         }
     };
@@ -362,14 +440,38 @@ impl Config {
     }
 }
 
-/// Parses `id=gate_address:resource_address:threshold:divisibility:symbol`.
+/// Parses `id=gate_address:resource_address:threshold:divisibility:symbol` for an Ootle gate, or
+/// `id=xtm:threshold_micro:symbol` for a native Minotari L1 gate.
 ///
-/// The resource is named by **address**, never by symbol. The symbol is display only and is read last
-/// so that a caller cannot accidentally supply a name where an address belongs and have it accepted.
+/// The L1 form's `xtm:` prefix is what makes the two unambiguous. A threshold there is in
+/// **micro-Minotari**: `1000000000000` is 1,000,000 XTM. A `1_000_000`-shaped XTM figure with
+/// guessed decimal math is exactly the error this format exists to prevent — write base units.
 fn parse_gate(entry: &str) -> Result<(String, GateBinding), String> {
     let (id, rest) = entry
         .split_once('=')
         .ok_or_else(|| format!("{entry:?} is missing id="))?;
+    if rest.starts_with("xtm:") {
+        let parts: Vec<&str> = rest.split(':').collect();
+        if parts.len() < 3 {
+            return Err(format!("{entry:?} needs id=xtm:threshold_micro:symbol"));
+        }
+        let threshold_micro: u64 = parts[1]
+            .parse()
+            .map_err(|e| format!("threshold (micro-Minotari base units): {e}"))?;
+        return Ok((
+            id.to_string(),
+            GateBinding::minotari_xtm(
+                threshold_micro,
+                std::env::var("GG_MINOTARI_NETWORK")
+                    .ok()
+                    .and_then(|v| u8::from_str_radix(v.trim_start_matches("0x"), 16).ok())
+                    .unwrap_or(ghost_gate_core::network::LOCALNET),
+                tari_template_lib_types::MaxBytes::new_checked(b"vip.example".to_vec())
+                    .expect("short"),
+                parts[2..].join(":"),
+            ),
+        ));
+    }
     let parts: Vec<&str> = rest.split(':').collect();
     if parts.len() < 5 {
         return Err(format!(
@@ -391,17 +493,73 @@ fn parse_gate(entry: &str) -> Result<(String, GateBinding), String> {
     }
     Ok((
         id.to_string(),
-        GateBinding {
-            address: parts[0].parse().map_err(|e| format!("gate address: {e}"))?,
-            resource: parts[1]
-                .parse()
-                .map_err(|e| format!("resource address: {e}"))?,
-            threshold: parts[2].parse().map_err(|e| format!("threshold: {e}"))?,
-            network: ghost_gate_core::network::LOCALNET,
-            relying_site: tari_template_lib_types::MaxBytes::new_checked(b"vip.example".to_vec())
-                .expect("short"),
-            divisibility: parts[3].parse().map_err(|e| format!("divisibility: {e}"))?,
-            symbol: parts[4..].join(":"),
-        },
+        GateBinding::ootle(
+            parts[0].parse().map_err(|e| format!("gate address: {e}"))?,
+            parts[1].parse().map_err(|e| format!("resource address: {e}"))?,
+            parts[2].parse().map_err(|e| format!("threshold: {e}"))?,
+            ghost_gate_core::network::LOCALNET,
+            tari_template_lib_types::MaxBytes::new_checked(b"vip.example".to_vec()).expect("short"),
+            parts[3].parse().map_err(|e| format!("divisibility: {e}"))?,
+            parts[4..].join(":"),
+        ),
     ))
+}
+
+/// The network byte the bridge's gates are bound to. XTM gates share the Ootle byte table, so
+/// the first gate's byte is the whole story for a single-network deployment; a mixed deployment
+/// is refused at parse time before this is ever consulted.
+fn network_byte(gates: &[(String, GateBinding)]) -> u8 {
+    gates
+        .first()
+        .map(|(_, b)| b.network)
+        .unwrap_or(ghost_gate_core::network::LOCALNET)
+}
+
+/// Which Minotari wallet channel the bridge is using, chosen once at startup.
+///
+/// The same enum-dispatch pattern as [`AnyWallet`]: the `XtmChannel` trait has native `async fn`
+/// methods and is deliberately not object-safe.
+enum AnyXtm {
+    /// A connected proof wallet service (the `ghost-gate-minotari-wallet` binary).
+    Live(ghost_gate_minotari::http::HttpXtmChannel),
+    /// No Minotari wallet configured: every L1 proof is refused with an honest reason.
+    Absent(ghost_gate_bridge::xtm::NoXtm),
+}
+
+impl AnyXtm {
+    fn new(endpoint: Option<String>, expected_network: Option<u8>) -> Self {
+        match endpoint {
+            Some(endpoint) => Self::Live(ghost_gate_minotari::http::HttpXtmChannel::new(
+                endpoint,
+                expected_network,
+            )),
+            None => Self::Absent(ghost_gate_bridge::xtm::NoXtm),
+        }
+    }
+}
+
+impl XtmChannel for AnyXtm {
+    async fn status(&mut self) -> Result<XtmWalletStatus, WalletError> {
+        match self {
+            Self::Live(w) => w.status().await,
+            Self::Absent(w) => w.status().await,
+        }
+    }
+
+    async fn create_proof_transaction(
+        &mut self,
+        request: XtmProofRequest,
+    ) -> Result<XtmProofArtifact, WalletError> {
+        match self {
+            Self::Live(w) => w.create_proof_transaction(request).await,
+            Self::Absent(w) => w.create_proof_transaction(request).await,
+        }
+    }
+
+    async fn rebroadcast(&mut self, transaction_id: u64) -> Result<(), WalletError> {
+        match self {
+            Self::Live(w) => w.rebroadcast(transaction_id).await,
+            Self::Absent(w) => w.rebroadcast(transaction_id).await,
+        }
+    }
 }

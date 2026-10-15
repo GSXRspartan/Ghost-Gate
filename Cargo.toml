@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/ghost-gate-core",
+    "crates/ghost-gate-registry",
     "crates/ghost-gate-verifier",
     "crates/ghost-gate-wallet",
     "crates/ghost-gate-bridge",
@@ -87,6 +88,7 @@ thiserror = "2.0.17"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 hex = "0.4"
+ghost-gate-registry = { path = "crates/ghost-gate-registry" }
 rand = "0.10.1"
 tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "time", "sync"] }
 sha2 = "0.10.8"

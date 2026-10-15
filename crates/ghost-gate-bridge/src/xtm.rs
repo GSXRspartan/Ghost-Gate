@@ -211,7 +211,7 @@ pub async fn verify_xtm_proof(
     reader: &mut impl XtmChainReader,
     challenge: &XtmChallenge,
     artifact: &XtmProofArtifact,
-    now_unix: u64,
+    now_unix: u64, // used by the timestamp freshness check below
 ) -> Result<XtmProofReceipt, XtmProofError> {
     // 1. Committed evidence only. "Unknown to this node" covers the mempool: a transaction that
     //    has not been mined is not evidence, whatever a submission response said.

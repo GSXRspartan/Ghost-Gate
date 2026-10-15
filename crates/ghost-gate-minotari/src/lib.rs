@@ -15,6 +15,8 @@
 //! The binary `ghost-gate-minotari-wallet` runs the service against a base node.
 
 pub mod artifact;
+pub mod chain_reader;
+pub mod http;
 pub mod service;
 pub mod wallet_service;
 

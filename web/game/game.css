@@ -145,6 +145,13 @@ body.vault {
 .door-visual.crypt-visual { --door-color: var(--ember-dim); }
 .door-visual.vault-visual { --door-color: #3d5a4a; }
 .door-visual.abyss-visual { --door-color: var(--abyss); }
+.door-visual.otherside-visual { --door-color: #6b1249; }
+.door-visual.otherside-visual .door-glow {
+  background: radial-gradient(60% 50% at 50% 62%, rgba(216,127,255,.35), transparent 70%);
+}
+.door-visual.otherside-visual .door-crack {
+  background: linear-gradient(180deg, transparent, rgba(216,127,255,.5));
+}
 .door-visual.abyss-visual .door-glow {
   background: radial-gradient(60% 50% at 50% 62%, rgba(127,216,255,.35), transparent 70%);
 }

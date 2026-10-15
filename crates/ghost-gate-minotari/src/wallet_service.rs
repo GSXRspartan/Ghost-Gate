@@ -53,11 +53,10 @@ use minotari_wallet::{
     WalletConfig,
     WalletSqlite,
 };
-use tari_common::configuration::{MultiaddrList, Network};
+use tari_common::configuration::Network;
 use tari_common_types::{
     seeds::cipher_seed::CipherSeed,
     tari_address::TariAddress,
-    types::PrivateKey,
 };
 use tari_comms::{
     NodeIdentity,
@@ -65,8 +64,8 @@ use tari_comms::{
     peer_manager::PeerFeatures,
     types::CommsPublicKey,
 };
-use tari_p2p::{PeerSeedsConfig, TransportType};
-use tari_shutdown::{Shutdown, ShutdownSignal};
+use tari_p2p::TransportType;
+use tari_shutdown::Shutdown;
 use tari_transaction_components::{
     consensus::ConsensusManager,
     crypto_factories::CryptoFactories,
@@ -82,7 +81,6 @@ use tari_transaction_key_manager::{
     storage::sqlite_db::TransactionKeyManagerSqliteDatabase,
 };
 use tari_utilities::{SafePassword, ByteArray};
-use tokio::sync::mpsc;
 
 use ghost_gate_bridge::XtmProofArtifact;
 use crate::service::{XtmProofOutcome, largest_affordable_output_value, spend_signature_message};
@@ -228,7 +226,6 @@ impl ProofWalletService {
         node_addresses: Vec<Multiaddr>,
     ) -> Result<Arc<NodeIdentity>, String> {
         use minotari_wallet::wallet::derive_comms_secret_key;
-        use tari_crypto::keys::SecretKey;
 
         let node_features = wallet_db
             .get_node_features()
@@ -300,6 +297,7 @@ impl ProofWalletService {
         c.output_manager_service_config.num_confirmations_required = 0;
         c.output_manager_service_config.prevent_fee_gt_amount = false;
         c.transaction_service_config.num_confirmations_required = 0;
+        c.scanning_interval = 5;
         c.transaction_service_config.broadcast_send_timeout = config.broadcast_timeout;
         c.transaction_service_config.direct_send_timeout = config.broadcast_timeout;
         c.grpc_enabled = false;

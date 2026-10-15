@@ -47,6 +47,12 @@ const NETWORK: u8 = 0x10; // localnet
 /// The three doors, as the game's gate ids and raw thresholds.
 const DOORS: &[(&str, u64)] = &[("crypt", 100_000), ("vault", 500_000), ("abyss", 2_000_000)];
 
+/// The final gate: native Minotari L1 XTM, one million whole XTM. Configured in *base units*
+/// (micro-Minotari): 1,000,000 XTM × 1,000,000 micro. Deployed by the operator's bridge config,
+/// not here — the L1 gate has no Ootle component — but the figure is recorded so the printed
+/// bridge line and the docs agree.
+pub const MILLION_XTM_THRESHOLD_MICRO: u64 = 1_000_000 * 1_000_000;
+
 struct Ctx {
     client: WalletDaemonClient,
     account: Account,

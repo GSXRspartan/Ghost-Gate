@@ -35,6 +35,10 @@ export const PHANTOM_INTRO = {
   abyss:
     "Final audit. Repeat my echoes and I shall consider signing. Fail, and I shall consider NOT " +
     "signing — which, I will be honest with you, is my default state.",
+  otherside:
+    "So you've heard about the other side. The base layer itself. I never mined enough — the " +
+    "miner keeps a schedule I do not respect. Prove a million and the door is yours. No, I won't " +
+    "tell you the balance. I don't know it. NOBODY knows it. That is rather the point.",
 };
 
 /** Reactions. */
@@ -51,6 +55,7 @@ export const PHANTOM_ON_FRAGMENT = {
     "You found the true spine. Annoying. Do you know how hard it is to fork a chain AND keep the " +
     "garden tidy?",
   abyss: "", // the ending speaks for itself
+  otherside: "", // the chamber speaks for itself
 };
 
 /** Chapter II hints — progressive, never the answer. */
@@ -281,7 +286,7 @@ export function chapter3WrongReason(pressed, palePads, reverse) {
 /* Fragments, secrets, ending                                           */
 /* ------------------------------------------------------------------ */
 
-/** The three fragments of evidence. Each body is shown in its own presentation. */
+/** The fragments of evidence. Each body is shown in its own presentation. */
 export const FRAGMENTS = {
   crypt: {
     id: "crypt",
@@ -315,6 +320,14 @@ export const FRAGMENTS = {
     cta: "",
     body: [],
   },
+  otherside: {
+    id: "otherside",
+    numeral: "IV",
+    title: "The Other Side",
+    kind: "ending",
+    cta: "",
+    body: [],
+  },
 };
 
 /** Case-file summaries shown in the Sanctum review. */
@@ -322,6 +335,7 @@ export const CASE_FILE_LINES = {
   crypt: "Fragment I — The Altered Ledger: the Stranger's stone was forged under the mark 𝕶.",
   vault: "Fragment II — The Missing Parent: the true spine is 5→6→7, and the Phantom fears disclosure, not defeat.",
   abyss: "Fragment III — The Validator's Oath: signed. The Lost Epoch is final.",
+  otherside: "Fragment IV — The Other Side: a million-XTM floor, proven on the base layer. No balance disclosed.",
 };
 
 /** The ∴ whispers, rewritten for the story. */
@@ -343,6 +357,11 @@ export const SECRETS = {
     text:
       "The last echo you repeated was not the Phantom's. It was yours, from a room you have not " +
       "entered yet. It sounded, unmistakably, like a signature.",
+  },
+  otherside: {
+    title: "Whisper from the other side",
+    text:
+      "A miner's scratch, deep in the rock: 'the floor is public. The rest is Pedersen.'",
   },
 };
 

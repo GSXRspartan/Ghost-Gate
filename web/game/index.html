@@ -57,7 +57,7 @@
       <p class="hint" id="sanctum-intro"></p>
       <p class="phantom-say" id="phantom-presence" aria-live="polite"></p>
       <div class="hud">
-        <span class="hud-item" title="Fragments of evidence">⛁ <b id="hud-frags">0</b>/3 fragments</span>
+        <span class="hud-item" title="Fragments of evidence">⛁ <b id="hud-frags">0</b>/4 fragments</span>
         <span class="hud-item" title="Secrets found">👁 <b id="hud-secrets">0</b> whispers</span>
         <span class="hud-item">
           <button id="btn-wallet" class="btn small">Wallet</button>
@@ -118,6 +118,23 @@
         <p class="door-req">Sealed · requires <b class="door-threshold">…</b></p>
         <p class="door-frag hint"></p>
         <p class="door-lore hint">Eight hundred years without a signature. He has notes.</p>
+        <div class="door-actions">
+          <button class="btn primary door-prove">Break the seal</button>
+          <button class="btn ghost door-enter" hidden>Enter</button>
+        </div>
+      </article>
+
+      <article class="door" id="door-otherside" data-gate="otherside">
+        <div class="door-visual otherside-visual">
+          <div class="door-left"></div><div class="door-right"></div>
+          <div class="door-crack"></div>
+          <div class="door-glow" aria-hidden="true"></div>
+          <span class="door-sigil" aria-hidden="true">⛏</span>
+        </div>
+        <h3 class="door-name">IV — THE OTHER SIDE</h3>
+        <p class="door-req">Sealed · requires <b class="door-threshold">…</b></p>
+        <p class="door-frag hint"></p>
+        <p class="door-lore hint">Not an Ootle token. Native Minotari, proved on the base layer itself. The exact balance is never disclosed — only that a qualifying floor was met.</p>
         <div class="door-actions">
           <button class="btn primary door-prove">Break the seal</button>
           <button class="btn ghost door-enter" hidden>Enter</button>
@@ -239,6 +256,26 @@
       </div>
     </div>
     <div class="secret-glyph" data-secret="abyss" title="·">∴</div>
+  </section>
+
+  <!-- ==================== CHAPTER IV — THE OTHER SIDE ==================== -->
+  <section id="chamber-otherside" class="chamber chamber-otherside" hidden>
+    <header class="chamber-head">
+      <h2>Chapter IV — THE OTHER SIDE</h2>
+      <p class="chamber-sub hint">The base layer itself. A qualifying floor was proven on Minotari L1; the exact balance was never disclosed — to this page or to anyone.</p>
+      <button class="btn small ghost chamber-leave">Back to the Sanctum</button>
+    </header>
+    <div class="chamber-body">
+      <p>MILLION-XTM THRESHOLD PROVEN.</p>
+      <p class="hint">
+        The proof was a real Minotari transaction: an output whose public, consensus-enforced
+        minimum value promise, added to the kernel's fee, was at least 1,000,000 XTM — mined after
+        this session's challenge was issued, and signed by the proving key. What the chain publishes
+        is the floor. What it does not publish is your balance.
+      </p>
+      <p class="hint">The Lost Epoch is closed. The Phantom has no notes on the base layer.</p>
+    </div>
+    <div class="secret-glyph" data-secret="otherside" title="·">∴</div>
   </section>
 
   <!-- ==================== FRAGMENT PRESENTATION (dossier / chain) ==================== -->

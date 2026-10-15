@@ -124,6 +124,31 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             xtm_chain,
         }
     }
+
+    /// The full bridge: Ootle consensus + credential + native L1 XTM. Every route this crate has.
+    pub fn assemble_full(
+        gates: GateRegistry,
+        wallet: W,
+        origins: OriginPolicy,
+        chain: R,
+        xtm: X,
+        xtm_chain: Option<XR>,
+    ) -> Self {
+        Self {
+            gates,
+            challenges: ChallengeBook::new(),
+            jobs: Vec::new(),
+            wallet,
+            origins,
+            challenge_ttl: crate::session::DEFAULT_CHALLENGE_TTL,
+            challenge_expires_epoch: DEFAULT_CHALLENGE_EXPIRES_EPOCH,
+            asset_dir: std::path::PathBuf::from("web"),
+            chain: Some(chain),
+            permitted_hosts: default_permitted_hosts(),
+            xtm,
+            xtm_chain,
+        }
+    }
 }
 
 impl<W: WalletChannel> Bridge<W, crate::credential::NoChainReader, crate::xtm::NoXtm, crate::xtm::NoXtmChainReader> {
@@ -203,6 +228,34 @@ impl<W: WalletChannel, X: crate::xtm::XtmChannel, XR: crate::xtm::XtmChainReader
     Bridge<W, crate::credential::NoChainReader, X, XR>
 {
     pub fn with_xtm(
+        gates: GateRegistry,
+        wallet: W,
+        origins: OriginPolicy,
+        xtm: X,
+        xtm_chain: Option<XR>,
+    ) -> Self {
+        Self {
+            gates,
+            challenges: ChallengeBook::new(),
+            jobs: Vec::new(),
+            wallet,
+            origins,
+            challenge_ttl: crate::session::DEFAULT_CHALLENGE_TTL,
+            asset_dir: std::path::PathBuf::from("web"),
+            chain: None,
+            permitted_hosts: default_permitted_hosts(),
+            challenge_expires_epoch: DEFAULT_CHALLENGE_EXPIRES_EPOCH,
+            xtm,
+            xtm_chain,
+        }
+    }
+}
+
+impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChannel, XR: crate::xtm::XtmChainReader>
+    Bridge<W, R, X, XR>
+{
+    /// Sugar for the bridge binary's no-indexer arm, keeping the concrete types loose.
+    pub fn with_xtm_full(
         gates: GateRegistry,
         wallet: W,
         origins: OriginPolicy,

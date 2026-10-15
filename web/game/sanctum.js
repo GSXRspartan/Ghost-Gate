@@ -26,7 +26,7 @@ import {
 } from "./story.js";
 import { buildChapter1, buildChapter2, buildChapter3 } from "./chapters.js";
 
-const GATES = ["crypt", "vault", "abyss"];
+const GATES = ["crypt", "vault", "abyss", "otherside"];
 const $ = (id) => document.getElementById(id);
 
 /* ------------------------------- state ------------------------------- */
@@ -103,6 +103,14 @@ window.addEventListener("DOMContentLoaded", () => {
   chapters.crypt = buildChapter1(chapterApi);
   chapters.vault = buildChapter2(chapterApi);
   chapters.abyss = buildChapter3(chapterApi);
+  // Chapter IV has no puzzle: the million-XTM door's chamber is the finale's coda. Entering it
+  // grants the fragment (cosmetic progress) directly.
+  chapters.otherside = {
+    enter() {
+      grantFragment("otherside");
+    },
+    leave() {},
+  };
 });
 
 const chapters = {};
@@ -215,9 +223,16 @@ async function loadGateMetadata() {
       const res = await fetch(`/gate/${encodeURIComponent(gate)}`);
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || res.status);
-      const div = Number(json.divisibility ?? 0);
-      el.textContent = `${json.threshold} raw units` +
-        (formatAmount(json.threshold, div) ? ` (${formatAmount(json.threshold, div)})` : "");
+      // The proof kind names the machinery: an L1 XTM gate renders its threshold in XTM (the
+      // threshold arrives in base units; a million micro per XTM), an Ootle gate in its resource's
+      // divisibility. The kind is displayed so the user knows which wallet will be involved.
+      if (json.proof_kind === "minotari_xtm") {
+        el.textContent = `≥ ${Number(json.threshold / 1_000_000n).toLocaleString("en-US")} XTM (native Minotari L1)`;
+      } else {
+        const div = Number(json.divisibility ?? 0);
+        el.textContent = `${json.threshold} raw units` +
+          (formatAmount(json.threshold, div) ? ` (${formatAmount(json.threshold, div)})` : "");
+      }
       doorEl(gate).dataset.threshold = json.threshold;
       gateMetadata[gate] = json;
     } catch (e) {
@@ -346,15 +361,37 @@ async function proveFor(gate) {
     const ch = await post(`/gate/${gate}/challenge`, {});
     setProofStep("challenge", "done");
 
-    // Two verified paths, chosen by the wallet the user picked — never by what would be easiest:
-    //  - walletd (consensus): the bridge drives the user's own wallet daemon; the network executes
-    //    the proof and the gate attests the floor.
-    //  - browser wallets (credential): the wallet first creates a REAL output publicly committing
-    //    to the threshold, then signs the gate's challenge over it; the bridge verifies against
-    //    chain state before the door opens.
-    const isConsensus = session.provider.id === "walletd";
+    // Three verified paths, chosen by the GATE's own registered proof kind — never by what would
+    // be easiest:
+    //  - minotari_xtm: the bridge drives the user's own Minotari proof wallet; a pay-to-self
+    //    transaction with a consensus-enforced minimum value promise is created for THIS
+    //    challenge, mined, and verified against base-node data. The exact balance is never
+    //    disclosed by anyone.
+    //  - walletd (ootle consensus): the bridge drives the user's Ootle wallet daemon; the network
+    //    executes the proof and the gate attests the floor.
+    //  - browser wallets (ootle credential): the wallet first creates a REAL output publicly
+    //    committing to the threshold, then signs the gate's challenge over it; the bridge
+    //    verifies against chain state before the door opens.
+    const kind = gateMeta(gate)?.proof_kind || (gate === "otherside" ? "minotari_xtm" : "ootle");
     let verdict;
-    if (isConsensus) {
+    if (kind === "minotari_xtm") {
+      setProofStep("statement", "active");
+      $("proof-line").textContent = "Your Minotari wallet is building the proof transaction for this challenge.";
+      const proof = await post(`/gate/${gate}/prove`, {
+        gate_id: gate,
+        challenge_nonce: ch.challenge_nonce,
+        session_commitment: ch.session_commitment,
+      });
+      setProofStep("statement", "done");
+      setProofStep("submit", "done");
+
+      setProofStep("wait", "active");
+      $("proof-line").textContent = "Waiting for a block. The floor is public; the balance is not.";
+      verdict = await pollProof(proof.proof_id, 240);
+      if (verdict.state === "accepted") {
+        verdict._floor = verdict.result?.attested_minimum;
+      }
+    } else if (session.provider.id === "walletd" || kind === "ootle") {
       setProofStep("statement", "active");
       $("proof-line").textContent = "Your wallet daemon is preparing the proof. Approve it there.";
       const proof = await post(`/gate/${gate}/prove`, {
@@ -405,12 +442,16 @@ async function proveFor(gate) {
         : { state: "failed", reason: "unexpected verdict" };
     }
 
-    // Both branches above have already resolved to a terminal verdict — the consensus path by
-    // polling its proof id, the credential path from the bridge's own accept/refuse response.
-    // There is nothing left to poll here. Judge the door on this single verdict.
+    // All branches above have already resolved to a terminal verdict — the L1 path by polling its
+    // proof id, the Ootle consensus path likewise, the credential path from the bridge's own
+    // accept/refuse response. There is nothing left to poll here. Judge the door on this single
+    // verdict.
     if (verdict.state === "accepted") {
       session.unlocked.add(gate);
-      $("proof-line").textContent = "The seal breaks.";
+      $("proof-line").textContent =
+        kind === "minotari_xtm"
+          ? "The seal breaks. MILLION-XTM THRESHOLD PROVEN — the exact balance was never disclosed."
+          : "The seal breaks.";
       await sleep(900);
       $("proof-overlay").hidden = true;
       doorOpeningAnimation(gate);
@@ -494,7 +535,7 @@ function grantFragment(id) {
   const f = FRAGMENTS[id];
   const overlay = $("fragment-overlay");
   overlay.className = f.kind === "chain" ? "chain-presentation" : "dossier-presentation";
-  $("fragment-kicker").textContent = `Fragment ${f.numeral} of III — recovered`;
+  $("fragment-kicker").textContent = `Fragment ${f.numeral} of IV — recovered`;
   $("fragment-title").textContent = f.title;
   const body = $("fragment-body");
   body.replaceChildren();
