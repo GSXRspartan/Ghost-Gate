@@ -21,8 +21,8 @@
 //!   nothing about version N+1: re-verification needs fresh evidence.
 
 pub use ghost_gate_core::policy::{
-    hash_policy, now_unix, Application, PolicyHasher, PolicyVersion, ReplacementRecord,
-    MAX_SESSION_TTL, MIN_SESSION_TTL,
+    hash_policy, now_unix, Application, GatePolicy, PolicyHasher, PolicyVersion,
+    ReplacementRecord, CHALLENGE_TTL, DEFAULT_SESSION_TTL, MAX_SESSION_TTL, MIN_SESSION_TTL,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -661,7 +661,7 @@ pub fn prune_sessions(sessions: &mut Vec<VerifiedSession>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ghost_gate_core::policy::ProofMode;
+    use ghost_gate_core::policy::{GateTopology, ProofMode};
 
     fn hasher() -> Blake3Hasher {
         Blake3Hasher
