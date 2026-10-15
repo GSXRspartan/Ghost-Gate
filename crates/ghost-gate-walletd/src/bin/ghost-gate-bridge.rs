@@ -225,7 +225,11 @@ fn main() -> ExitCode {
         Some(endpoint) => match IndexerChainReader::connect(&endpoint) {
             Ok(reader) => {
                 println!("  indexer: {endpoint} (credential mode enabled)");
-                let bridge = Bridge::assemble_full(registry, wallet, config.origins, reader, xtm_channel, xtm_chain);
+                let mut bridge = Bridge::assemble_full(registry, wallet, config.origins, reader, xtm_channel, xtm_chain);
+                if let Err(e) = attach_access_plane(&mut bridge) {
+                    eprintln!("ghost-gate-bridge: {e}");
+                    return ExitCode::FAILURE;
+                }
                 runtime.block_on(ghost_gate_bridge::server::serve(&config.bind, bridge))
             }
             Err(e) => {
@@ -238,7 +242,11 @@ fn main() -> ExitCode {
                 "  note: GG_INDEXER_ENDPOINT is not set, so the credential proof mode (browser \
                  wallets) is disabled; the consensus mode through walletd is unaffected."
             );
-            let bridge = Bridge::<AnyWallet, ghost_gate_bridge::credential::NoChainReader, AnyXtm, _>::with_xtm_full(registry, wallet, config.origins, xtm_channel, xtm_chain);
+            let mut bridge = Bridge::<AnyWallet, ghost_gate_bridge::credential::NoChainReader, AnyXtm, _>::with_xtm_full(registry, wallet, config.origins, xtm_channel, xtm_chain);
+            if let Err(e) = attach_access_plane(&mut bridge) {
+                eprintln!("ghost-gate-bridge: {e}");
+                return ExitCode::FAILURE;
+            }
             runtime.block_on(ghost_gate_bridge::server::serve(&config.bind, bridge))
         }
     };
@@ -562,4 +570,63 @@ impl XtmChannel for AnyXtm {
             Self::Absent(w) => w.rebroadcast(transaction_id).await,
         }
     }
+}
+
+/// Attaches the verified-access plane when GG_BINDINGS_PATH names the admin registry's data
+/// directory. Refuses to start on a corrupt snapshot (fail closed), rebuilds the gate registry
+/// from the authoritative snapshot — the admin plane becomes the only source of gate policy —
+/// and reports how many gates the registry bound.
+///
+/// A bridge without GG_BINDINGS_PATH keeps working exactly as before: the env-configured path is
+/// not affected by any of this.
+fn attach_access_plane<W, R, X, XR>(
+    bridge: &mut Bridge<W, R, X, XR>,
+) -> Result<(), String>
+where
+    W: ghost_gate_bridge::wallet::WalletChannel,
+    R: ghost_gate_bridge::credential::ChainReader,
+    X: ghost_gate_bridge::xtm::XtmChannel,
+    XR: ghost_gate_bridge::xtm::XtmChainReader,
+{
+    let Some(dir) = std::env::var("GG_BINDINGS_PATH")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+    else {
+        return Ok(());
+    };
+    // The env var names the registry's data directory (where bindings.json lives).
+    let paths = ghost_gate_registry::StorePaths::new(std::path::Path::new(&dir));
+    let snapshot = match ghost_gate_registry::load_bindings(&paths)? {
+        Some(s) => s,
+        None => {
+            return Err(format!(
+                "GG_BINDINGS_PATH is set but no bindings file exists at {}",
+                paths.bindings().display()
+            ))
+        }
+    };
+    let (mut handle, count) = ghost_gate_bridge::access::AccessHandle::from_snapshot(&paths, &snapshot);
+    let mut registry = GateRegistry::new();
+    let mut bound = 0usize;
+    for snap in &snapshot.gates {
+        // Test-lane gates never bind the production listener: a test session is issued by the
+        // bridge only for gates whose access info says test_lane, and this loop keeps even the
+        // public challenge routes of a test gate off this process.
+        if snap.test_lane {
+            continue;
+        }
+        let binding = ghost_gate_bridge::access::binding_from_snapshot(snap)?;
+        registry
+            .register(snap.gate_id.clone(), binding)
+            .map_err(|e| format!("gate {}: {e}", snap.gate_id))?;
+        bound += 1;
+    }
+    bridge.gates = registry;
+    handle.plane.apply_revocations(&snapshot.revoked_session_prefixes)?;
+    bridge.access = Some(handle);
+    println!(
+        "  access plane: registry-backed ({bound} of {count} snapshot gates bound; {} revocation prefixes)",
+        snapshot.revoked_session_prefixes.len()
+    );
+    Ok(())
 }

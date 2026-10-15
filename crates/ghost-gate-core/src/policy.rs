@@ -59,7 +59,7 @@ pub const CHALLENGE_TTL: std::time::Duration = std::time::Duration::from_secs(18
 /// wire — because dashboard JavaScript cannot hold a threshold above 2^53 in a number without
 /// losing integer precision, and a threshold that silently rounds is a threshold nobody can audit.
 mod u128_flexible {
-    use serde::{Deserialize, Deserializer, Serializer};
+    use serde::{Deserializer, Serializer};
     pub fn serialize<S: Serializer>(v: &u128, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_str(&v.to_string())
     }

@@ -35,6 +35,9 @@ pub struct Request {
     pub path: String,
     /// The `Origin` header, if the caller sent one. `None` means not a browser.
     pub origin: Option<String>,
+    /// Query parameters, parsed from the target. Only routes that take parameters read this; the
+    /// map is present so a route can require a parameter rather than silently defaulting.
+    pub query: std::collections::BTreeMap<String, String>,
     /// The `Host` header, if the caller sent one.
     ///
     /// Checked because of DNS rebinding: a page that resolves a name it controls to `127.0.0.1`
@@ -92,6 +95,9 @@ pub enum Route<'a> {
     Credential(&'a str),
     /// `GET /proof/:id/status`
     ProofStatus(&'a str),
+    /// Server-side verified-access check: token + gate. The decision is computed here, never in
+    /// a browser.
+    AccessCheck,
     /// A file from the bridge's own static directory: `GET /`, `/app.css`, `/app.js`.
     ///
     /// Served by the bridge rather than by a second server so the page and the API share one origin.
@@ -120,6 +126,7 @@ impl<'a> Route<'a> {
             ("POST", ["gate", id, "prove"]) => Route::Prove(id),
             ("POST", ["gate", id, "credential"]) => Route::Credential(id),
             ("GET", ["proof", id, "status"]) => Route::ProofStatus(id),
+            ("GET", ["access", "check"]) => Route::AccessCheck,
             ("GET", []) => Route::Asset("index.html"),
             ("GET", ["index.html"]) => Route::Asset("index.html"),
             ("GET", ["app.css"]) => Route::Asset("app.css"),
@@ -164,8 +171,19 @@ pub fn parse_request(raw: &str) -> Option<Request> {
         _ => return None,
     };
 
-    // Drop the query string: no route takes parameters, so nothing is lost by refusing to interpret one.
-    let path = target.split('?').next().unwrap_or("/").to_string();
+    // Query parameters are captured verbatim; no route interprets them unless it needs one, and
+    // /access/check reads them server-side only.
+    let (path_raw, query_raw) = match target.split_once('?') {
+        Some((p, q)) => (p, q),
+        None => (target, ""),
+    };
+    let path = path_raw.to_string();
+    let mut query = std::collections::BTreeMap::new();
+    for pair in query_raw.split('&') {
+        if pair.is_empty() { continue; }
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        query.insert(url_decode(k), url_decode(v));
+    }
 
     let mut origin = None;
     let mut host = None;
@@ -187,10 +205,38 @@ pub fn parse_request(raw: &str) -> Option<Request> {
     Some(Request {
         method,
         path,
+        query,
         origin,
         host,
         body: raw[body_start..].to_string(),
     })
+}
+
+/// Percent-decoding for query values, minimal and strict: `%XX` and `+` only. A value that does
+/// not decode cleanly stays as-is rather than being half-transformed.
+fn url_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hex_bytes = [bytes[i + 1], bytes[i + 2]];
+                if let Ok(text) = std::str::from_utf8(&hex_bytes) {
+                    if let Ok(v) = u8::from_str_radix(text, 16) {
+                        out.push(v);
+                        i += 3;
+                        continue;
+                    }
+                }
+                out.push(bytes[i]);
+                i += 1;
+            }
+            b'+' => { out.push(b' '); i += 1; }
+            c => { out.push(c); i += 1; }
+        }
+    }
+    String::from_utf8_lossy(&out).to_string()
 }
 
 /// Renders a response as an HTTP/1.1 message.

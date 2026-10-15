@@ -880,3 +880,148 @@ mod tests {
         assert!(MIN_SESSION_TTL <= DEFAULT_SESSION_TTL);
     }
 }
+
+/// The access plane the bridge uses: it issues verified sessions on accepted proofs, answers
+/// access checks entirely server-side, and re-reads the registry's derived bindings when they
+/// change. Sessions persist to disk so a bridge restart does not silently end anyone's session
+/// early — and so the admin plane can see and revoke them.
+pub struct AccessPlane {
+    pub paths: StorePaths,
+    /// Cached registry with the mtime it was loaded at; re-read when the file changes.
+    cached_registry: Option<(Registry, std::time::SystemTime)>,
+    /// Cached sessions with the mtime they were loaded at.
+    cached_sessions: Option<(Vec<VerifiedSession>, std::time::SystemTime)>,
+}
+
+/// What the bridge needs to know about one bound gate, derived from the snapshot. Tier grants
+/// come from the policy, resolved server-side — never from anything a browser says.
+#[derive(Debug, Clone)]
+pub struct GateAccessInfo {
+    pub application_id: String,
+    pub policy_hash: String,
+    pub policy_version: u64,
+    pub session_ttl_secs: u64,
+    pub test_lane: bool,
+    pub grants: Vec<String>,
+}
+
+impl AccessPlane {
+    pub fn new(paths: StorePaths) -> Self {
+        Self { paths, cached_registry: None, cached_sessions: None }
+    }
+
+    /// Fresh registry, re-reading the file when it changed. A corrupt file is refused: the caller
+    /// keeps its last-known-good state and logs — never half-trusts.
+    pub fn registry(&mut self) -> Result<Registry, String> {
+        let path = self.paths.bindings(); // touch the pair, but the registry is the source
+        let _ = &path;
+        let reg_path = self.paths.registry();
+        let mtime = fs::metadata(&reg_path).and_then(|m| m.modified()).ok();
+        if let Some((_, cached_at)) = &self.cached_registry {
+            if mtime == Some(*cached_at) {
+                return Ok(self.cached_registry.as_ref().unwrap().0.clone());
+            }
+        }
+        let reg = load_registry(&self.paths)?;
+        if let Some(t) = mtime {
+            self.cached_registry = Some((reg.clone(), t));
+        }
+        Ok(reg)
+    }
+
+    pub fn sessions(&mut self) -> Result<Vec<VerifiedSession>, String> {
+        let path = self.paths.sessions();
+        let mtime = fs::metadata(&path).and_then(|m| m.modified()).ok();
+        if let (Some((list, cached_at)), Some(t)) = (&self.cached_sessions, &mtime) {
+            if t == cached_at {
+                return Ok(list.clone());
+            }
+        }
+        let list = load_sessions(&self.paths)?;
+        if let Some(t) = mtime {
+            self.cached_sessions = Some((list.clone(), t));
+        }
+        Ok(list)
+    }
+
+    /// Issue a session for an accepted proof and persist it. Returns the grant for the wire.
+    pub fn issue(
+        &mut self,
+        application_id: &str,
+        gate_id: &str,
+        policy_hash: String,
+    ) -> Result<AccessGrant, String> {
+        let reg = self.registry()?;
+        let _lock = StoreLock::acquire(&self.paths)?;
+        // Reload under the lock: another process (or our own past self) may have written.
+        let mut fresh = load_sessions(&self.paths)?;
+        prune_sessions(&mut fresh);
+        let mut entropy = [0u8; 32];
+        let session = issue_session(&reg, application_id, gate_id, policy_hash, &mut entropy)?;
+        let grant = AccessGrant {
+            token: session.token.clone(),
+            application_id: session.application_id.clone(),
+            proven_gate: session.proven_gate.clone(),
+            granted: session.granted.clone(),
+            expires_unix: session.expires_unix,
+            test_lane: session.test_lane,
+        };
+        fresh.push(session);
+        save_sessions(&self.paths, &fresh)?;
+        self.cached_sessions = Some((fresh, std::time::SystemTime::now()));
+        Ok(grant)
+    }
+
+    /// The server-side access decision for one (token, application, gate) request.
+    pub fn check(
+        &mut self,
+        token: &str,
+        application_id: &str,
+        gate_id: &str,
+    ) -> Result<AccessDecision, String> {
+        let reg = self.registry()?;
+        let sessions = self.sessions()?;
+        Ok(check_access(&reg, &sessions, token, application_id, gate_id, now_unix()))
+    }
+
+    /// Apply revoked-token prefixes from the bindings snapshot: any live session whose token
+    /// starts with a prefix is revoked and persisted.
+    pub fn apply_revocations(&mut self, prefixes: &[String]) -> Result<usize, String> {
+        if prefixes.is_empty() {
+            return Ok(0);
+        }
+        let _lock = StoreLock::acquire(&self.paths)?;
+        let mut sessions = load_sessions(&self.paths)?;
+        let mut n = 0;
+        for s in sessions.iter_mut() {
+            if !s.revoked && prefixes.iter().any(|p| s.token.starts_with(p.as_str())) {
+                s.revoked = true;
+                n += 1;
+            }
+            // Whole-application kill switch: `app:<id>:*`.
+            for p in prefixes {
+                if let Some(app_id) = p.strip_prefix("app:").and_then(|r| r.strip_suffix(":*")) {
+                    if !s.revoked && s.application_id == app_id {
+                        s.revoked = true;
+                        n += 1;
+                    }
+                }
+            }
+        }
+        save_sessions(&self.paths, &sessions)?;
+        self.cached_sessions = None; // force a re-read next check
+        Ok(n)
+    }
+}
+
+/// The wire form of a newly granted session, returned inside an accepted proof status.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccessGrant {
+    pub token: String,
+    pub application_id: String,
+    pub proven_gate: String,
+    pub granted: Vec<String>,
+    pub expires_unix: u64,
+    pub test_lane: bool,
+}

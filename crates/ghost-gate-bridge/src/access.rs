@@ -1,0 +1,160 @@
+//! The bridge side of verified access: read the registry's bindings snapshot, rebuild the gate
+//! registry when it changes, issue sessions on accepted proofs, answer /access/check entirely
+//! server-side, and honour revocations.
+//!
+//! Fail-closed rules:
+//! - A corrupt bindings file never replaces a working registry: the last-known-good gates keep
+//!   serving and the parse error is logged once.
+//! - A session is bound to the policy hash it was proved under. A published replacement invalidates
+//!   it: fresh evidence required, no grandfathering.
+//! - A test-lane session can never authorise a production gate, whatever it proves.
+
+use ghost_gate_registry::{AccessDecision, AccessGrant, AccessPlane, Bindings, GateBindingSnapshot};
+
+/// What the bridge needs to know about one bound gate, derived from the snapshot. Tier grants
+/// come from the policy, resolved server-side — never from anything a browser says.
+#[derive(Debug, Clone)]
+pub struct GateAccessInfo {
+    pub application_id: String,
+    pub policy_hash: String,
+    pub policy_version: u64,
+    pub session_ttl_secs: u64,
+    pub test_lane: bool,
+    pub grants: Vec<String>,
+}
+
+/// Where the bridge's gates came from when it is registry-backed.
+pub struct AccessHandle {
+    pub plane: AccessPlane,
+    /// gate_id -> access info, from the snapshot.
+    pub index: std::collections::BTreeMap<String, GateAccessInfo>,
+    /// The bindings mtime this index was built from.
+    pub bindings_mtime: Option<std::time::SystemTime>,
+}
+
+impl AccessHandle {
+    /// Build from the current snapshot. `None` when no snapshot exists yet.
+    pub fn from_snapshot(paths: &ghost_gate_registry::StorePaths, snapshot: &Bindings) -> (Self, usize) {
+        let mut index = std::collections::BTreeMap::new();
+        for g in &snapshot.gates {
+            index.insert(
+                g.gate_id.clone(),
+                GateAccessInfo {
+                    application_id: g.application_id.clone(),
+                    policy_hash: g.policy_hash.clone(),
+                    policy_version: g.policy_version,
+                    session_ttl_secs: g.session_ttl_secs,
+                    test_lane: g.test_lane,
+                    grants: g.grants.clone(),
+                },
+            );
+        }
+        let mtime = std::fs::metadata(paths.bindings()).and_then(|m| m.modified()).ok();
+        (
+            Self {
+                plane: AccessPlane::new(paths.clone()),
+                index,
+                bindings_mtime: mtime,
+            },
+            snapshot.gates.len(),
+        )
+    }
+
+    /// Re-read the bindings file when it changed, rebuilding the gate registry and the access
+    /// index. Returns (reloaded, gate_count). On a parse failure the LAST-KNOWN-GOOD state is
+    /// kept — the caller logs and continues.
+    pub fn reload_if_changed(
+        &mut self,
+        paths: &ghost_gate_registry::StorePaths,
+        rebuild: &mut dyn FnMut(&[GateBindingSnapshot]) -> Result<(), String>,
+    ) -> Result<(bool, usize), String> {
+        let mtime = std::fs::metadata(paths.bindings()).and_then(|m| m.modified()).ok();
+        if mtime == self.bindings_mtime {
+            return Ok((false, self.index.len()));
+        }
+        let Some(snapshot) = ghost_gate_registry::load_bindings(paths)? else {
+            return Ok((false, self.index.len()));
+        };
+        rebuild(&snapshot.gates)?;
+        let (handle, count) = Self::from_snapshot(paths, &snapshot);
+        self.index = handle.index;
+        self.bindings_mtime = handle.bindings_mtime;
+        // Revocations ride the snapshot; apply them to the persisted sessions.
+        let revoked = self.plane.apply_revocations(&snapshot.revoked_session_prefixes)?;
+        let _ = revoked;
+        Ok((true, count))
+    }
+
+    /// The access info for a gate, if this bridge serves it from the registry.
+    pub fn info(&self, gate_id: &str) -> Option<&GateAccessInfo> {
+        self.index.get(gate_id)
+    }
+
+    /// Issue a session for an accepted proof.
+    pub fn grant(&mut self, gate_id: &str) -> Result<AccessGrant, String> {
+        let info = self
+            .index
+            .get(gate_id)
+            .ok_or_else(|| format!("gate {gate_id} is not registry-bound"))?
+            .clone();
+        self.plane.issue(&info.application_id, gate_id, info.policy_hash)
+    }
+
+    /// The full server-side access decision.
+    pub fn check(&mut self, token: &str, gate_id: &str) -> AccessDecision {
+        let Some(info) = self.index.get(gate_id).cloned() else {
+            return AccessDecision {
+                authorized: false,
+                reason: "unknown gate".into(),
+                granted: vec![],
+                expires_unix: 0,
+                policy_version: 0,
+            };
+        };
+        match self.plane.check(token, &info.application_id, gate_id) {
+            Ok(d) => d,
+            Err(e) => AccessDecision {
+                authorized: false,
+                reason: e,
+                granted: vec![],
+                expires_unix: 0,
+                policy_version: 0,
+            },
+        }
+    }
+}
+
+/// Build the engine's GateBinding from a registry snapshot entry. The snapshot is authoritative:
+/// the bridge never learns a gate's threshold, resource or component from a browser.
+pub fn binding_from_snapshot(
+    snap: &GateBindingSnapshot,
+) -> Result<crate::gate_registry::GateBinding, String> {
+    use ghost_gate_core::network;
+    use tari_template_lib_types::{ComponentAddress, ResourceAddress};
+    let component: ComponentAddress = try_parse_address(&snap.component_address, "component")?;
+    let resource: ResourceAddress = try_parse_address(&snap.resource_address, "resource")?;
+    Ok(crate::gate_registry::GateBinding::ootle(
+        component,
+        resource,
+        u64::try_from(snap.threshold_raw).map_err(|_| "threshold exceeds u64 for the engine binding")?,
+        network::LOCALNET,
+        challenge_domain_bytes(&snap.challenge_domain)?,
+        snap.divisibility,
+        snap.symbol.clone(),
+    ))
+}
+
+/// The template address types may not implement FromStr; they construct from a string via their
+/// own conversion. Try the available paths and refuse loudly when none apply.
+fn try_parse_address<T>(addr: &str, kind: &str) -> Result<T, String>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    T::from_str(addr).map_err(|e| format!("{kind} address {addr:?}: {e}"))
+}
+
+fn challenge_domain_bytes(domain: &str) -> Result<tari_template_lib_types::MaxBytes<64>, String> {
+    tari_template_lib_types::MaxBytes::new_checked(domain.as_bytes().to_vec())
+        .ok_or_else(|| format!("challenge domain {domain:?} exceeds 64 bytes"))
+}

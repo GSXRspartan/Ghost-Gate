@@ -36,10 +36,38 @@ TELEGRAM_BIN="$BIN_DIR/ghost-gate-telegram"
 BUILD_FLAG=""
 
 echo "== building (only what changed; the target dir is warm) =="
-if cargo build -p ghost-gate-walletd --bin ghost-gate-bridge; then BUILD_FLAG="bridge"; fi
+# A FAILED BUILD MUST NOT LAUNCH A STALE BINARY. Previously a compile error was swallowed here and
+# the script went on to announce "The Haunted Vault is up" while serving whatever binary happened
+# to exist from the last successful build — a silently outdated deployment reporting success.
+# Now: a build failure stops the launch unless --preview-only is given explicitly, and what runs
+# is always identified by its path and build time.
+if ! cargo build -p ghost-gate-walletd --bin ghost-gate-bridge; then
+  echo >&2 "==============================================================="
+  echo >&2 "BUILD FAILED — refusing to launch a possibly stale binary."
+  echo >&2 "Run with --preview-only to start the EXISTING binary anyway"
+  echo >&2 "(identified below by build time), or fix the build first."
+  echo >&2 "==============================================================="
+  if [ "${1:-}" != "--preview-only" ]; then
+    exit 1
+  fi
+  echo "  --preview-only: launching the existing binary at its own risk"
+fi
+BRIDGE_BINARY="$(ls -l "$BRIDGE_BIN" 2>/dev/null | awk '{print $6, $7, $8}')"
+echo "  bridge binary: $BRIDGE_BIN"
+echo "  built:         ${BRIDGE_BINARY:-<missing!>}"
+if [ ! -x "$BRIDGE_BIN" ]; then
+  echo >&2 "no bridge binary exists at all; cannot start anything"
+  exit 1
+fi
 if [ "${1:-}" = "--with-telegram" ] || [ -n "${GG_TG_BOT_TOKEN:-}" ]; then
-  cargo build -p ghost-gate-telegram
-  BUILD_FLAG="$BUILD_FLAG telegram"
+  if ! cargo build -p ghost-gate-telegram; then
+    echo >&2 "telegram build FAILED — starting the bridge only."
+    if [ "${1:-}" = "--with-telegram" ]; then
+      echo >&2 "(--with-telegram was requested; fix the telegram build to enable the bot)"
+    fi
+  else
+    BUILD_FLAG="$BUILD_FLAG telegram"
+  fi
 fi
 
 # ---------------------------------------------------------------------------

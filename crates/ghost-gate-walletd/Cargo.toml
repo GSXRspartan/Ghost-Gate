@@ -9,6 +9,7 @@ authors.workspace = true
 
 [dependencies]
 ghost-gate-core = { path = "../ghost-gate-core" }
+ghost-gate-registry = { path = "../ghost-gate-registry" }
 ghost-gate-bridge = { path = "../ghost-gate-bridge" }
 # The native Minotari L1 channels (the proof wallet service client and the base node reader).
 ghost-gate-minotari = { path = "../ghost-gate-minotari" }

@@ -318,6 +318,17 @@ pub enum ProofStatus {
     },
 }
 
+impl ProofStatus {
+    /// The challenge nonce an ACCEPTED consensus proof burnt, for grant lookup. Credential
+    /// acceptances carry their nonce on the job, not in the receipt.
+    pub fn accepted_nonce(&self) -> Option<&str> {
+        match self {
+            ProofStatus::Accepted { result } => Some(result.challenge_nonce.as_str()),
+            _ => None,
+        }
+    }
+}
+
 /// The public result of a proof. This is the whole surface that leaves the bridge.
 ///
 /// No field can hold a key, a mask, a balance, a decrypted value or a UTXO identifier, and none was

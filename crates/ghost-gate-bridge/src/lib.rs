@@ -41,6 +41,8 @@
 
 #![deny(unsafe_code)]
 
+pub mod access;
+
 pub mod credential;
 pub mod gate_registry;
 pub mod http;

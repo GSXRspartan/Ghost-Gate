@@ -64,6 +64,11 @@ pub struct Bridge<
     XR: crate::xtm::XtmChainReader = crate::xtm::NoXtmChainReader,
 > {
     pub gates: GateRegistry,
+    /// Verified-access sessions, active when the bridge is registry-backed (GG_BINDINGS_PATH).
+    pub access: Option<crate::access::AccessHandle>,
+    /// Sessions granted on accepted proofs, keyed by the challenge nonce they burnt, so the
+    /// proof-status response can carry the grant to the client that polled it.
+    pub access_grants: std::collections::BTreeMap<String, ghost_gate_registry::AccessGrant>,
     pub challenges: ChallengeBook,
     pub jobs: Vec<ProofJob>,
     pub wallet: W,
@@ -111,6 +116,8 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
     ) -> Self {
         Self {
             gates,
+            access: None,
+            access_grants: std::collections::BTreeMap::new(),
             challenges: ChallengeBook::new(),
             jobs: Vec::new(),
             wallet,
@@ -136,6 +143,8 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
     ) -> Self {
         Self {
             gates,
+            access: None,
+            access_grants: std::collections::BTreeMap::new(),
             challenges: ChallengeBook::new(),
             jobs: Vec::new(),
             wallet,
@@ -207,6 +216,8 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R, crate::xt
     ) -> Self {
         Self {
             gates,
+            access: None,
+            access_grants: std::collections::BTreeMap::new(),
             challenges: ChallengeBook::new(),
             jobs: Vec::new(),
             wallet,
@@ -236,6 +247,8 @@ impl<W: WalletChannel, X: crate::xtm::XtmChannel, XR: crate::xtm::XtmChainReader
     ) -> Self {
         Self {
             gates,
+            access: None,
+            access_grants: std::collections::BTreeMap::new(),
             challenges: ChallengeBook::new(),
             jobs: Vec::new(),
             wallet,
@@ -264,6 +277,8 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
     ) -> Self {
         Self {
             gates,
+            access: None,
+            access_grants: std::collections::BTreeMap::new(),
             challenges: ChallengeBook::new(),
             jobs: Vec::new(),
             wallet,
@@ -287,6 +302,45 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
 {
     /// Handles one request. Pure with respect to the process: it returns what to send.
     pub async fn handle(&mut self, request: &Request) -> Response {
+        // Registry-backed bridges re-read the bindings snapshot when it changes, so a publish
+        // from the admin plane is live on the next request — and a REVOCATION is live just as
+        // fast. Fail-closed: a corrupt snapshot keeps the last-known-good gates and is logged.
+        if self.access.is_some() {
+            let paths = self.access.as_ref().unwrap().plane.paths.clone();
+            let mut rebuild_failed: Option<String> = None;
+            {
+                let access = self.access.as_mut().unwrap();
+                let mut gates_registry = GateRegistry::new();
+                let result = access.reload_if_changed(&paths, &mut |snapshots| {
+                    for snap in snapshots {
+                        if snap.test_lane {
+                            continue; // test-lane gates never bind the production listener
+                        }
+                        let binding = crate::access::binding_from_snapshot(snap)?;
+                        gates_registry
+                            .register(snap.gate_id.clone(), binding)
+                            .map_err(|e| format!("gate {}: {e}", snap.gate_id))?;
+                    }
+                    Ok(())
+                });
+                match result {
+                    Ok((true, count)) => {
+                        if let Some(handle) = self.access.as_mut() {
+                            self.gates = gates_registry;
+                            let _ = count;
+                        }
+                    }
+                    Ok((false, _)) => {}
+                    Err(e) => {
+                        // Keep the last-known-good registry; say why on stderr once.
+                        rebuild_failed = Some(e);
+                    }
+                }
+            }
+            if let Some(e) = rebuild_failed {
+                eprintln!("ghost-gate-bridge: bindings reload refused, keeping last-known-good gates: {e}");
+            }
+        }
         // The Host check comes first, and for the reason above: a rebound name arrives as a
         // same-origin request that the origin allowlist would welcome. A present-but-unrecognised
         // Host is refused; an absent Host keeps working for the operator's own curl and tests,
@@ -344,12 +398,60 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                 // longer than a few seconds on one job.
                 self.reconcile_job(id, RECONCILE_WAIT).await;
                 match self.jobs.iter().find(|j| j.id == id) {
-                    Some(job) => Response::json(200, &job.status),
+                    Some(job) => {
+                        // A freshly accepted proof carries its access grant on the status
+                        // response: the polling client learns its session exactly once, bound to
+                        // the policy the proof satisfied.
+                        let grant = self
+                            .access_grants
+                            .get(&hex::encode(job.challenge_nonce))
+                            .cloned();
+                        let status = job.status.clone();
+                        let mut value = serde_json::to_value(&status)
+                            .unwrap_or(serde_json::Value::Null);
+                        if let Some(grant) = grant {
+                            if let Some(obj) = value.as_object_mut() {
+                                obj.insert("access".to_string(), serde_json::to_value(grant).unwrap_or(serde_json::Value::Null));
+                            }
+                        }
+                        Response::json(200, &value)
+                    }
                     None => Response::error(404, "GG: no such proof"),
                 }
             },
+            Route::AccessCheck => {
+                // The decision is computed from the registry and the session store, server-side.
+                // A client cannot argue it: there is no field to argue with.
+                let token = request.query.get("token").cloned().unwrap_or_default();
+                let gate_id = request.query.get("gate").cloned().unwrap_or_default();
+                if token.is_empty() || gate_id.is_empty() {
+                    return Response::error(400, "GG: access checks need token and gate");
+                }
+                match self.access.as_mut() {
+                    Some(access) => {
+                        let decision = access.check(&token, &gate_id);
+                        Response::json(200, &serde_json::json!({
+                            "authorized": decision.authorized,
+                            "reason": decision.reason,
+                            "granted": decision.granted,
+                            "expiresUnix": decision.expires_unix,
+                            "policyVersion": decision.policy_version,
+                        }))
+                    }
+                    None => Response::error(503, "GG: this bridge is not registry-backed; no access plane"),
+                }
+            }
             Route::NotFound => Response::error(404, "GG: no such route"),
         }
+    }
+
+    /// Issues a verified-access session for an accepted proof on a registry-backed gate, and
+    /// remembers it against the challenge nonce so the status poll can carry it. Returns None
+    /// when the bridge is not registry-backed or the gate is not registry-bound.
+    fn grant_access_for(&mut self, gate_id: &str, nonce_hex: &str) -> Option<ghost_gate_registry::AccessGrant> {
+        let grant = self.access.as_mut()?.grant(gate_id).ok()?;
+        self.access_grants.insert(nonce_hex.to_string(), grant.clone());
+        Some(grant)
     }
 
     /// Serves one of the three static files this bridge is willing to serve.
@@ -604,16 +706,19 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                     );
                 }
                 let job_id = hex::encode(&crate::session::random_nonce()[..8]);
+                let job_nonce = challenge.nonce().into_array();
                 self.jobs.push(ProofJob {
                     id: job_id.clone(),
                     gate_id: id.to_string(),
-                    challenge_nonce: challenge.nonce().into_array(),
+                    challenge_nonce: job_nonce,
                     status: ProofStatus::CredentialAccepted {
                         result: Box::new(receipt.clone()),
                     },
                     started_at: std::time::SystemTime::now(),
                     xtm_artifact: None,
                 });
+                // The credential path grants the session here: the receipt IS the verification.
+                self.grant_access_for(id, &hex::encode(job_nonce));
                 Response::json(
                     200,
                     &serde_json::json!({
@@ -963,6 +1068,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                 self.challenges
                     .consume_on_acceptance(&nonce, &session_commitment)
                     .ok();
+                self.grant_access_for(&gate_id, &hex::encode(nonce));
                 self.jobs[index].status = ProofStatus::Accepted {
                     result: PublicProof {
                         gate_id: gate_id.clone(),
@@ -1290,6 +1396,7 @@ mod tests {
             path: path.into(),
             origin: Some("https://vip.example".into()),
             host: Some("127.0.0.1:7799".into()),
+            query: Default::default(),
             body: String::new(),
         }
     }
@@ -1300,6 +1407,7 @@ mod tests {
             path: path.into(),
             origin: Some("https://vip.example".into()),
             host: Some("127.0.0.1:7799".into()),
+            query: Default::default(),
             body: body.to_string(),
         }
     }
@@ -1351,6 +1459,7 @@ mod tests {
                 path: path.into(),
                 origin: Some("https://vip.example".into()),
                 host: Some("127.0.0.1:7799".into()),
+                query: Default::default(),
                 body: "{}".into(),
             };
             assert_eq!(b.handle(&req).await.status, 404, "{path}");
@@ -1611,6 +1720,7 @@ mod tests {
                 path: path.into(),
                 origin: None, // same-origin: the rebinding case
                 host: Some("evil.com:7799".into()),
+                query: Default::default(),
                 body: body.into(),
             };
             let r = b.handle(&req).await;
@@ -1635,6 +1745,7 @@ mod tests {
             path: "/gate/g1/prove".into(),
             origin: Some("https://partner.example".into()), // permitted, but not the issuer
             host: Some("127.0.0.1:7799".into()),
+            query: Default::default(),
             body: serde_json::json!({
                 "gate_id": "g1",
                 "challenge_nonce": nonce,
@@ -1658,6 +1769,7 @@ mod tests {
                 path: "/health".into(),
                 origin: None,
                 host: Some(host.into()),
+                query: Default::default(),
                 body: "{}".into(),
             };
             let r = b.handle(&req).await;
@@ -1669,6 +1781,7 @@ mod tests {
             path: "/health".into(),
             origin: None,
             host: None,
+            query: Default::default(),
             body: "{}".into(),
         };
         assert_eq!(b.handle(&req).await.status, 200);

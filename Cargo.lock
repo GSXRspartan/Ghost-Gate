@@ -2921,6 +2921,7 @@ version = "0.1.0"
 dependencies = [
  "blake2 0.10.6",
  "ghost-gate-core",
+ "ghost-gate-registry",
  "hex",
  "rand 0.10.3",
  "serde",
@@ -3070,6 +3071,7 @@ dependencies = [
  "ghost-gate-bridge",
  "ghost-gate-core",
  "ghost-gate-minotari",
+ "ghost-gate-registry",
  "hex",
  "rand 0.10.3",
  "tari_engine_types",
