@@ -16,17 +16,22 @@ scripts/ootle_e2e.sh -- --tags "@ghost_gate"
 # 2. A standalone walletd for the same network. This is the piece the harness does not give you: it
 #    starts its wallet inside the test process rather than listening on a port.
 
-# 3. The bridge, with at least one gate, at least one permitted origin, and the wallet endpoint.
-#    The bind address and the origin list are both refused at startup if wrong, because a bridge with
-#    no origin allowlist is the thing this design exists to prevent.
-GG_BRIDGE_GATES='g1=component_<hex>:resource_<hex>:<raw threshold>:<divisibility>:<symbol>' \
+# 3. The bridge. Gate policy now comes from the ADMINISTRATOR DASHBOARD, not from an environment
+#    variable: create the application and its gates at http://localhost:7811/admin, publish them, and
+#    point the bridge at the same data directory. See docs/ADMIN_DASHBOARD.md. The bind address and the
+#    origin list are still refused at startup if wrong, because a bridge with no origin allowlist is
+#    the thing this design exists to prevent. (GG_BRIDGE_GATES remains supported for a single-gate
+#    bring-up, but it is no longer the authority: with GG_BINDINGS_PATH set, the registry wins.)
+GG_BINDINGS_PATH='~/ghost-gate-admin' \
+GG_BRIDGE_NETWORK='localnet' \
 GG_BRIDGE_ORIGINS='http://127.0.0.1:7799' \
 GG_BRIDGE_BIND='127.0.0.1:7799' \
 GG_WALLETD_ENDPOINT='http://127.0.0.1:5100/walletd' \
 GG_MAX_FEE=100000 GG_MAX_EPOCH=100 \
 cargo run -p ghost-gate-walletd --bin ghost-gate-bridge
 
-# 4. Open http://127.0.0.1:7799 in the same browser.
+# 4. Open http://127.0.0.1:7799 in the same browser, and manage policy at
+#    http://localhost:7811/admin (a hostname, not an IP: passkeys require a domain).
 ```
 
 The startup banner is the first thing to check. It must show a wallet line, not the "no wallet daemon is
@@ -42,7 +47,7 @@ that is deliberate — a proof submitted to the wrong chain would be a valid tra
 place.
 
 The resource and threshold come from the gate's own on-chain state. Take them from the `@ghost_gate`
-scenario's output rather than inventing them: `GG_BRIDGE_GATES` needs a resource **address**, and a
+scenario's output rather than inventing them: the dashboard needs a resource **address**, and a
 symbol in that field is refused at startup by design.
 
 ## Wallet choice, and which flow a case uses

@@ -41,9 +41,26 @@ code { color: #9aa4c0; }
 }
 .badge.test { border-color: #7a5a2a; color: #e0b96a; }
 .badge.enabled { border-color: #2a6a3a; color: #8ee0a0; }
+/* A gate row carries an address, a raw threshold and a version: it cannot be squeezed into a
+   phone without either wrapping or scrolling. Wrap long values, and let the table scroll inside
+   its own box instead of pushing the whole page sideways. */
+.mono { overflow-wrap: anywhere; word-break: break-word; }
+td, th { overflow-wrap: anywhere; }
+/* Long single-line values (a credential id, an address, a reason) must wrap rather than widen the
+   page: an operator on a phone should never have to scroll sideways to read the dashboard. */
+.hint, .admin-status, label, p { overflow-wrap: anywhere; }
+
 @media (max-width: 720px) {
-  table { font-size: .78rem; }
-  input, select { max-width: 100%; }
+  #admin-root { padding: .8rem .7rem 3rem; }
+  /* The gate table has nine columns of addresses and thresholds: it scrolls inside its own box.
+     max-width:100% is what actually stops it pushing the page wide — a block table sizes to its
+     content otherwise, however much overflow-x says. */
+  table { font-size: .74rem; display: block; max-width: 100%; overflow-x: auto; white-space: nowrap; }
+  table td, table th { white-space: nowrap; }
+  #admin-root, .gate-card, .card { max-width: 100%; overflow-x: hidden; }
+  input, select { max-width: 100%; width: 100%; box-sizing: border-box; }
+  .gate-card { padding: .8rem .7rem; }
+  .row { flex-wrap: wrap; }
 }
 
 /* Tier wiring rows: one line per gate, one checkbox per gate it opens. */

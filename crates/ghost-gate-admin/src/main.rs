@@ -19,14 +19,20 @@ use std::sync::{Arc, Mutex};
 fn main() -> ExitCode {
     let data_dir = std::env::var("GG_ADMIN_DATA").unwrap_or_else(|_| "gg-admin-data".into());
     let bind = std::env::var("GG_ADMIN_BIND").unwrap_or_else(|_| "127.0.0.1:7811".into());
-    let origin = format!("http://{}", bind);
-    // rpId for WebAuthn: the host part of the origin. For 127.0.0.1 and localhost the host itself
-    // is the only valid rpId; a dashboard served on a real domain would use that domain.
-    let rp_id = bind
-        .split(':')
-        .next()
-        .unwrap_or("127.0.0.1")
-        .to_string();
+    // The public hostname, which is NOT always the bind address: a passkey ceremony fails outright
+    // on an IP address, because WebAuthn requires a registrable domain as the RP ID. Binding stays
+    // on loopback (the admin plane is never exposed), while the origin an operator opens can be
+    // `localhost` — which browsers accept — or a real domain.
+    let hostname = std::env::var("GG_ADMIN_HOSTNAME")
+        .ok()
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| bind.split(':').next().unwrap_or("127.0.0.1").to_string());
+    let port = bind.rsplit(':').next().unwrap_or("7811");
+    let origin = format!("http://{}:{}", hostname, port);
+    // rpId for WebAuthn: the host part of the public origin, which must not be an IP literal.
+    let rp_id = hostname.clone();
+    let ip_literal = hostname.parse::<std::net::IpAddr>().is_ok();
 
     let paths = StorePaths::new(&data_dir);
     if let Err(e) = fs::create_dir_all(&paths.dir) {
@@ -86,6 +92,14 @@ fn main() -> ExitCode {
 
     println!("ghost-gate-admin listening on {origin}");
     println!("  dashboard: {origin}/admin");
+    if ip_literal {
+        // Say it at startup rather than letting the operator meet a browser SecurityError later.
+        println!(
+            "  note: the public hostname is an IP address, so PASSKEYS CANNOT WORK HERE — WebAuthn \
+             requires a registrable domain as the RP ID. Start with GG_ADMIN_HOSTNAME=localhost (or a \
+             real domain) and open http://{hostname}:{port}/admin, or use the wallet-key method."
+        );
+    }
     println!("  data dir:  {}", paths.dir.display());
     if bootstrap_token.is_some() {
         println!("  registration: OPEN (first administrator only, bootstrap token required)");

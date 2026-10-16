@@ -155,6 +155,23 @@ async function passkeyLogin(challengeB64) {
 /* ------------------------------ boot ------------------------------ */
 async function boot() {
   const b = await api("/admin/api/bootstrap");
+  // Passkeys need a registrable domain as the RP ID; an IP literal is refused by the browser with a
+  // bare "SecurityError: This is an invalid domain". Say so plainly, and point at the method that
+  // does work here, instead of letting the operator meet a cryptic failure.
+  const hostIsIp = /^\d{1,3}(\.\d{1,3}){3}$/.test(location.hostname) || location.hostname.includes(":");
+  const passkeyNote = $("passkey-note");
+  if (hostIsIp) {
+    passkeyNote.hidden = false;
+    passkeyNote.innerHTML =
+      "Passkeys are not available on an IP address — WebAuthn requires a domain as the relying party. " +
+      `This dashboard is open at <code>${esc(location.hostname)}</code>. Start the admin plane with ` +
+      "<code>GG_ADMIN_HOSTNAME=localhost</code> (or your real domain) and use that address, " +
+      "or sign in with a wallet key now.";
+    $("reg-passkey").disabled = true;
+    $("login-passkey").disabled = true;
+  } else {
+    passkeyNote.hidden = true;
+  }
   if (!b.json.authenticated && !b.json.bootstrapRequired) {
     $("login-panel").hidden = false;
   }
@@ -602,7 +619,14 @@ $("reg-passkey").onclick = async () => {
     const r = await api("/admin/api/auth/register", { body: JSON.stringify(payload) });
     if (r.status === 200) { csrf = r.json.csrf; await refresh(); }
     else fail("bootstrap-error", r.json.error || String(r.status));
-  } catch (e) { fail("bootstrap-error", String(e)); }
+  } catch (e) {
+    // A WebAuthn SecurityError usually means the RP ID is not a registrable domain (an IP address).
+    // Translate it, because "invalid domain" tells a non-technical operator nothing actionable.
+    const msg = /invalid domain|SecurityError/i.test(String(e))
+      ? "This browser refused the passkey ceremony: the relying party must be a domain, not an IP address. Use the wallet-key method, or open the dashboard through GG_ADMIN_HOSTNAME."
+      : String(e);
+    fail("bootstrap-error", msg);
+  }
 };
 $("login-passkey").onclick = async () => {
   clearFail("login-error");
@@ -612,7 +636,12 @@ $("login-passkey").onclick = async () => {
     const r = await api("/admin/api/auth/login", { body: JSON.stringify(payload) });
     if (r.status === 200) { csrf = r.json.csrf; await refresh(); }
     else fail("login-error", r.json.error || String(r.status));
-  } catch (e) { fail("login-error", String(e)); }
+  } catch (e) {
+    const msg = /invalid domain|SecurityError/i.test(String(e))
+      ? "This browser refused the passkey ceremony: the relying party must be a domain, not an IP address. Use the wallet-key method, or open the dashboard through GG_ADMIN_HOSTNAME."
+      : String(e);
+    fail("login-error", msg);
+  }
 };
 
 /* Wallet flows (the dashboard collects the signature; the SERVER verifies it). */
