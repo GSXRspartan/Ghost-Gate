@@ -288,7 +288,7 @@ pub fn route(state: &SharedState, req: &Request) -> Result<Response, ()> {
                 "GG: {amount:?} cannot be represented exactly at divisibility {div} — refused, never rounded"
             )),
         };
-        Ok(converted)
+        return Ok(converted);
     }
 
     // Read routes.
