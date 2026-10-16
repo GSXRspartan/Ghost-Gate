@@ -1,1 +1,550 @@
-// admin
+/**
+ * Ghost Gate administrator dashboard.
+ *
+ * Security posture of this file: it holds NO secrets. The session lives in an HttpOnly cookie the
+ * server set; the CSRF token lives only in this module's memory for the life of the page. Nothing
+ * here touches localStorage. Every privileged action is a fetch the SERVER authorises; the
+ * dashboard cannot grant itself anything.
+ */
+
+const $ = (id) => document.getElementById(id);
+let csrf = null;
+let actor = null;
+let stepupValid = false;
+const ORIGIN = window.location.origin;
+
+function set(status) {
+  $("admin-status").textContent = status;
+}
+function fail(id, msg) {
+  const el = $(id);
+  el.hidden = false;
+  el.textContent = msg;
+}
+function clearFail(id) {
+  const el = $(id);
+  el.hidden = true;
+  el.textContent = "";
+}
+
+async function api(path, opts = {}) {
+  const headers = { "Content-Type": "application/json", ...(opts.headers || {}) };
+  if (csrf && opts.mutating) headers["X-GG-CSRF"] = csrf;
+  const res = await fetch(path, {
+    method: opts.method || (opts.body ? "POST" : "GET"),
+    headers,
+    body: opts.body || undefined,
+  });
+  const json = await res.json().catch(() => ({}));
+  return { status: res.status, json };
+}
+
+/* ------------------------- base64url helpers (no deps) ------------------------- */
+function b64u(bytes) {
+  const bin = String.fromCharCode(...bytes);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function b64uDecode(s) {
+  const pad = s.length % 4 ? "=".repeat(4 - (s.length % 4)) : "";
+  const bin = atob(s.replace(/-/g, "+").replace(/_/g, "/") + pad);
+  return Uint8Array.from(bin, (c) => c.charCodeAt(0));
+}
+
+/* ------------------------------ WebAuthn ------------------------------ */
+async function passkeyRegister(challengeB64) {
+  const cred = await navigator.credentials.create({
+    publicKey: {
+      challenge: b64uDecode(challengeB64),
+      rp: { name: "Ghost Gate", id: new URL(ORIGIN).hostname },
+      user: { id: crypto.getRandomValues(new Uint8Array(16)), name: "ghost-gate-admin", displayName: "Ghost Gate Administrator" },
+      pubKeyCredParams: [{ type: "public-key", alg: -7 }], // ES256
+      authenticatorSelection: { userVerification: "required", residentKey: "preferred" },
+      timeout: 120_000,
+      attestation: "none",
+    },
+  });
+  const response = cred.response;
+  const clientData = new Uint8Array(response.clientDataJSON);
+  // Parse the attestation object for authData + credential id.
+  const attObj = new Uint8Array(response.attestationObject);
+  const authData = extractAuthDataFromAttestation(attObj);
+  return {
+    method: "passkey",
+    challenge: challengeB64,
+    webauthn: {
+      client_data_b64: b64u(clientData),
+      authenticator_data_b64: b64u(authData),
+      credential_id_b64: b64u(new Uint8Array(cred.rawId)),
+      attestation_object_b64: b64u(attObj),
+    },
+  };
+}
+
+/** Minimal CBOR walk to pull authData out of an attestation object (client side only — the
+ * server re-verifies everything from raw bytes; this is just what WebAuthn's API hands us). */
+function extractAuthDataFromAttestation(att) {
+  // attestationObject = { fmt, authData, attStmt }; find authData byte string.
+  // Walk: 0xA3, then three key/value pairs. Keys: "fmt"(text), "attStmt"(map), "authData"(bytes).
+  let i = 1;
+  for (let k = 0; k < 3; k++) {
+    const keyLen = att[i] & 0x1f;
+    const key = new TextDecoder().decode(att.slice(i + 1, i + 1 + keyLen));
+    i += 1 + keyLen;
+    if (key === "fmt") {
+      const l = att[i] & 0x1f;
+      i += 1 + l;
+    } else if (key === "attStmt") {
+      i += skipCbor(att, i);
+    } else if (key === "authData") {
+      const lenByte = att[i];
+      let len, hdr;
+      if (lenByte === 0x58) { len = att[i + 1]; hdr = 2; }
+      else if (lenByte === 0x59) { len = (att[i + 1] << 8) | att[i + 2]; hdr = 3; }
+      else { len = lenByte & 0x1f; hdr = 1; }
+      return att.slice(i + hdr, i + hdr + len);
+    }
+  }
+  throw new Error("no authData in attestation object");
+}
+function skipCbor(b, i) {
+  const first = b[i];
+  const major = first >> 5, info = first & 0x1f;
+  if (major === 4) {
+    let off = 1;
+    for (let n = 0; n < info; n++) off += skipCbor(b, i + off);
+    return off;
+  }
+  if (major === 5) {
+    let off = 1;
+    for (let n = 0; n < 2 * info; n++) off += skipCbor(b, i + off);
+    return off;
+  }
+  if (major === 2 || major === 3) {
+    let len = info, hdr = 1;
+    if (info === 24) { len = b[i + 1]; hdr = 2; }
+    if (info === 25) { len = (b[i + 1] << 8) | b[i + 2]; hdr = 3; }
+    if (info === 26) { len = (b[i + 1] << 24) | (b[i + 2] << 16) | (b[i + 3] << 8) | b[i + 4]; hdr = 5; }
+    return hdr + len;
+  }
+  return 1;
+}
+
+async function passkeyLogin(challengeB64) {
+  const cred = await navigator.credentials.get({
+    publicKey: {
+      challenge: b64uDecode(challengeB64),
+      rpId: new URL(ORIGIN).hostname,
+      userVerification: "required",
+      timeout: 120_000,
+    },
+  });
+  const r = cred.response;
+  return {
+    method: "passkey",
+    challenge: challengeB64,
+    credentialId: b64u(new Uint8Array(cred.rawId)),
+    webauthn: {
+      client_data_b64: b64u(new Uint8Array(r.clientDataJSON)),
+      authenticator_data_b64: b64u(new Uint8Array(r.authenticatorData)),
+      signature_b64: b64u(new Uint8Array(r.signature)),
+      credential_id_b64: b64u(new Uint8Array(cred.rawId)),
+    },
+  };
+}
+
+/* ------------------------------ boot ------------------------------ */
+async function boot() {
+  const b = await api("/admin/api/bootstrap");
+  if (!b.json.authenticated && !b.json.bootstrapRequired) {
+    $("login-panel").hidden = false;
+  }
+  if (b.json.bootstrapRequired) {
+    $("bootstrap-panel").hidden = false;
+    set("Registration open (first administrator).");
+  } else {
+    set("Registration closed.");
+  }
+  const s = await api("/admin/api/state");
+  if (s.status === 200) {
+    csrf = s.json.csrf;
+    actor = s.json.actor;
+    stepupValid = s.json.stepupValid;
+    enterDashboard(s.json);
+  }
+}
+
+function enterDashboard(state) {
+  $("bootstrap-panel").hidden = true;
+  $("login-panel").hidden = true;
+  $("dashboard").hidden = false;
+  $("actor-line").textContent = `Signed in as ${state.actor}`;
+  stepupValid = state.stepupValid;
+  renderStepup();
+  renderApps(state);
+  renderSessions(state);
+  renderAudit();
+}
+
+function renderStepup() {
+  $("stepup-line").textContent = stepupValid
+    ? "Fresh approval: policy changes allowed."
+    : "No fresh approval: policy changes are LOCKED until you step up.";
+  $("btn-stepup").classList.toggle("ghost", stepupValid);
+}
+
+/* ------------------------------ applications ------------------------------ */
+function renderApps(state) {
+  const host = $("apps-list");
+  host.replaceChildren();
+  for (const app of state.applications) {
+    const card = document.createElement("div");
+    card.className = "gate-card";
+    const head = document.createElement("div");
+    head.className = "row";
+    const title = document.createElement("strong");
+    title.textContent = `${app.displayName} (${app.applicationId})`;
+    const badge = document.createElement("span");
+    badge.className = "badge " + (app.production ? "" : "test");
+    badge.textContent = app.production ? "production" : "test deployment";
+    const top = document.createElement("span");
+    top.className = "badge";
+    top.textContent = app.topology;
+    const owner = document.createElement("span");
+    owner.className = "hint";
+    owner.textContent = app.ownedByYou ? "owned by you" : `owned by ${app.owner}`;
+    head.append(title, badge, top, owner);
+    card.append(head);
+
+    const ttl = document.createElement("p");
+    ttl.className = "hint";
+    ttl.textContent = `Default session: ${humanTtl(app.defaultSessionTtlSecs)} · limit ${app.maxGates} gates · revision ${app.revision}`;
+    card.append(ttl);
+
+    // Gates table.
+    const table = document.createElement("table");
+    table.innerHTML = "<tr><th>Gate</th><th>Name</th><th>Resource</th><th>Threshold</th><th>Mode</th><th>Session</th><th>Grants</th><th>State</th><th></th></tr>";
+    for (const g of app.gates) {
+      const tr = document.createElement("tr");
+      const th = g.thresholdRaw;
+      const human = ghostFormat(th, g.divisibility);
+      tr.innerHTML = `
+        <td class="mono">${g.gateId}</td>
+        <td>${g.name}</td>
+        <td class="mono">${short(g.resourceAddress, 18)}</td>
+        <td title="${th} raw units">${human} ${g.symbol}</td>
+        <td>${g.proofMode}${g.activatable ? "" : " (draft — " + (g.blockedReason || "unsupported") + ")"}</td>
+        <td>${g.sessionTtlOverrideSecs ? humanTtl(g.sessionTtlOverrideSecs) : "default"}</td>
+        <td class="mono">${(g.grants || []).join(", ") || "—"}</td>
+        <td>${g.publishedVersion ? `<span class="published">published v${g.publishedVersion}</span>` : '<span class="draft">draft</span>'} ${g.enabled ? '<span class="badge enabled">enabled</span>' : ""} ${g.testLane ? '<span class="badge test">test lane</span>' : ""}</td>
+        <td></td>`;
+      table.append(tr);
+    }
+    card.append(table);
+
+    // Gate editor (add / rename / reorder / remove).
+    if (app.ownedByYou) {
+      const editor = document.createElement("div");
+      editor.className = "stacked";
+      editor.append(
+        editorField(app, "gate-id", "Gate ID (stable, unique)"),
+        editorField(app, "gate-name", "Display name"),
+        editorField(app, "gate-resource", "Resource address (resource_…)"),
+        editorField(app, "gate-symbol", "Symbol (display only)"),
+        editorField(app, "gate-div", "Divisibility"),
+        editorField(app, "gate-amount", "Human amount (e.g. 10 or 100000)"),
+        editorField(app, "gate-component", "Gate component address (component_…)"),
+      );
+      const mode = document.createElement("label");
+      mode.textContent = "Proof mode";
+      const sel = document.createElement("select");
+      sel.innerHTML = `<option value="consensus">Consensus (wallet daemon)</option><option value="credential">Credential (browser wallet)</option><option value="xtm">Native L1 XTM (draft only — cannot activate yet)</option>`;
+      sel.id = `mode-${app.applicationId}`;
+      mode.append(sel);
+      editor.append(mode);
+      const ttlSel = document.createElement("label");
+      ttlSel.textContent = "Session override";
+      const ts = document.createElement("select");
+      ts.innerHTML = `<option value="">default</option><option value="3600">1 hour</option><option value="43200">12 hours</option><option value="86400">1 day</option><option value="259200">3 days</option><option value="604800">7 days</option><option value="1209600">14 days</option><option value="2592000">30 days</option>`;
+      ts.id = `ttl-${app.applicationId}`;
+      ttlSel.append(ts);
+      editor.append(ttlSel);
+      const grantsLabel = document.createElement("label");
+      grantsLabel.textContent = "Grants (lower tiers this gate opens, comma-separated — hierarchical apps only)";
+      const gi = document.createElement("input");
+      gi.id = `grants-${app.applicationId}`;
+      grantsLabel.append(gi);
+      editor.append(grantsLabel);
+      const testLane = document.createElement("label");
+      const tlc = document.createElement("input");
+      tlc.type = "checkbox";
+      tlc.id = `testlane-${app.applicationId}`;
+      testLane.append(tlc, "Test lane (never authorises production sessions)");
+      editor.append(testLane);
+      const buttons = document.createElement("div");
+      buttons.className = "gate-actions";
+      const add = document.createElement("button");
+      add.className = "btn primary";
+      add.textContent = "Add gate";
+      add.onclick = () => addGate(app);
+      const publish = document.createElement("button");
+      publish.className = "btn";
+      publish.textContent = "Publish replacement for a gate";
+      publish.onclick = () => publishGate(app);
+      const remove = document.createElement("button");
+      remove.className = "btn ghost";
+      remove.textContent = "Remove a gate";
+      remove.onclick = () => removeGate(app);
+      const reorder = document.createElement("button");
+      reorder.className = "btn ghost";
+      reorder.textContent = "Reorder (save current table order)";
+      reorder.onclick = () => reorderGates(app);
+      buttons.append(add, publish, remove, reorder);
+      editor.append(buttons);
+      const msg = document.createElement("p");
+      msg.className = "hint";
+      msg.id = `msg-${app.applicationId}`;
+      editor.append(msg);
+      card.append(editor);
+    }
+    host.append(card);
+  }
+}
+
+function editorField(app, key, label) {
+  const l = document.createElement("label");
+  l.textContent = label;
+  const i = document.createElement("input");
+  i.id = `${key}-${app.applicationId}`;
+  l.append(i);
+  return l;
+}
+
+function humanTtl(secs) {
+  const h = secs / 3600;
+  if (h < 24) return `${h} hour${h === 1 ? "" : "s"}`;
+  const d = h / 24;
+  return `${d} day${d === 1 ? "" : "s"}`;
+}
+function short(s, n) { return s.length > n ? s.slice(0, n) + "…" : s; }
+function ghostFormat(raw, div) {
+  // Exact display: strings only, no floats.
+  const rawStr = String(raw);
+  if (!div) return rawStr;
+  const scale = 10n ** BigInt(div);
+  const bi = BigInt(rawStr);
+  const int = bi / scale;
+  let frac = (bi % scale).toString().padStart(div, "0").replace(/0+$/, "");
+  return frac ? `${int}.${frac}` : int.toString();
+}
+
+/* ------------------------------ actions ------------------------------ */
+async function addGate(app) {
+  const div = Number($(`gate-div-${app.applicationId}`).value || "6");
+  const amount = $(`gate-amount-${app.applicationId}`).value.trim();
+  const id = $(`gate-id-${app.applicationId}`).value.trim();
+  const mode = $(`mode-${app.applicationId}`).value;
+  const isDraft = mode === "xtm";
+  // Exact conversion happens on the server; we send the human amount AND let the server compute
+  // the raw units, so no dashboard float arithmetic can ever be authoritative.
+  const conv = await api("/admin/api/convert", { body: JSON.stringify({ amount, divisibility: div }) });
+  if (conv.status !== 200 || conv.json.raw === undefined) {
+    fail(`msg-${app.applicationId}`, conv.json.error || "the amount is not representable exactly");
+    return;
+  }
+  const gate = {
+    gateId: id,
+    name: $(`gate-name-${app.applicationId}`).value.trim() || id,
+    resourceAddress: $(`gate-resource-${app.applicationId}`).value.trim(),
+    symbol: $(`gate-symbol-${app.applicationId}`).value.trim() || "tTARI",
+    divisibility: div,
+    thresholdRaw: String(conv.json.raw), // a STRING: exact, no float rounding
+    proofMode: mode,
+    challengeDomain: `${app.applicationId}.localhost`,
+    sessionTtlOverrideSecs: $(`ttl-${app.applicationId}`).value ? Number($(`ttl-${app.applicationId}`).value) : null,
+    grants: $(`grants-${app.applicationId}`).value.split(",").map((x) => x.trim()).filter(Boolean),
+    enabled: !isDraft,
+    testLane: $(`testlane-${app.applicationId}`).checked,
+    componentAddress: $(`gate-component-${app.applicationId}`).value.trim() || null,
+  };
+  const r = await api("/admin/api/gate/set", { mutating: true, body: JSON.stringify({ applicationId: app.applicationId, gate }) });
+  if (r.status === 200) { await refresh(); set(`Gate ${id} saved.`); }
+  else fail(`msg-${app.applicationId}`, r.json.error || String(r.status));
+}
+
+async function publishGate(app) {
+  const gateId = $(`gate-id-${app.applicationId}`).value.trim();
+  if (!gateId) { fail(`msg-${app.applicationId}`, "Type the gate id to publish."); return; }
+  const r = await api("/admin/api/policy/publish", { mutating: true, body: JSON.stringify({ applicationId: app.applicationId, gateId, reason: "published from the dashboard" }) });
+  if (r.status === 200) { await refresh(); set(`Published ${gateId}. The bridge picks it up on the next request.`); }
+  else fail(`msg-${app.applicationId}`, r.json.error || String(r.status));
+}
+
+async function removeGate(app) {
+  const gateId = $(`gate-id-${app.applicationId}`).value.trim();
+  if (!gateId) { fail(`msg-${app.applicationId}`, "Type the gate id to remove."); return; }
+  const r = await api("/admin/api/gate/remove", { mutating: true, body: JSON.stringify({ applicationId: app.applicationId, gateId }) });
+  if (r.status === 200) { await refresh(); set(`Removed ${gateId}.`); }
+  else fail(`msg-${app.applicationId}`, r.json.error || String(r.status));
+}
+
+async function reorderGates(app) {
+  const ids = [...document.querySelectorAll("#apps-list .gate-card table tr td:first-child")].map((td) => td.textContent.trim());
+  const mine = ids.filter((x) => x && !x.includes("…"));
+  const r = await api("/admin/api/gate/reorder", { mutating: true, body: JSON.stringify({ applicationId: app.applicationId, order: mine }) });
+  if (r.status === 200) { await refresh(); set("Order saved (cosmetic — order never grants anything)."); }
+  else fail(`msg-${app.applicationId}`, r.json.error || String(r.status));
+}
+
+async function refresh() {
+  const s = await api("/admin/api/state");
+  if (s.status === 200) enterDashboard(s.json);
+}
+
+/* ------------------------------ sessions & audit ------------------------------ */
+function renderSessions(state) {
+  const host = $("sessions-list");
+  host.replaceChildren();
+  if (!state.sessions.length) {
+    const p = document.createElement("p");
+    p.className = "hint";
+    p.textContent = "No verified sessions yet.";
+    host.append(p);
+    return;
+  }
+  const table = document.createElement("table");
+  table.innerHTML = "<tr><th>Token</th><th>App</th><th>Proven gate</th><th>Grants</th><th>Expires</th><th>State</th><th></th></tr>";
+  for (const s of state.sessions) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td class="mono">${s.tokenPrefix}…</td>
+      <td class="mono">${s.applicationId}</td>
+      <td>${s.provenGate}</td>
+      <td class="mono">${(s.granted || []).join(", ")}</td>
+      <td>${new Date(s.expiresUnix * 1000).toLocaleString()}</td>
+      <td>${s.revoked ? '<span class="bad">revoked</span>' : Date.now() / 1000 > s.expiresUnix ? '<span class="bad">expired</span>' : '<span class="ok">live</span>'}</td>
+      <td></td>`;
+    if (!s.revoked) {
+      const btn = document.createElement("button");
+      btn.className = "btn small ghost";
+      btn.textContent = "Revoke";
+      btn.onclick = async () => {
+        const r = await api("/admin/api/session/revoke", { mutating: true, body: JSON.stringify({ tokenPrefix: s.tokenPrefix, reason: "revoked from the dashboard" }) });
+        set(r.status === 200 ? "Revoked. The bridge honours it on the next check." : r.json.error || String(r.status));
+        await refresh();
+      };
+      tr.lastChild.append(btn);
+    }
+    table.append(tr);
+  }
+  host.append(table);
+}
+
+async function renderAudit() {
+  const a = await api("/admin/api/audit");
+  const host = $("audit-list");
+  host.replaceChildren();
+  const table = document.createElement("table");
+  table.innerHTML = "<tr><th>When</th><th>Actor</th><th>Action</th><th>App/Gate</th><th>Versions</th><th>Outcome</th><th>Detail</th></tr>";
+  for (const e of (a.json.tail || [])) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${new Date(e.unix * 1000).toLocaleString()}</td>
+      <td class="mono">${short(e.actor, 20)}</td>
+      <td>${e.action}</td>
+      <td class="mono">${e.applicationId || "—"}${e.gate_id ? "/" + e.gate_id : ""}</td>
+      <td class="mono">${e.old_version != null ? "v" + e.old_version + " → " : ""}${e.new_version != null ? "v" + e.new_version : ""}</td>
+      <td>${e.outcome === "Accepted" ? '<span class="ok">accepted</span>' : '<span class="bad">refused</span>'}</td>
+      <td class="hint">${e.detail}</td>`;
+    table.append(tr);
+  }
+  host.append(table);
+}
+
+/* ------------------------------ wire-up ------------------------------ */
+$("btn-new-app").onclick = () => { $("new-app-form").hidden = !$("new-app-form").hidden; };
+$("new-app-go").onclick = async () => {
+  const r = await api("/admin/api/app/create", { mutating: true, body: JSON.stringify({
+    applicationId: $("new-app-id").value.trim(),
+    displayName: $("new-app-name").value.trim() || $("new-app-id").value.trim(),
+    topology: $("new-app-topology").value,
+    defaultSessionTtl: Number($("new-app-ttl").value),
+    production: $("new-app-production").value === "true",
+  })});
+  if (r.status === 200) { await refresh(); set(`Application ${r.json.created} created.`); }
+  else set(r.json.error || String(r.status));
+};
+$("btn-stepup").onclick = async () => {
+  const c = await api("/admin/api/auth/challenge", { body: JSON.stringify({ kind: "login", method: "wallet" }) });
+  const sig = window.prompt(
+    "Step-up: sign this challenge with your registered wallet key and paste the signature hex.\n" +
+    "Challenge: " + c.json.challenge, "");
+  if (!sig) return;
+  const pk = window.prompt("Your registered public key hex:", "");
+  if (!pk) return;
+  const r = await api("/admin/api/auth/login", { body: JSON.stringify({
+    method: "wallet", challenge: c.json.challenge, publicKey: pk.trim(),
+    signature: sig.trim(), publicNonce: window.prompt("Public nonce hex:", "") || "",
+    stepup: true,
+  })});
+  if (r.status === 200) { stepupValid = true; renderStepup(); set("Step-up accepted."); }
+  else set(r.json.error || String(r.status));
+};
+$("btn-logout").onclick = async () => {
+  await api("/admin/api/auth/logout", { mutating: true, body: "{}" });
+  location.reload();
+};
+
+/* Passkey flows */
+$("reg-passkey").onclick = async () => {
+  clearFail("bootstrap-error");
+  const c = await api("/admin/api/auth/challenge", { body: JSON.stringify({ kind: "register", method: "passkey" }) });
+  try {
+    const payload = await passkeyRegister(c.json.challenge);
+    payload.label = $("reg-label").value || "admin";
+    payload.bootstrapToken = $("bootstrap-token").value;
+    const r = await api("/admin/api/auth/register", { body: JSON.stringify(payload) });
+    if (r.status === 200) { csrf = r.json.csrf; await refresh(); }
+    else fail("bootstrap-error", r.json.error || String(r.status));
+  } catch (e) { fail("bootstrap-error", String(e)); }
+};
+$("login-passkey").onclick = async () => {
+  clearFail("login-error");
+  const c = await api("/admin/api/auth/challenge", { body: JSON.stringify({ kind: "login", method: "passkey" }) });
+  try {
+    const payload = await passkeyLogin(c.json.challenge);
+    const r = await api("/admin/api/auth/login", { body: JSON.stringify(payload) });
+    if (r.status === 200) { csrf = r.json.csrf; await refresh(); }
+    else fail("login-error", r.json.error || String(r.status));
+  } catch (e) { fail("login-error", String(e)); }
+};
+
+/* Wallet flows (the dashboard collects the signature; the SERVER verifies it). */
+$("reg-wallet").onclick = () => { $("wallet-register").hidden = !$("wallet-register").hidden; };
+$("wallet-register-go").onclick = async () => {
+  const c = await api("/admin/api/auth/challenge", { body: JSON.stringify({ kind: "register", method: "wallet" }) });
+  const r = await api("/admin/api/auth/register", { body: JSON.stringify({
+    method: "wallet", challenge: c.json.challenge,
+    publicKey: $("wallet-pk").value.trim(),
+    signature: $("wallet-sig").value.trim(),
+    publicNonce: window.prompt("Public nonce hex:", "") || "",
+    label: $("reg-label").value || "admin",
+    bootstrapToken: $("bootstrap-token").value,
+  })});
+  if (r.status === 200) { csrf = r.json.csrf; await refresh(); }
+  else fail("bootstrap-error", r.json.error || String(r.status));
+};
+$("login-wallet").onclick = () => { $("wallet-login").hidden = !$("wallet-login").hidden; };
+$("wallet-login-go").onclick = async () => {
+  const c = await api("/admin/api/auth/challenge", { body: JSON.stringify({ kind: "login", method: "wallet" }) });
+  const r = await api("/admin/api/auth/login", { body: JSON.stringify({
+    method: "wallet", challenge: c.json.challenge,
+    publicKey: $("wallet-login-pk").value.trim(),
+    signature: $("wallet-login-sig").value.trim(),
+    publicNonce: window.prompt("Public nonce hex:", "") || "",
+    stepup: false,
+  })});
+  if (r.status === 200) { csrf = r.json.csrf; await refresh(); }
+  else fail("login-error", r.json.error || String(r.status));
+};
+
+boot();

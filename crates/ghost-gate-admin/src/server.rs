@@ -263,6 +263,34 @@ pub fn route(state: &SharedState, req: &Request) -> Result<Response, ()> {
         None => return Ok(Response::error(401, "GG: administrator authentication required")),
     };
 
+    // The divisibility-aware converter: the dashboard sends the HUMAN amount and the resource's
+    // divisibility; the server computes the exact raw units. No dashboard float arithmetic is
+    // ever authoritative, and an amount that cannot be represented exactly is refused with the
+    // reason, never truncated.
+    if path == "/admin/api/convert" && (method == "POST" || method == "GET") {
+        let authority = match state.authority(req) {
+            Some(a) => a,
+            None => return Ok(Response::error(401, "GG: administrator authentication required")),
+        };
+        let _ = authority;
+        let amount = req.query.get("amount").cloned().unwrap_or_default();
+        let div: u8 = req.query.get("divisibility").and_then(|d| d.parse().ok()).unwrap_or(6);
+        if amount.is_empty() {
+            return Ok(Response::error(400, "GG: amount is required"));
+        }
+        let converted = match ghost_gate_core::policy::GatePolicy::raw_units_for(&amount, div) {
+            Some(raw) => Response::ok_json(&serde_json::json!({
+                "raw": raw.to_string(),
+                "exact": true,
+                "display": ghost_gate_core::policy::GatePolicy::format_raw(raw, div),
+            })),
+            None => Response::error(400, &format!(
+                "GG: {amount:?} cannot be represented exactly at divisibility {div} — refused, never rounded"
+            )),
+        };
+        Ok(converted)
+    }
+
     // Read routes.
     if method == "GET" && path == "/admin/api/state" {
         return Ok(admin_state(state, &authority));

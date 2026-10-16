@@ -60,6 +60,12 @@ const session = {
   providerProbe: null,
   unlocked: new Set(),
   inFlight: false,
+  /**
+   * The verified-access session the bridge issued on the last accepted proof, per gate.
+   * MEMORY ONLY: this is a live credential, so it must never reach localStorage, and a reload
+   * drops it — re-verification then needs fresh evidence, which is exactly the product rule.
+   */
+  accessTokens: {},
 };
 
 let previewMode = false;
@@ -438,7 +444,7 @@ async function proveFor(gate) {
       verdict = v.refused
         ? { state: "refused", reason: v.refused }
         : v.state === "accepted"
-        ? { state: "accepted", result: { attested_minimum: v.receipt?.attested_minimum } }
+        ? { state: "accepted", result: { attested_minimum: v.receipt?.attested_minimum }, access: v.access }
         : { state: "failed", reason: "unexpected verdict" };
     }
 
@@ -447,7 +453,20 @@ async function proveFor(gate) {
     // accept/refuse response. There is nothing left to poll here. Judge the door on this single
     // verdict.
     if (verdict.state === "accepted") {
-      session.unlocked.add(gate);
+      // The bridge issued a verified session with the proof. The door opens ONLY on the server's
+      // own /access/check decision — a browser that claims an unlock proves nothing.
+      const grant = verdict.access || null;
+      if (grant && grant.token) {
+        session.accessTokens[gate] = grant.token;
+        const check = await checkAccess(gate, grant.token);
+        if (!check.authorized) {
+          throw new Error(check.reason || "the access check refused the session");
+        }
+        session.unlocked.add(gate);
+      } else {
+        // No access plane on this bridge: keep the audited in-memory unlock (session-scoped).
+        session.unlocked.add(gate);
+      }
       $("proof-line").textContent =
         kind === "minotari_xtm"
           ? "The seal breaks. MILLION-XTM THRESHOLD PROVEN — the exact balance was never disclosed."
@@ -474,6 +493,22 @@ async function proveFor(gate) {
     }
   } finally {
     session.inFlight = false;
+  }
+}
+
+/**
+ * The server-side access decision. This is the ONLY thing that may open a door for real when the
+ * bridge is registry-backed: the token goes to the bridge, the bridge answers with its own
+ * decision from its own registry and session store. There is no client-side override.
+ */
+async function checkAccess(gate, token) {
+  try {
+    const url = `/access/check?gate=${encodeURIComponent(gate)}&token=${encodeURIComponent(token)}`;
+    const res = await fetch(url);
+    if (!res.ok) return { authorized: false, reason: `the access check failed (${res.status})` };
+    return await res.json();
+  } catch (e) {
+    return { authorized: false, reason: String(e && e.message ? e.message : e) };
   }
 }
 

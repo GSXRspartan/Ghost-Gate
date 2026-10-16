@@ -719,12 +719,16 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                 });
                 // The credential path grants the session here: the receipt IS the verification.
                 self.grant_access_for(id, &hex::encode(job_nonce));
+                // The credential path grants its session here and hands it straight back, so
+                // the browser never has to poll for it.
+                let access = self.access_grants.get(&hex::encode(job_nonce)).cloned();
                 Response::json(
                     200,
                     &serde_json::json!({
                         "state": "accepted",
                         "proof_id": job_id,
                         "receipt": receipt,
+                        "access": access,
                     }),
                 )
             }
