@@ -250,6 +250,15 @@ impl Registry {
             if v.policy.gate_id != v.gate_id || v.application_id != v.application_id {
                 return Err("policy version identity mismatch".into());
             }
+            // A version belongs to the ledger the application is bound to. If the application was
+            // re-pointed at another cohort or genesis, its frozen versions no longer describe this
+            // deployment and the registry refuses to load rather than serving a stale gate.
+            if v.network != app.network || v.genesis_hash != app.genesis_hash {
+                return Err(format!(
+                    "policy version {}/{} v{} was frozen for network 0x{:02x}/{} but the application now declares 0x{:02x}/{}",
+                    v.application_id, v.gate_id, v.version, v.network, v.genesis_hash, app.network, app.genesis_hash
+                ));
+            }
             seen.insert(key, v.version);
         }
         Ok(())
@@ -441,13 +450,17 @@ pub struct GateBindingSnapshot {
     pub policy_hash: String,
     pub grants: Vec<String>,
     pub test_lane: bool,
+    /// The cohort this gate is served on, and the ledger's genesis identity. Carried all the way
+    /// into the bridge binding so "this gate" can never mean a different chain's gate with a
+    /// colliding address.
+    pub network: u8,
+    pub genesis_hash: String,
 }
 
 /// Derive the snapshot from a validated registry: only enabled, activatable gates with a deployed
 /// component appear. Test lanes appear too — the bridge tags their sessions — but a test-lane
 /// session can never authorise a production gate (checked at access time).
 pub fn derive_bindings(reg: &Registry) -> Bindings {
-    let hasher = Blake3Hasher;
     let mut gates = Vec::new();
     for app in &reg.applications {
         for g in &app.gates {
@@ -455,7 +468,12 @@ pub fn derive_bindings(reg: &Registry) -> Bindings {
                 continue;
             }
             let Some(component) = g.component_address.as_ref() else { continue };
+            // Only a PUBLISHED gate binds. A draft lives in the dashboard until an administrator
+            // publishes it: the publish step is where the version is frozen, the reason is recorded
+            // and the audit entry is written, so a draft must never reach the bridge behind the
+            // operator's back with a self-computed hash.
             let version = reg.current_version(&app.application_id, &g.gate_id);
+            let Some(version) = version else { continue };
             gates.push(GateBindingSnapshot {
                 application_id: app.application_id.clone(),
                 gate_id: g.gate_id.clone(),
@@ -468,12 +486,12 @@ pub fn derive_bindings(reg: &Registry) -> Bindings {
                 proof_mode: g.proof_mode.to_string(),
                 challenge_domain: g.challenge_domain.clone(),
                 session_ttl_secs: g.effective_ttl(app.default_session_ttl).as_secs(),
-                policy_version: version.map(|v| v.version).unwrap_or(0),
-                policy_hash: version
-                    .map(|v| v.policy_hash.clone())
-                    .unwrap_or_else(|| hash_policy(&hasher, app, g, 1)),
+                policy_version: version.version,
+                policy_hash: version.policy_hash.clone(),
                 grants: app.granted_by(&g.gate_id),
                 test_lane: g.test_lane,
+                network: app.network,
+                genesis_hash: app.genesis_hash.clone(),
             });
         }
     }
@@ -663,6 +681,9 @@ mod tests {
     use super::*;
     use ghost_gate_core::policy::{GateTopology, ProofMode};
 
+    /// A stand-in ledger identity for the tests; production uses the deployment's real genesis hash.
+    const GENESIS: &str = "00f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
+
     fn hasher() -> Blake3Hasher {
         Blake3Hasher
     }
@@ -696,6 +717,8 @@ mod tests {
             gates: vec![],
             revision: 1,
             production: true,
+            network: ghost_gate_core::network::LOCALNET,
+            genesis_hash: "00f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0".into(),
         }
     }
 
@@ -732,7 +755,8 @@ mod tests {
                 gate_id: g.gate_id.clone(),
                 version: 1,
                 policy_hash: hash_policy(&hasher(), reg.applications.first().unwrap(), g, 1),
-                network: 30,
+                network: ghost_gate_core::network::LOCALNET,
+                genesis_hash: GENESIS.to_string(),
                 policy: g.clone(),
                 app_revision: app_rev,
                 created_unix: 1,
@@ -815,7 +839,8 @@ mod tests {
                 gate_id: gid.into(),
                 version: 1,
                 policy_hash: hash_policy(&hasher(), app, g, 1),
-                network: 30,
+                network: ghost_gate_core::network::LOCALNET,
+                genesis_hash: GENESIS.to_string(),
                 policy: g.clone(),
                 app_revision: 1,
                 created_unix: 1,
@@ -970,6 +995,18 @@ impl AccessPlane {
         save_sessions(&self.paths, &fresh)?;
         self.cached_sessions = Some((fresh, std::time::SystemTime::now()));
         Ok(grant)
+    }
+
+    /// The policy hash currently in force for a gate, if it is published. Used by the bridge to bind
+    /// each minted challenge to the policy it was minted under, so an outstanding challenge cannot be
+    /// answered after that policy was replaced.
+    pub fn current_policy_hash(&mut self, gate_id: &str) -> Option<String> {
+        let reg = self.registry().ok()?;
+        reg.versions
+            .iter()
+            .filter(|v| v.gate_id == gate_id)
+            .max_by_key(|v| v.version)
+            .map(|v| v.policy_hash.clone())
     }
 
     /// The server-side access decision for one (token, application, gate) request.

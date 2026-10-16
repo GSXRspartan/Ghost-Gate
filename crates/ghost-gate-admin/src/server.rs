@@ -39,6 +39,9 @@ pub struct AdminState {
     pub pending: Mutex<BTreeMap<String, PendingChallenge>>,
     /// The bootstrap token, required for the FIRST credential registration only.
     pub bootstrap_token: Option<String>,
+    /// The deployment's ledger identity (GG_GENESIS_HASH): applied to every application that does
+    /// not name its own. Set once at startup so the dashboard's identity fields default correctly.
+    pub genesis_hash: Option<String>,
 }
 
 pub type SharedState = Arc<AdminState>;
@@ -222,8 +225,16 @@ impl AdminState {
         p.insert(key, pending);
     }
 
+    /// Consume a pending challenge — exactly once, and only inside its TTL. A challenge older than
+    /// CHALLENGE_TTL is refused even if it was never attempted, so a value observed in a log or a
+    /// proxy cache cannot be replayed late. Removal makes every challenge single-use.
     pub fn take_pending(&self, key: &str) -> Option<PendingChallenge> {
-        self.pending.lock().unwrap().remove(key)
+        let pending = self.pending.lock().unwrap().remove(key)?;
+        let age = ghost_gate_registry::now_unix().saturating_sub(pending.created_unix);
+        if pending.used || age > ghost_gate_core::policy::CHALLENGE_TTL.as_secs() as u64 {
+            return None;
+        }
+        Some(pending)
     }
 }
 
@@ -268,13 +279,23 @@ pub fn route(state: &SharedState, req: &Request) -> Result<Response, ()> {
     // ever authoritative, and an amount that cannot be represented exactly is refused with the
     // reason, never truncated.
     if path == "/admin/api/convert" && (method == "POST" || method == "GET") {
-        let authority = match state.authority(req) {
-            Some(a) => a,
-            None => return Ok(Response::error(401, "GG: administrator authentication required")),
-        };
-        let _ = authority;
-        let amount = req.query.get("amount").cloned().unwrap_or_default();
-        let div: u8 = req.query.get("divisibility").and_then(|d| d.parse().ok()).unwrap_or(6);
+        // The dashboard POSTs JSON; a command line may pass the query string. Both reach the same
+        // server-side conversion — the client is never trusted to have done the arithmetic.
+        let mut amount = req.query.get("amount").cloned().unwrap_or_default();
+        let mut div_raw = req.query.get("divisibility").cloned();
+        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&req.body) {
+            if let Some(v) = value.get("amount").and_then(|v| v.as_str()) {
+                amount = v.to_string();
+            }
+            if let Some(v) = value.get("divisibility") {
+                div_raw = match v {
+                    serde_json::Value::String(s) => Some(s.clone()),
+                    serde_json::Value::Number(n) => Some(n.to_string()),
+                    _ => None,
+                };
+            }
+        }
+        let div: u8 = div_raw.and_then(|d| d.parse().ok()).unwrap_or(6);
         if amount.is_empty() {
             return Ok(Response::error(400, "GG: amount is required"));
         }
@@ -319,6 +340,18 @@ pub fn route(state: &SharedState, req: &Request) -> Result<Response, ()> {
         ("POST", "/admin/api/session/revoke-all") => Ok(revoke_all_sessions(state, req, &authority)),
         _ => Err(()),
     }
+}
+
+/// Origin-only enforcement, for the authentication ceremonies that run BEFORE a session (and so
+/// have no CSRF token to present yet). Login CSRF is a real attack — a hostile page can silently
+/// sign the operator into an account the attacker controls — so the ceremony still must be
+/// same-origin. The passkey ceremony additionally pins the RP ID to this origin's host.
+fn require_same_origin(state: &SharedState, req: &Request) -> Option<Response> {
+    let origin = req.header("origin").unwrap_or("");
+    if origin.is_empty() || origin != state.origin {
+        return Some(Response::error(403, "GG: cross-origin authentication is refused"));
+    }
+    None
 }
 
 /// CSRF + origin enforcement for mutations. Returns Some(deny) when the request must be refused.
@@ -381,6 +414,12 @@ fn bootstrap(state: &SharedState, req: &Request) -> Response {
 
 /// Issue a single-use authentication challenge.
 fn auth_challenge(state: &SharedState, req: &Request) -> Response {
+    // Even a ceremony that creates authority must come from the dashboard itself: a cross-site
+    // request must not be able to make the browser hand this page a challenge, and a cross-site
+    // POST must not be able to ride the operator's cookie into a login or a bootstrap.
+    if let Some(deny) = require_same_origin(state, req) {
+        return deny;
+    }
     let body = match req.json() {
         Ok(v) => v,
         Err(e) => return Response::error(400, &e),
@@ -407,6 +446,9 @@ fn auth_challenge(state: &SharedState, req: &Request) -> Response {
 /// credential becomes the deployment's administrator; later registrations require an
 /// authenticated, stepped-up administrator (managed credentials), so a stranger can never join.
 fn auth_register(state: &SharedState, req: &Request) -> Response {
+    if let Some(deny) = require_same_origin(state, req) {
+        return deny;
+    }
     let body = match req.json() {
         Ok(v) => v,
         Err(e) => return Response::error(400, &e),
@@ -417,6 +459,15 @@ fn auth_register(state: &SharedState, req: &Request) -> Response {
         Err(e) => return Response::error(500, &e),
     };
     let first = reg.credentials.is_empty();
+    if !first {
+        // Registration is closed once an administrator exists. 403, not 400: the request was
+        // well-formed and the answer is a policy decision, not a malformed body.
+        return Response::error(
+            403,
+            "GG: registration is closed: an administrator already exists. Add another credential from \
+             the dashboard while signed in.",
+        );
+    }
     if first {
         let provided = body.get("bootstrapToken").and_then(|t| t.as_str()).unwrap_or("");
         let expected = match &state.bootstrap_token {
@@ -513,6 +564,9 @@ fn auth_register(state: &SharedState, req: &Request) -> Response {
 
 /// Login or step-up with an EXISTING credential.
 fn auth_login(state: &SharedState, req: &Request) -> Response {
+    if let Some(deny) = require_same_origin(state, req) {
+        return deny;
+    }
     let body = match req.json() {
         Ok(v) => v,
         Err(e) => return Response::error(400, &e),
@@ -608,10 +662,20 @@ fn auth_login(state: &SharedState, req: &Request) -> Response {
 }
 
 fn auth_logout(state: &SharedState, req: &Request) -> Response {
+    // Logging out is a state-changing write: same-origin plus the session's own CSRF token.
+    if let Some(deny) = require_same_origin(state, req) {
+        return deny;
+    }
+    let Some(authority) = state.authority(req) else {
+        return Response::error(401, "GG: no session");
+    };
+    if let Some(deny) = require_csrf(state, req, &authority) {
+        return deny;
+    }
     let Some(token) = req.cookie("gg_admin") else {
         return Response::error(401, "GG: no session");
     };
-    let actor = state.authority(req).map(|a| a.session.credential_id).unwrap_or_default();
+    let actor = authority.session.credential_id.clone();
     let result = state.commit(&actor, "admin.logout", |r| {
         r.admin_sessions.retain(|s| s.token != token);
         Ok(())
@@ -692,6 +756,9 @@ fn admin_state(state: &SharedState, authority: &Authority) -> Response {
             "maxGates": a.max_gates,
             "production": a.production,
             "revision": a.revision,
+            "network": a.network,
+            "networkName": network_name(a.network),
+            "genesisHash": a.genesis_hash,
             "gates": gates_json,
         }));
     }
@@ -785,6 +852,45 @@ fn parse_body<T: serde::de::DeserializeOwned>(req: &Request) -> Result<T, Respon
     serde_json::from_slice(&req.body).map_err(|e| Response::error(400, &format!("GG: bad request body: {e}")))
 }
 
+/// Accept "localnet", "0x10" or "16" for the cohort. Names, because an operator should not have to
+/// remember hex, but the value stored is the byte the chain uses.
+fn network_name(byte: u8) -> &'static str {
+    match byte {
+        ghost_gate_core::network::MAINNET => "mainnet",
+        ghost_gate_core::network::STAGENET => "stagenet",
+        ghost_gate_core::network::NEXTNET => "nextnet",
+        ghost_gate_core::network::LOCALNET => "localnet",
+        ghost_gate_core::network::IGOR => "igor",
+        ghost_gate_core::network::ESMERALDA => "esmeralda",
+        _ => "unknown",
+    }
+}
+
+fn resolve_network(raw: Option<&str>) -> Result<u8, String> {
+    let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(ghost_gate_core::network::LOCALNET);
+    };
+    let named = match raw.to_ascii_lowercase().as_str() {
+        "mainnet" => Some(ghost_gate_core::network::MAINNET),
+        "stagenet" => Some(ghost_gate_core::network::STAGENET),
+        "nextnet" => Some(ghost_gate_core::network::NEXTNET),
+        "localnet" => Some(ghost_gate_core::network::LOCALNET),
+        "igor" => Some(ghost_gate_core::network::IGOR),
+        "esmeralda" => Some(ghost_gate_core::network::ESMERALDA),
+        _ => None,
+    };
+    if let Some(byte) = named {
+        return Ok(byte);
+    }
+    let hexed = raw.strip_prefix("0x").unwrap_or(raw);
+    let byte = u8::from_str_radix(hexed, 16)
+        .map_err(|_| format!("GG: {raw:?} is not a network name or a hex byte (localnet, 0x10, 16)"))?;
+    if !ghost_gate_core::network::is_known(byte) {
+        return Err(format!("GG: network byte 0x{byte:02x} is not a known cohort"));
+    }
+    Ok(byte)
+}
+
 fn create_application(state: &SharedState, req: &Request, authority: &Authority) -> Response {
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -797,6 +903,13 @@ fn create_application(state: &SharedState, req: &Request, authority: &Authority)
         max_gates: Option<usize>,
         #[serde(default)]
         production: bool,
+        /// The network cohort this deployment serves (hex byte or a name). Refused when unknown.
+        #[serde(default)]
+        network: Option<String>,
+        /// The ledger's genesis identity, hex. Falls back to GG_GENESIS_HASH so an operator sets it
+        /// once for the whole deployment instead of once per application.
+        #[serde(default)]
+        genesis_hash: Option<String>,
     }
     let body: Body = match parse_body(req) {
         Ok(b) => b,
@@ -811,6 +924,19 @@ fn create_application(state: &SharedState, req: &Request, authority: &Authority)
         "hierarchical" => ghost_gate_core::policy::GateTopology::Hierarchical,
         _ => return Response::error(400, "GG: topology must be independent or hierarchical"),
     };
+    let network = match resolve_network(body.network.as_deref()) {
+        Ok(n) => n,
+        Err(e) => return Response::error(400, &e),
+    };
+    let genesis_hash = match body.genesis_hash.clone().or_else(|| state.genesis_hash.clone()) {
+        Some(g) => g,
+        None => {
+            return Response::error(
+                400,
+                "GG: genesisHash is required — set it per application or once for the deployment with GG_GENESIS_HASH",
+            )
+        }
+    };
     let actor = authority.session.credential_id.clone();
     let app = ghost_gate_core::policy::Application {
         application_id: body.application_id.clone(),
@@ -822,6 +948,8 @@ fn create_application(state: &SharedState, req: &Request, authority: &Authority)
         gates: vec![],
         revision: 1,
         production: body.production,
+        network,
+        genesis_hash,
     };
     if let Err(e) = app.validate() {
         return Response::error(400, &format!("GG: {e}"));
@@ -1057,7 +1185,8 @@ fn publish_policy(state: &SharedState, req: &Request, authority: &Authority) -> 
                 gate_id: gate_id.clone(),
                 version: 1,
                 policy_hash: ghost_gate_core::policy::hash_policy(&hasher, &app, &gate, 1),
-                network: ghost_gate_core::network::LOCALNET,
+                network: app.network,
+                genesis_hash: app.genesis_hash.clone(),
                 policy: gate.clone(),
                 app_revision: app.revision,
                 created_unix: ghost_gate_registry::now_unix(),

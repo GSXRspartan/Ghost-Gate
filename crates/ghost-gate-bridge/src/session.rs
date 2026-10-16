@@ -120,6 +120,11 @@ pub struct IssuedChallenge {
     /// browser session" from a claim into a check. `None` marks an operator/CLI challenge, which
     /// may be answered only by another no-origin caller.
     pub issued_to_origin: Option<String>,
+    /// The gate's policy hash at the moment this challenge was minted. A challenge is answered
+    /// against the policy it was issued under: if an administrator replaces that policy while the
+    /// challenge is outstanding, the old threshold is no longer the rule, so the answer is refused
+    /// and a fresh challenge must be minted. `None` for a gate that is not registry-backed.
+    pub policy_hash: Option<String>,
 }
 
 /// Why a challenge was refused.
@@ -135,6 +140,10 @@ pub enum BookError {
     SessionMismatch,
     #[error("GG: too many live challenges; wait for one to be answered or expire")]
     TooManyChallenges,
+    /// The gate's policy was replaced while this challenge was outstanding: the answer proves the
+    /// OLD threshold, so it is refused and a fresh challenge must be minted.
+    #[error("GG: the gate policy was replaced while this challenge was outstanding")]
+    Superseded,
 }
 
 /// The most live challenges the book will hold at once.
@@ -165,11 +174,40 @@ impl ChallengeBook {
     ///
     /// Refuses a duplicate nonce rather than overwriting: a collision must not silently invalidate a
     /// session somebody already holds.
+    /// Whether this outstanding challenge may still be answered under `hash`, the policy now in
+    /// force. `Ok(())` for a gate with no published policy (nothing to supersede) or a matching hash.
+    pub fn policy_current(&self, nonce: &[u8; 32], hash: Option<&str>) -> Result<(), BookError> {
+        // An absent or already-answered nonce is a different failure (Unknown/Consumed); this call
+        // only answers "may THIS live challenge still be answered under the policy in force?".
+        if self.answered.contains_key(nonce) {
+            return Err(BookError::Consumed);
+        }
+        let entry = self.entries.get(nonce).ok_or(BookError::Unknown)?;
+        if SystemTime::now() > entry.expires_at {
+            return Err(BookError::Expired);
+        }
+        match entry.policy_hash.as_deref() {
+            None => Ok(()),
+            Some(minted) if hash == Some(minted) => Ok(()),
+            Some(_) => Err(BookError::Superseded),
+        }
+    }
+
     pub fn insert(
         &mut self,
         challenge: AnyChallenge,
         ttl: Duration,
         issued_to_origin: Option<String>,
+    ) -> Result<(), BookError> {
+        self.insert_bound(challenge, ttl, issued_to_origin, None)
+    }
+
+    pub fn insert_bound(
+        &mut self,
+        challenge: AnyChallenge,
+        ttl: Duration,
+        issued_to_origin: Option<String>,
+        policy_hash: Option<String>,
     ) -> Result<(), BookError> {
         let nonce = challenge.nonce().into_array();
         if self.entries.contains_key(&nonce) {
@@ -188,6 +226,7 @@ impl ChallengeBook {
                 challenge,
                 expires_at: SystemTime::now() + ttl,
                 issued_to_origin,
+                policy_hash,
             },
         );
         Ok(())
@@ -487,5 +526,49 @@ mod tests {
             r#"{"gate_id":"g1","gate_address":"component_..","resource_address":"resource_..","required_minimum":10000,"attested_minimum":10000,"input_count":1,"challenge_nonce":"ab..","transaction_id":"cd..","proof_kind":"ootle"}"#,
             "the serialised public result must be exactly these fields"
         );
+    }
+}
+
+#[cfg(test)]
+mod policy_binding_tests {
+    use super::*;
+    use tari_template_lib_types::{Hash32 as TemplateHash32, MaxBytes};
+
+    /// A well-formed Ootle challenge; the nonce is what identifies it in the book.
+    fn challenge(nonce: u8) -> AnyChallenge {
+        AnyChallenge::Ootle(Challenge {
+            gate: tari_template_lib_types::ComponentAddress::try_from([1u8; 32]).unwrap(),
+            resource: tari_template_lib_types::ResourceAddress::try_from([2u8; 32]).unwrap(),
+            threshold: 10,
+            network: ghost_gate_core::network::LOCALNET,
+            nonce: TemplateHash32::from_array([nonce; 32]),
+            expires_epoch: 1_000,
+            relying_site: MaxBytes::new_checked(b"site".to_vec()).unwrap(),
+            session_commitment: MaxBytes::new_checked(b"aa".to_vec()).unwrap(),
+        })
+    }
+
+    #[test]
+    fn a_replaced_policy_supersedes_an_outstanding_challenge() {
+        let mut book = ChallengeBook::new();
+        book.insert_bound(challenge(7), Duration::from_secs(60), Some("http://site".into()), Some("hash-v1".into())).unwrap();
+        let nonce = [7u8; 32];
+        // While v1 is the policy in force, the challenge is answerable.
+        assert!(book.policy_current(&nonce, Some("hash-v1")).is_ok());
+        // The administrator replaces the policy: the outstanding answer proves the OLD threshold,
+        // so it must not be answerable any more.
+        assert_eq!(book.policy_current(&nonce, Some("hash-v2")), Err(BookError::Superseded));
+        // Nor if the version was withdrawn entirely.
+        assert_eq!(book.policy_current(&nonce, None), Err(BookError::Superseded));
+        // The refusal reaches the browser as a reason, not a panic.
+        assert_eq!(crate::policy::ProofRefusal::from(BookError::Superseded), crate::policy::ProofRefusal::PolicyReplaced);
+    }
+
+    #[test]
+    fn a_gate_with_no_policy_binding_is_unaffected() {
+        let mut book = ChallengeBook::new();
+        book.insert(challenge(7), Duration::from_secs(60), Some("http://site".into())).unwrap();
+        assert!(book.policy_current(&[7u8; 32], Some("anything")).is_ok());
+        assert_eq!(book.policy_current(&[9u8; 32], Some("anything")), Err(BookError::Unknown));
     }
 }

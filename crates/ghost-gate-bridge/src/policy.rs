@@ -61,6 +61,8 @@ pub enum ProofRefusal {
     AlreadyAnswered,
     #[error("GG: challenge belongs to a different browser session")]
     SessionMismatch,
+    #[error("GG: the gate policy was replaced while this challenge was outstanding; request a fresh one")]
+    PolicyReplaced,
     #[error("GG: challenge names a different gate than the one requested")]
     GateMismatch,
     #[error("GG: challenge names a different resource than the gate's policy")]
@@ -82,6 +84,7 @@ impl From<BookError> for ProofRefusal {
             BookError::Expired => Self::Expired,
             BookError::Consumed => Self::AlreadyAnswered,
             BookError::SessionMismatch => Self::SessionMismatch,
+            BookError::Superseded => Self::PolicyReplaced,
             // A saturated book is not a property of *this* challenge; it surfaces on issue, never
             // on validate. Mapped here so the conversion stays total.
             BookError::TooManyChallenges => Self::UnknownChallenge,
@@ -435,6 +438,7 @@ mod tests {
     #[test]
     fn an_issued_challenge_carries_the_gate_policy_not_the_callers() {
         let issued = IssuedChallenge {
+            policy_hash: None,
             challenge: challenge(3),
             expires_at: std::time::SystemTime::now(),
             issued_to_origin: None,

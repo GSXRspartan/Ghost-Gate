@@ -20,6 +20,11 @@ use std::sync::{Arc, Mutex};
 
 static DIR_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
+
+/// A stand-in ledger identity for the tests: the same discipline as production, where the value is
+/// the deployment's real genesis hash. Tests only care that it is carried, bound and validated.
+const GENESIS: &str = "00f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
+
 fn unique_dir(prefix: &str) -> std::path::PathBuf {
     let n = DIR_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     std::env::temp_dir().join(format!("{prefix}-{}-{n}", std::process::id()))
@@ -61,6 +66,7 @@ fn spawn_server(dir: &std::path::Path) -> TestServer {
             rp_id: "127.0.0.1".into(),
             pending: Mutex::new(BTreeMap::new()),
             bootstrap_token: Some("bootstrap-token-1".into()),
+            genesis_hash: Some(GENESIS.to_string()),
         });
         let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
         let addr = format!("127.0.0.1:{port}");
@@ -414,6 +420,8 @@ fn one_week_session_issue_use_expiry_and_revocation() {
         gates: vec![],
         revision: 1,
         production: true,
+        network: ghost_gate_core::network::LOCALNET,
+        genesis_hash: GENESIS.into(),
     };
     app.gates.push(ghost_gate_core::policy::GatePolicy {
         gate_id: "members".into(),
@@ -439,7 +447,8 @@ fn one_week_session_issue_use_expiry_and_revocation() {
         gate_id: "members".into(),
         version: 1,
         policy_hash: hash_policy(&ghost_gate_registry::Blake3Hasher, app_ref, gate_ref, 1),
-        network: 30,
+        network: ghost_gate_core::network::LOCALNET,
+        genesis_hash: GENESIS.into(),
         policy: gate_ref.clone(),
         app_revision: 1,
         created_unix: 1,
@@ -488,10 +497,23 @@ fn tamper_fixture() -> (TestServer, String, String, WalletAdmin, WalletAdmin) {
     let (cookie, csrf) = owner.register(server.port);
     let _ = http(server.port, "POST", "/admin/api/app/create", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
         &serde_json::json!({ "applicationId": "vault", "displayName": "Vault", "topology": "hierarchical", "defaultSessionTtl": 86_400u64, "production": true }).to_string());
+    // Two steps, exactly as the dashboard does it: create the gates, THEN wire the tiers. A gate
+    // that grants access to a gate which does not exist yet is refused by the server — a fixture that
+    // ignored the reply would silently end up with fewer gates than it believes it has.
+    for (id, threshold) in [("bronze", 1_000_000u64), ("silver", 2_000_000), ("gold", 3_000_000)] {
+        let gate = serde_json::json!({
+            "gateId": id, "name": id, "resourceAddress": "resource_v", "symbol": "GHOST",
+            "divisibility": 6, "thresholdRaw": threshold.to_string(), "proofMode": "consensus",
+            "challengeDomain": "vault.localhost", "grants": [], "enabled": true,
+            "testLane": false, "componentAddress": format!("component_{id}"),
+        });
+        let reply = http(server.port, "POST", "/admin/api/gate/set", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
+            &serde_json::json!({ "applicationId": "vault", "gate": gate }).to_string());
+        assert_eq!(reply.status, 200, "fixture gate {id} must exist: {}", reply.body);
+    }
     for (id, threshold, grants) in [
-        ("gold", 3_000_000u64, vec!["silver".to_string(), "bronze".to_string()]),
-        ("silver", 2_000_000, vec!["bronze".to_string()]),
-        ("bronze", 1_000_000, vec![]),
+        ("silver", 2_000_000u64, vec!["bronze".to_string()]),
+        ("gold", 3_000_000, vec!["silver".to_string(), "bronze".to_string()]),
     ] {
         let gate = serde_json::json!({
             "gateId": id, "name": id, "resourceAddress": "resource_v", "symbol": "GHOST",
@@ -499,8 +521,9 @@ fn tamper_fixture() -> (TestServer, String, String, WalletAdmin, WalletAdmin) {
             "challengeDomain": "vault.localhost", "grants": grants, "enabled": true,
             "testLane": false, "componentAddress": format!("component_{id}"),
         });
-        let _ = http(server.port, "POST", "/admin/api/gate/set", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
+        let reply = http(server.port, "POST", "/admin/api/gate/set", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
             &serde_json::json!({ "applicationId": "vault", "gate": gate }).to_string());
+        assert_eq!(reply.status, 200, "fixture tiers for {id} must wire: {}", reply.body);
     }
     (server, cookie, csrf, owner, outsider)
 }
@@ -663,6 +686,7 @@ fn tamper_8_a_proof_against_another_gate_or_policy_cannot_verify() {
         application_id: "app".into(), display_name: "app".into(), owner_credential: "w".into(),
         topology: GateTopology::Independent, default_session_ttl: 86_400, max_gates: 5,
         gates: vec![], revision: 1, production: true,
+            network: ghost_gate_core::network::LOCALNET, genesis_hash: GENESIS.into(),
     };
     for id in ["a", "b"] {
         app.gates.push(ghost_gate_core::policy::GatePolicy {
@@ -685,7 +709,7 @@ fn tamper_8_a_proof_against_another_gate_or_policy_cannot_verify() {
     for (id, hash, policy) in hashes {
         reg.versions.push(ghost_gate_registry::PolicyVersion {
             application_id: "app".into(), gate_id: id, version: 1,
-            policy_hash: hash, network: 30, policy, app_revision: 1, created_unix: 1,
+            policy_hash: hash, network: ghost_gate_core::network::LOCALNET, genesis_hash: GENESIS.into(), policy, app_revision: 1, created_unix: 1,
         });
     }
     let app_ref = reg.application("app").unwrap();
@@ -744,6 +768,7 @@ fn tamper_10_a_lower_tier_session_cannot_reach_a_higher_tier() {
         application_id: "t".into(), display_name: "t".into(), owner_credential: "w".into(),
         topology: GateTopology::Hierarchical, default_session_ttl: 86_400, max_gates: 5,
         gates: vec![], revision: 1, production: true,
+            network: ghost_gate_core::network::LOCALNET, genesis_hash: GENESIS.into(),
     };
     let mut silver = ghost_gate_core::policy::GatePolicy {
         gate_id: "silver".into(), name: "s".into(), resource_address: "resource_x".into(),
@@ -771,7 +796,7 @@ fn tamper_10_a_lower_tier_session_cannot_reach_a_higher_tier() {
     for (id, hash, policy) in hashes {
         reg.versions.push(ghost_gate_registry::PolicyVersion {
             application_id: "t".into(), gate_id: id, version: 1,
-            policy_hash: hash, network: 30, policy, app_revision: 1, created_unix: 1,
+            policy_hash: hash, network: ghost_gate_core::network::LOCALNET, genesis_hash: GENESIS.into(), policy, app_revision: 1, created_unix: 1,
         });
     }
     let app_ref = reg.application("t").unwrap();
@@ -798,6 +823,7 @@ fn tamper_11_client_side_expiry_extension_is_meaningless() {
         application_id: "e".into(), display_name: "e".into(), owner_credential: "w".into(),
         topology: GateTopology::Independent, default_session_ttl: 3600, max_gates: 5,
         gates: vec![], revision: 1, production: true,
+            network: ghost_gate_core::network::LOCALNET, genesis_hash: GENESIS.into(),
     };
     app.gates.push(ghost_gate_core::policy::GatePolicy {
         gate_id: "g".into(), name: "g".into(), resource_address: "resource_x".into(),
@@ -812,7 +838,7 @@ fn tamper_11_client_side_expiry_extension_is_meaningless() {
     reg.versions.push(ghost_gate_registry::PolicyVersion {
         application_id: "e".into(), gate_id: "g".into(), version: 1,
         policy_hash: hash_policy(&ghost_gate_registry::Blake3Hasher, app_ref, g, 1),
-        network: 30, policy: g.clone(), app_revision: 1, created_unix: 1,
+        network: ghost_gate_core::network::LOCALNET, genesis_hash: GENESIS.into(), policy: g.clone(), app_revision: 1, created_unix: 1,
     });
     let app_ref = reg.application("e").unwrap();
     let g = app_ref.gate("g").unwrap();
@@ -870,8 +896,15 @@ fn tamper_13_concurrent_gate_updates_do_not_corrupt_or_race() {
     for h in handles {
         let r = h.join().unwrap();
         if r.status == 200 { accepted += 1; } else {
-            assert!(r.body.to_string().contains("limit") || r.body.to_string().contains("gate"),
-                "unexpected refusal: {}", r.body);
+            // Three honest reasons to refuse a concurrent write, and nothing else is acceptable:
+            // the gate limit (the fixture already holds three gates), the store lock being held by
+            // another writer, or the revision a competing writer moved underneath this one. Each is
+            // a refusal, never a half-applied change.
+            let body = r.body.to_string();
+            assert!(
+                body.contains("limit") || body.contains("gate") || body.contains("locked by another process"),
+                "unexpected refusal: {}", body
+            );
         }
     }
     // All eight landed or were refused with an honest reason; the registry is coherent either way.
@@ -937,4 +970,245 @@ fn every_privileged_change_is_audited_with_actor_versions_and_outcome() {
         "the refused edit is audited with the application: {:?}", audit.iter().map(|e| (e.action.as_str(), e.outcome)).collect::<Vec<_>>());
     // The permanent ndjson log exists alongside the tail.
     assert!(server.state.paths.audit().exists());
+}
+
+// ---------------------------------------------------------------------------
+// Hardening added after the first live run: same-origin ceremonies, the JSON
+// converter, draft gates that must not bind, digest stability and ledger identity.
+// ---------------------------------------------------------------------------
+
+fn ceremonies_refuse_cross_origin_requests() {
+    let (server, cookie, csrf, _owner, _outsider) = tamper_fixture();
+    // No Origin at all: a browser form POST, a curl typo, a proxy. Refused.
+    let anon = http(server.port, "POST", "/admin/api/auth/challenge", &[], r#"{"kind":"login","method":"wallet"}"#);
+    assert_eq!(anon.status, 403, "a challenge must be same-origin: {}", anon.body);
+    let foreign = http(server.port, "POST", "/admin/api/auth/challenge",
+        &[("Origin", "https://evil.example")], r#"{"kind":"login","method":"wallet"}"#);
+    assert_eq!(foreign.status, 403, "a foreign origin must not get a challenge: {}", foreign.body);
+    // Login is a write too: refusing it here is what stops login-CSRF (a hostile page silently
+    // signing the operator into an account the attacker controls).
+    let login = http(server.port, "POST", "/admin/api/auth/login",
+        &[("Origin", "https://evil.example")], r#"{"method":"wallet","challenge":"x","publicKey":"y","publicNonce":"z","signature":"s"}"#);
+    assert_eq!(login.status, 403, "cross-origin login must be refused: {}", login.body);
+    // Logout is state-changing: same-origin AND the session's CSRF token.
+    let no_csrf = http(server.port, "POST", "/admin/api/auth/logout",
+        &[("Origin", &format!("http://127.0.0.1:{}", server.port)), ("Cookie", &cookie)], "{}");
+    assert_eq!(no_csrf.status, 403, "logout without CSRF must be refused: {}", no_csrf.body);
+    let ok = http(server.port, "POST", "/admin/api/auth/logout",
+        &hdrs(&auth_headers(server.port, &cookie, &csrf)), "{}");
+    assert_eq!(ok.status, 200, "a same-origin logout with CSRF succeeds: {}", ok.body);
+}
+
+#[test]
+fn the_converter_answers_the_dashboard_json_body() {
+    let (server, cookie, csrf, _owner, _outsider) = tamper_fixture();
+    // Exactly what admin.js sends: a JSON body, not a query string.
+    let r = http(server.port, "POST", "/admin/api/convert", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
+        r#"{"amount":"10","divisibility":6}"#);
+    assert_eq!(r.status, 200, "the JSON converter must answer: {}", r.body);
+    assert_eq!(as_str(&r.body, "raw"), "10000000", "10 at divisibility 6 is 10_000_000 raw");
+    assert_eq!(r.body.get("exact").and_then(|e| e.as_bool()), Some(true));
+    // And the query form still works for a command line.
+    let q = http(server.port, "GET", "/admin/api/convert?amount=10&divisibility=6", &hdrs(&auth_headers(server.port, &cookie, &csrf)), "");
+    assert_eq!(q.status, 200);
+    assert_eq!(as_str(&q.body, "raw"), "10000000");
+    // An amount that cannot be represented exactly is refused, never rounded.
+    let bad = http(server.port, "POST", "/admin/api/convert", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
+        r#"{"amount":"0.0000001","divisibility":6}"#);
+    assert_eq!(bad.status, 400, "a sub-smallest-unit amount must be refused: {}", bad.body);
+}
+
+#[test]
+fn a_draft_gate_never_reaches_the_bridge() {
+    use ghost_gate_registry::{derive_bindings, load_registry, Registry};
+    let (server, cookie, csrf, _owner, _outsider) = tamper_fixture();
+    // The fixture's three gates are DRAFT (never published). Nothing may bind yet.
+    let paths = &server.state.paths;
+    let reg: Registry = load_registry(paths).unwrap();
+    assert_eq!(derive_bindings(&reg).gates.len(), 0, "an unpublished gate must not be served");
+    // Publish one: exactly one gate binds, with the identity the administrator configured.
+    let pub_gate = |csrf: &str| {
+        http(server.port, "POST", "/admin/api/policy/publish", &hdrs(&auth_headers(server.port, &cookie, csrf)),
+            r#"{"applicationId":"vault","gateId":"bronze","reason":"first publish"}"#)
+    };
+    assert_eq!(pub_gate(&csrf).status, 200);
+    let reg = load_registry(paths).unwrap();
+    let bindings = derive_bindings(&reg);
+    assert_eq!(bindings.gates.len(), 1, "only the published gate binds");
+    let bound = &bindings.gates[0];
+    assert_eq!(bound.gate_id, "bronze");
+    assert_eq!(bound.network, ghost_gate_core::network::LOCALNET, "the cohort travels with the binding");
+    assert_eq!(bound.genesis_hash, GENESIS, "the ledger identity travels with the binding");
+    assert!(!bound.test_lane);
+}
+
+#[test]
+fn editing_a_draft_never_invalidates_a_published_version() {
+    // The digest must not move when unrelated bookkeeping does: this is what made an earlier build
+    // refuse to load its own registry after the operator wired tiers on an already-published app.
+    let (server, cookie, csrf, _owner, _outsider) = tamper_fixture();
+    let publish = http(server.port, "POST", "/admin/api/policy/publish", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
+        r#"{"applicationId":"vault","gateId":"bronze","reason":"v1"}"#);
+    assert_eq!(publish.status, 200, "{}", publish.body);
+    // Add a fourth gate: the application revision moves, the gate list grows.
+    let add = http(server.port, "POST", "/admin/api/gate/set", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
+        r#"{"applicationId":"vault","gate":{"gateId":"platinum","name":"platinum","resourceAddress":"resource_v","symbol":"GHOST","divisibility":6,"thresholdRaw":"9000000","proofMode":"consensus","challengeDomain":"vault.localhost","grants":[],"enabled":true,"testLane":false,"componentAddress":"component_platinum"}}"#);
+    assert_eq!(add.status, 200, "{}", add.body);
+    // And wire tiers on an already-published gate. The registry must still load.
+    let rewire = http(server.port, "POST", "/admin/api/gate/set", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
+        r#"{"applicationId":"vault","gate":{"gateId":"bronze","name":"bronze","resourceAddress":"resource_v","symbol":"GHOST","divisibility":6,"thresholdRaw":"1000000","proofMode":"consensus","challengeDomain":"vault.localhost","grants":["platinum"],"enabled":true,"testLane":false,"componentAddress":"component_bronze"}}"#);
+    assert_eq!(rewire.status, 200, "{}", rewire.body);
+    let state = http(server.port, "GET", "/admin/api/state", &hdrs(&auth_headers(server.port, &cookie, &csrf)), "");
+    assert_eq!(state.status, 200, "the registry must still load after unrelated edits: {}", state.body);
+}
+
+#[test]
+fn an_application_needs_a_known_cohort_and_a_ledger_identity() {
+    let (server, cookie, csrf, _owner, _outsider) = tamper_fixture();
+    let create = |body: &str| {
+        http(server.port, "POST", "/admin/api/app/create", &hdrs(&auth_headers(server.port, &cookie, &csrf)), body)
+    };
+    // The fixture server has a deployment genesis, so a plain create inherits it.
+    let ok = create(r#"{"applicationId":"inherit","displayName":"Inherit","topology":"independent","defaultSessionTtl":3600,"production":true}"#);
+    assert_eq!(ok.status, 200, "the deployment genesis is inherited: {}", ok.body);
+    // An unknown cohort is refused by name.
+    let unknown = create(r#"{"applicationId":"bad-net","displayName":"Bad","topology":"independent","defaultSessionTtl":3600,"production":true,"network":"atlantis","genesisHash":"00"}"#);
+    assert_eq!(unknown.status, 400, "an unknown cohort must be refused: {}", unknown.body);
+    // A genesis that is not hex is refused: it is what distinguishes two ledgers reusing addresses.
+    let not_hex = create(r#"{"applicationId":"bad-gen","displayName":"Bad","topology":"independent","defaultSessionTtl":3600,"production":true,"genesisHash":"zzz"}"#);
+    assert_eq!(not_hex.status, 400, "a non-hex genesis must be refused: {}", not_hex.body);
+    // A name is accepted and stored as the cohort byte the chain uses.
+    let named = create(r#"{"applicationId":"named-net","displayName":"Named","topology":"independent","defaultSessionTtl":3600,"production":true,"network":"localnet","genesisHash":"aabbccdd"}"#);
+    assert_eq!(named.status, 200, "{}", named.body);
+    let state = http(server.port, "GET", "/admin/api/state", &hdrs(&auth_headers(server.port, &cookie, &csrf)), "");
+    let body = &state.body;
+    let apps = body.get("applications").and_then(|a| a.as_array()).unwrap();
+    let named_app = apps.iter().find(|a| a.get("applicationId").and_then(|i| i.as_str()) == Some("named-net")).expect("the named app exists");
+    assert_eq!(named_app.get("network").and_then(|n| n.as_u64()), Some(ghost_gate_core::network::LOCALNET as u64));
+    assert_eq!(named_app.get("genesisHash").and_then(|g| g.as_str()), Some("aabbccdd"));
+}
+
+// ---------------------------------------------------------------------------
+// Scalability: real measurements, not invented maximums
+// ---------------------------------------------------------------------------
+
+/// The cost of N gates, measured: registry validation, the derived bindings, the file round trip and
+/// the per-request access check. The operator asked for REAL numbers, so this prints them. The one
+/// invariant worth asserting is the shape: the visitor-facing path is a session lookup plus one
+/// decision, so it stays flat while the one-off administrator costs grow linearly and stay small.
+#[test]
+fn measured_scalability_at_1_3_10_25_and_50_gates() {
+    use ghost_gate_core::policy::{hash_policy, GateTopology, ProofMode};
+    use ghost_gate_registry::{check_access, derive_bindings, issue_session, Blake3Hasher, Registry, StoreLock};
+    use std::time::Instant;
+
+    let dir = unique_dir("gg-scale");
+    std::fs::create_dir_all(&dir).unwrap();
+    let paths = StorePaths::new(&dir);
+    let mut report = String::from("gates | validate(ms) | bindings(ms) | save+load(ms) | access_check(micros)\n");
+
+    for count in [1usize, 3, 10, 25, 50] {
+        let mut reg = Registry::default();
+        reg.credentials.push(ghost_gate_registry::AdminCredential {
+            credential_id: "wallet:op".into(),
+            kind: ghost_gate_registry::CredentialKind::WalletKey,
+            label: "op".into(),
+            registered_unix: 1,
+            es256_public_sec1: None,
+            ristretto_public_hex: Some("k".into()),
+        });
+        let mut app = ghost_gate_core::policy::Application {
+            application_id: "scale".into(),
+            display_name: "Scale".into(),
+            owner_credential: "wallet:op".into(),
+            topology: GateTopology::Hierarchical,
+            default_session_ttl: 86_400,
+            max_gates: count,
+            gates: vec![],
+            revision: 1,
+            production: true,
+            network: ghost_gate_core::network::LOCALNET,
+            genesis_hash: GENESIS.into(),
+        };
+        for i in 0..count {
+            app.gates.push(ghost_gate_core::policy::GatePolicy {
+                gate_id: format!("gate-{i}"),
+                name: format!("Gate {i}"),
+                resource_address: format!("resource_{i:064x}"),
+                symbol: "GHOST".into(),
+                divisibility: 6,
+                threshold_raw: (i as u128 + 1) * 1_000_000,
+                proof_mode: ProofMode::Consensus,
+                challenge_domain: "scale.localhost".into(),
+                session_ttl_override: None,
+                grants: if i + 1 < count { vec![format!("gate-{}", i + 1)] } else { vec![] },
+                enabled: true,
+                test_lane: false,
+                component_address: Some(format!("component_{i:064x}")),
+            });
+        }
+        app.validate().unwrap();
+        reg.applications.push(app);
+        let hashes: Vec<(String, String, ghost_gate_core::policy::GatePolicy)> = {
+            let a = reg.application("scale").unwrap();
+            (0..count)
+                .map(|i| {
+                    let g = a.gate(&format!("gate-{i}")).unwrap();
+                    (format!("gate-{i}"), hash_policy(&Blake3Hasher, a, g, 1), g.clone())
+                })
+                .collect()
+        };
+        for (gid, hash, policy) in hashes {
+            reg.versions.push(ghost_gate_registry::PolicyVersion {
+                application_id: "scale".into(),
+                gate_id: gid,
+                version: 1,
+                policy_hash: hash,
+                network: ghost_gate_core::network::LOCALNET,
+                genesis_hash: GENESIS.into(),
+                policy,
+                app_revision: 1,
+                created_unix: 1,
+            });
+        }
+
+        let t0 = Instant::now();
+        reg.validate_all().unwrap();
+        let validate = t0.elapsed();
+
+        let t0 = Instant::now();
+        let _bindings = derive_bindings(&reg);
+        let bindings_time = t0.elapsed();
+
+        let lock = StoreLock::acquire(&paths);
+        let t0 = Instant::now();
+        ghost_gate_registry::save_registry(&paths, &reg).unwrap();
+        let loaded = ghost_gate_registry::load_registry(&paths).unwrap();
+        let io_time = t0.elapsed();
+        drop(lock);
+
+        // One live session for the top gate covers the per-request path visitors actually hit.
+        let a = loaded.application("scale").unwrap();
+        let top = a.gate(&format!("gate-{}", count - 1)).unwrap();
+        let mut entropy = [0u8; 32];
+        let session = issue_session(&loaded, "scale", &format!("gate-{}", count - 1), hash_policy(&Blake3Hasher, a, top, 1), &mut entropy).unwrap();
+        let sessions = vec![session.clone()];
+        let _ = check_access(&loaded, &sessions, &session.token, "scale", &format!("gate-{}", count - 1), ghost_gate_registry::now_unix());
+        let t0 = Instant::now();
+        let n = 200;
+        for _ in 0..n {
+            let _ = check_access(&loaded, &sessions, &session.token, "scale", "gate-0", ghost_gate_registry::now_unix());
+        }
+        let per_check = t0.elapsed() / n;
+
+        report.push_str(&format!(
+            "{count} | {:.3} | {:.3} | {:.3} | {:.1}\n",
+            validate.as_secs_f64() * 1000.0,
+            bindings_time.as_secs_f64() * 1000.0,
+            io_time.as_secs_f64() * 1000.0,
+            per_check.as_secs_f64() * 1_000_000.0,
+        ));
+    }
+    println!("\n== measured scalability (this machine, debug build) ==\n{report}");
+    let _ = std::fs::remove_dir_all(&dir);
 }

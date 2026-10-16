@@ -449,6 +449,21 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
     /// remembers it against the challenge nonce so the status poll can carry it. Returns None
     /// when the bridge is not registry-backed or the gate is not registry-bound.
     fn grant_access_for(&mut self, gate_id: &str, nonce_hex: &str) -> Option<ghost_gate_registry::AccessGrant> {
+        // A proof is only worth a session under the policy it was answered against. If an
+        // administrator replaced that policy while the challenge was outstanding, the answer proves
+        // the OLD threshold — so no session is issued and the caller must mint a fresh challenge.
+        let current = self.access.as_mut()?.plane.current_policy_hash(gate_id);
+        let nonce = hex::decode(nonce_hex).ok().and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok());
+        if let Some(nonce) = nonce {
+            if self.challenges.policy_current(&nonce, current.as_deref()).is_err() {
+                eprintln!(
+                    "ghost-gate-bridge: refusing a session for gate {gate_id}: the policy was replaced while \
+                     challenge {} was outstanding; a fresh challenge is required",
+                    hex::encode(nonce)
+                );
+                return None;
+            }
+        }
         let grant = self.access.as_mut()?.grant(gate_id).ok()?;
         self.access_grants.insert(nonce_hex.to_string(), grant.clone());
         Some(grant)
@@ -549,6 +564,9 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             unreachable!("gate existence was checked above")
         };
         let session = random_nonce();
+        // Registry-backed: bind the challenge to the policy version in force right now, so a
+        // replacement cannot be satisfied by an answer computed under the old threshold.
+        let minted_under = self.access.as_mut().and_then(|a| a.plane.current_policy_hash(id));
         let issued = match self
             .gates
             .issue_challenge(
@@ -559,6 +577,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                 request.origin.clone(),
                 self.challenge_expires_epoch,
                 xtm_tip,
+                minted_under,
             )
         {
             Ok(issued) => issued,

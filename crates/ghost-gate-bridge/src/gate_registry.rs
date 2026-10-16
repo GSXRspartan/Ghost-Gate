@@ -260,6 +260,7 @@ impl GateRegistry {
         issued_to_origin: Option<String>,
         expires_epoch: u64,
         xtm_tip_height: Option<u64>,
+        policy_hash: Option<String>,
     ) -> Result<IssuedChallenge, crate::session::BookError> {
         let gate = self.gates.get(id).ok_or(crate::session::BookError::Unknown)?;
         let session = max_bytes(session_commitment).ok_or(crate::session::BookError::Unknown)?;
@@ -300,11 +301,12 @@ impl GateRegistry {
                 })
             },
         };
-        book.insert(challenge.clone(), expires_in, issued_to_origin.clone())?;
+        book.insert_bound(challenge.clone(), expires_in, issued_to_origin.clone(), policy_hash.clone())?;
         Ok(IssuedChallenge {
             challenge,
             expires_at: now + expires_in,
             issued_to_origin,
+            policy_hash,
         })
     }
 }
@@ -459,10 +461,10 @@ mod tests {
         let r = registry();
         let mut book = ChallengeBook::new();
         let a = r
-            .issue_challenge("g1", &mut book, b"s", std::time::Duration::from_secs(60), None, 1_000, None)
+            .issue_challenge("g1", &mut book, b"s", std::time::Duration::from_secs(60), None, 1_000, None, None)
             .unwrap();
         let b = r
-            .issue_challenge("g1", &mut book, b"s", std::time::Duration::from_secs(60), None, 1_000, None)
+            .issue_challenge("g1", &mut book, b"s", std::time::Duration::from_secs(60), None, 1_000, None, None)
             .unwrap();
         assert_ne!(
             a.challenge.nonce(), b.challenge.nonce(),
@@ -480,7 +482,7 @@ mod tests {
         let mut book = ChallengeBook::new();
         assert!(
             matches!(
-                r.issue_challenge("nope", &mut book, b"s", std::time::Duration::from_secs(60), None, 1_000, None),
+                r.issue_challenge("nope", &mut book, b"s", std::time::Duration::from_secs(60), None, 1_000, None, None),
                 Err(crate::session::BookError::Unknown)
             ),
             "an unregistered gate is an operator error, distinct from a saturated book"
@@ -497,7 +499,7 @@ mod tests {
         let mut book = ChallengeBook::new();
         assert!(
             matches!(
-                r2.issue_challenge("otherside", &mut book, b"s", std::time::Duration::from_secs(60), None, 1_000, None),
+                r2.issue_challenge("otherside", &mut book, b"s", std::time::Duration::from_secs(60), None, 1_000, None, None),
                 Err(crate::session::BookError::Unknown)
             ),
             "an XTM challenge without chain access is refused, not minted unchecked"
@@ -511,7 +513,7 @@ mod tests {
         r.register("otherside", xtm_binding()).unwrap();
         let mut book = ChallengeBook::new();
         let issued = r
-            .issue_challenge("otherside", &mut book, b"s", std::time::Duration::from_secs(60), None, 1_000, Some(77))
+            .issue_challenge("otherside", &mut book, b"s", std::time::Duration::from_secs(60), None, 1_000, Some(77), None)
             .unwrap();
         match &issued.challenge {
             AnyChallenge::MinotariXtm(x) => {

@@ -199,6 +199,7 @@ function renderApps(state) {
   for (const app of state.applications) {
     const card = document.createElement("div");
     card.className = "gate-card";
+    card.dataset.app = app.applicationId;
     const head = document.createElement("div");
     head.className = "row";
     const title = document.createElement("strong");
@@ -227,14 +228,15 @@ function renderApps(state) {
       const tr = document.createElement("tr");
       const th = g.thresholdRaw;
       const human = ghostFormat(th, g.divisibility);
+      tr.dataset.gateId = g.gateId;
       tr.innerHTML = `
-        <td class="mono">${g.gateId}</td>
-        <td>${g.name}</td>
-        <td class="mono">${short(g.resourceAddress, 18)}</td>
-        <td title="${th} raw units">${human} ${g.symbol}</td>
-        <td>${g.proofMode}${g.activatable ? "" : " (draft — " + (g.blockedReason || "unsupported") + ")"}</td>
+        <td class="mono">${esc(g.gateId)}</td>
+        <td>${esc(g.name)}</td>
+        <td class="mono">${esc(short(g.resourceAddress, 18))}</td>
+        <td title="${esc(th)} raw units">${esc(human)} ${esc(g.symbol)}</td>
+        <td>${esc(g.proofMode)}${g.activatable ? "" : " (draft — " + esc(g.blockedReason || "unsupported") + ")"}</td>
         <td>${g.sessionTtlOverrideSecs ? humanTtl(g.sessionTtlOverrideSecs) : "default"}</td>
-        <td class="mono">${(g.grants || []).join(", ") || "—"}</td>
+        <td class="mono">${esc((g.grants || []).join(", ")) || "—"}</td>
         <td>${g.publishedVersion ? `<span class="published">published v${g.publishedVersion}</span>` : '<span class="draft">draft</span>'} ${g.enabled ? '<span class="badge enabled">enabled</span>' : ""} ${g.testLane ? '<span class="badge test">test lane</span>' : ""}</td>
         <td></td>`;
       table.append(tr);
@@ -280,6 +282,38 @@ function renderApps(state) {
       tlc.id = `testlane-${app.applicationId}`;
       testLane.append(tlc, "Test lane (never authorises production sessions)");
       editor.append(testLane);
+      // Tier wiring: a checkbox per other gate in this application. Save writes the whole gate back
+      // with the chosen grant set — an explicit, auditable action rather than a hidden side effect.
+      const tiers = document.createElement("div");
+      tiers.className = "stacked";
+      const tiersLabel = document.createElement("label");
+      tiersLabel.textContent = "Tiers — which gates this gate opens (save immediately after changing)";
+      tiers.append(tiersLabel);
+      if (app.gates.length === 0) {
+        const none = document.createElement("p");
+        none.className = "hint";
+        none.textContent = "No gates yet — add the gates first, then wire the tiers.";
+        tiers.append(none);
+      }
+      for (const g of app.gates) {
+        // A per-gate row of "opens this other gate" checkboxes; each change saves immediately.
+        const row = document.createElement("label");
+        row.className = "tier-row";
+        row.textContent = `${g.gateId} opens:`;
+        for (const target of app.gates) {
+          if (target.gateId === g.gateId) continue;
+          const lbl = document.createElement("label");
+          lbl.className = "tier-check";
+          const box = document.createElement("input");
+          box.type = "checkbox";
+          box.checked = (g.grants || []).includes(target.gateId);
+          box.onchange = () => wireTiers(app, g.gateId, box);
+          lbl.append(box, ` ${target.gateId}`);
+          row.append(lbl);
+        }
+        tiers.append(row);
+      }
+      editor.append(tiers);
       const buttons = document.createElement("div");
       buttons.className = "gate-actions";
       const add = document.createElement("button");
@@ -325,7 +359,15 @@ function humanTtl(secs) {
   const d = h / 24;
   return `${d} day${d === 1 ? "" : "s"}`;
 }
-function short(s, n) { return s.length > n ? s.slice(0, n) + "…" : s; }
+function short(s, n) { return String(s).length > n ? String(s).slice(0, n) + "…" : s; }
+// Everything an operator typed (gate names, ids, addresses, reasons) comes back out of the API as
+// data and goes into these tables. It is escaped at the point of insertion: a gate named
+// `<img onerror=...>` must render as those characters, not execute.
+function esc(v) {
+  return String(v === undefined || v === null ? "" : v)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
 function ghostFormat(raw, div) {
   // Exact display: strings only, no floats.
   const rawStr = String(raw);
@@ -361,7 +403,10 @@ async function addGate(app) {
     proofMode: mode,
     challengeDomain: `${app.applicationId}.localhost`,
     sessionTtlOverrideSecs: $(`ttl-${app.applicationId}`).value ? Number($(`ttl-${app.applicationId}`).value) : null,
-    grants: $(`grants-${app.applicationId}`).value.split(",").map((x) => x.trim()).filter(Boolean),
+    // Grants are wired by the tier editor below, not here: a gate that opens a tier which does not
+    // exist yet is refused by the server (correctly), so adding gates one at a time must not have to
+    // pre-declare the hierarchy. The field is still honoured for gates that DO exist.
+    grants: $(`grants-${app.applicationId}`).value.split(",").map((x) => x.trim()).filter((id) => app.gates.some((g) => g.gateId === id)),
     enabled: !isDraft,
     testLane: $(`testlane-${app.applicationId}`).checked,
     componentAddress: $(`gate-component-${app.applicationId}`).value.trim() || null,
@@ -369,6 +414,41 @@ async function addGate(app) {
   const r = await api("/admin/api/gate/set", { mutating: true, body: JSON.stringify({ applicationId: app.applicationId, gate }) });
   if (r.status === 200) { await refresh(); set(`Gate ${id} saved.`); }
   else fail(`msg-${app.applicationId}`, r.json.error || String(r.status));
+}
+
+/// Write a gate back with a new grant set. The server validates the whole app after the change, so
+/// an unknown target is refused rather than half-applied.
+async function wireTiers(app, gateId, box) {
+  const card = document.querySelector(`#apps-list .gate-card[data-app="${CSS.escape(app.applicationId)}"]`);
+  if (!card) return;
+  const grants = [...card.querySelectorAll(".tier-check input[type=checkbox]")]
+    .filter((b) => b.checked)
+    .map((b) => b.parentElement.textContent.trim());
+  const gate = app.gates.find((g) => g.gateId === gateId);
+  if (!gate) return;
+  const r = await api("/admin/api/gate/set", {
+    mutating: true,
+    body: JSON.stringify({
+      applicationId: app.applicationId,
+      gate: {
+        gateId: gate.gateId,
+        name: gate.name,
+        resourceAddress: gate.resourceAddress,
+        symbol: gate.symbol,
+        divisibility: gate.divisibility,
+        thresholdRaw: String(gate.thresholdRaw),
+        proofMode: gate.proofMode,
+        challengeDomain: gate.challengeDomain,
+        sessionTtlOverrideSecs: gate.sessionTtlOverrideSecs || null,
+        grants,
+        enabled: gate.enabled,
+        testLane: gate.testLane,
+        componentAddress: gate.componentAddress || null,
+      },
+    }),
+  });
+  if (r.status === 200) { await refresh(); set(`${gateId} tiers saved.`); }
+  else { fail(`msg-${app.applicationId}`, r.json.error || String(r.status)); await refresh(); }
 }
 
 async function publishGate(app) {
@@ -388,8 +468,25 @@ async function removeGate(app) {
 }
 
 async function reorderGates(app) {
-  const ids = [...document.querySelectorAll("#apps-list .gate-card table tr td:first-child")].map((td) => td.textContent.trim());
-  const mine = ids.filter((x) => x && !x.includes("…"));
+  // Read the order from THIS application's table only. (Collecting across every card would send
+  // another application's gate ids, and the server would rightly refuse.) Row order is the operator's
+  // displayed order — the table here is rendered in the server's order, so a move means: take the
+  // gate named in the field and move it to the position the prompt asks for.
+  const card = document.querySelector(`#apps-list .gate-card[data-app="${CSS.escape(app.applicationId)}"]`);
+  const rows = card ? [...card.querySelectorAll("table tr[data-gate-id]")] : [];
+  const current = rows.map((r) => r.dataset.gateId);
+  const gateId = $(`gate-id-${app.applicationId}`).value.trim();
+  if (!gateId || !current.includes(gateId)) {
+    fail(`msg-${app.applicationId}`, "Type the id of a gate in THIS application to move.");
+    return;
+  }
+  const target = rows.findIndex((r) => r.dataset.gateId === gateId);
+  const dir = window.prompt(`Move "${gateId}" to which position (1..${current.length})?`, String(target + 1));
+  if (dir === null) return;
+  const index = Math.max(0, Math.min(current.length - 1, Number(dir) - 1));
+  const mine = current.slice();
+  mine.splice(target, 1);
+  mine.splice(index, 0, gateId);
   const r = await api("/admin/api/gate/reorder", { mutating: true, body: JSON.stringify({ applicationId: app.applicationId, order: mine }) });
   if (r.status === 200) { await refresh(); set("Order saved (cosmetic — order never grants anything)."); }
   else fail(`msg-${app.applicationId}`, r.json.error || String(r.status));
@@ -416,10 +513,10 @@ function renderSessions(state) {
   for (const s of state.sessions) {
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td class="mono">${s.tokenPrefix}…</td>
-      <td class="mono">${s.applicationId}</td>
-      <td>${s.provenGate}</td>
-      <td class="mono">${(s.granted || []).join(", ")}</td>
+      <td class="mono">${esc(s.tokenPrefix)}…</td>
+      <td class="mono">${esc(s.applicationId)}</td>
+      <td>${esc(s.provenGate)}</td>
+      <td class="mono">${esc((s.granted || []).join(", "))}</td>
       <td>${new Date(s.expiresUnix * 1000).toLocaleString()}</td>
       <td>${s.revoked ? '<span class="bad">revoked</span>' : Date.now() / 1000 > s.expiresUnix ? '<span class="bad">expired</span>' : '<span class="ok">live</span>'}</td>
       <td></td>`;
@@ -449,12 +546,12 @@ async function renderAudit() {
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td>${new Date(e.unix * 1000).toLocaleString()}</td>
-      <td class="mono">${short(e.actor, 20)}</td>
-      <td>${e.action}</td>
-      <td class="mono">${e.applicationId || "—"}${e.gate_id ? "/" + e.gate_id : ""}</td>
+      <td class="mono">${esc(short(e.actor, 20))}</td>
+      <td>${esc(e.action)}</td>
+      <td class="mono">${esc(e.applicationId || "—")}${e.gate_id ? "/" + esc(e.gate_id) : ""}</td>
       <td class="mono">${e.old_version != null ? "v" + e.old_version + " → " : ""}${e.new_version != null ? "v" + e.new_version : ""}</td>
       <td>${e.outcome === "Accepted" ? '<span class="ok">accepted</span>' : '<span class="bad">refused</span>'}</td>
-      <td class="hint">${e.detail}</td>`;
+      <td class="hint">${esc(e.detail)}</td>`;
     table.append(tr);
   }
   host.append(table);

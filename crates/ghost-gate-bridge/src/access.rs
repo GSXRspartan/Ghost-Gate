@@ -131,17 +131,50 @@ pub fn binding_from_snapshot(
 ) -> Result<crate::gate_registry::GateBinding, String> {
     use ghost_gate_core::network;
     use tari_template_lib_types::{ComponentAddress, ResourceAddress};
+    // The cohort and genesis identity come from the registry, never from this process's defaults:
+    // a bridge that silently served a localnet gate as if it were a mainnet one would be the one
+    // bug that makes every other check meaningless. An unknown cohort or a missing genesis is
+    // refused, not defaulted.
+    if !network::is_known(snap.network) {
+        return Err(format!("gate {}: network byte 0x{:02x} is not a known cohort", snap.gate_id, snap.network));
+    }
+    if snap.genesis_hash.trim().is_empty() {
+        return Err(format!("gate {}: the snapshot carries no genesis identity", snap.gate_id));
+    }
+    if let Ok(expected) = std::env::var("GG_BRIDGE_NETWORK") {
+        let expected_byte = parse_network_byte(&expected)
+            .ok_or_else(|| format!("GG_BRIDGE_NETWORK {expected:?} is not a cohort name or hex byte"))?;
+        if expected_byte != snap.network {
+            return Err(format!(
+                "gate {}: the snapshot is for network 0x{:02x} but this bridge serves 0x{:02x} — refusing to bind a gate from another ledger",
+                snap.gate_id, snap.network, expected_byte
+            ));
+        }
+    }
     let component: ComponentAddress = try_parse_address(&snap.component_address, "component")?;
     let resource: ResourceAddress = try_parse_address(&snap.resource_address, "resource")?;
     Ok(crate::gate_registry::GateBinding::ootle(
         component,
         resource,
         u64::try_from(snap.threshold_raw).map_err(|_| "threshold exceeds u64 for the engine binding")?,
-        network::LOCALNET,
+        snap.network,
         challenge_domain_bytes(&snap.challenge_domain)?,
         snap.divisibility,
         snap.symbol.clone(),
     ))
+}
+
+/// "localnet", "0x10" or "16" -> the cohort byte.
+fn parse_network_byte(raw: &str) -> Option<u8> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "mainnet" => Some(ghost_gate_core::network::MAINNET),
+        "stagenet" => Some(ghost_gate_core::network::STAGENET),
+        "nextnet" => Some(ghost_gate_core::network::NEXTNET),
+        "localnet" => Some(ghost_gate_core::network::LOCALNET),
+        "igor" => Some(ghost_gate_core::network::IGOR),
+        "esmeralda" => Some(ghost_gate_core::network::ESMERALDA),
+        other => u8::from_str_radix(other.strip_prefix("0x").unwrap_or(other), 16).ok(),
+    }
 }
 
 /// The template address types may not implement FromStr; they construct from a string via their

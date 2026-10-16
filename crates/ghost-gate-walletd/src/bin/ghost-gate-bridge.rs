@@ -413,8 +413,21 @@ impl Config {
             return Err("GG_BRIDGE_ORIGINS must list at least one permitted browser origin".into());
         }
 
-        let gates_raw = std::env::var("GG_BRIDGE_GATES")
-            .map_err(|_| "GG_BRIDGE_GATES must name at least one gate, as id=gate_address:resource:threshold:divisibility".to_string())?;
+        // A registry-backed bridge (GG_BINDINGS_PATH set) takes its gates from the admin plane's
+        // authoritative snapshot, so the env var is optional there: the dashboard is the operator's
+        // interface, not this variable. Without the registry, the env var remains required —
+        // a bridge with no gates at all would be a silent no-op.
+        let registry_backed = std::env::var("GG_BINDINGS_PATH")
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false);
+        let gates_raw = match std::env::var("GG_BRIDGE_GATES") {
+            Ok(v) if !v.trim().is_empty() => v,
+            _ if registry_backed => String::new(),
+            _ => {
+                return Err("GG_BRIDGE_GATES must name at least one gate (id=gate_address:resource:threshold:divisibility),                             or set GG_BINDINGS_PATH to run registry-backed from the admin plane"
+                    .into())
+            }
+        };
         let mut gates = Vec::new();
         for entry in gates_raw
             .split(',')
@@ -423,7 +436,7 @@ impl Config {
         {
             gates.push(parse_gate(entry)?);
         }
-        if gates.is_empty() {
+        if gates.is_empty() && !registry_backed {
             return Err("GG_BRIDGE_GATES must name at least one gate".into());
         }
 

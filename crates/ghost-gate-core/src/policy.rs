@@ -242,6 +242,15 @@ pub struct Application {
     /// configuration must never be able to authorize a production session. Demo/test deployments
     /// set this to false explicitly.
     pub production: bool,
+    /// The network cohort this application is bound to (see `core::network`). It is part of every
+    /// policy digest and travels into the bridge bindings: a gate proven on one cohort must never
+    /// be served as if it were the same gate on another. Unknown cohorts are refused.
+    pub network: u8,
+    /// The chain's genesis identity (hex). Genesis plus network byte is what makes "the same
+    /// resource address" mean the same thing — two networks can both host address 0x..., so a
+    /// digest that binds only the network byte would treat unrelated ledgers as one. Required: an
+    /// application without a genesis identity is refused at validation.
+    pub genesis_hash: String,
 }
 
 impl Application {
@@ -268,6 +277,16 @@ impl Application {
         }
         if self.owner_credential.trim().is_empty() {
             return Err("an application must have an owner".into());
+        }
+        if !crate::network::is_known(self.network) {
+            return Err(format!(
+                "network byte 0x{:02x} is not a known cohort (mainnet, stagenet, nextnet, localnet, igor, esmeralda)",
+                self.network
+            ));
+        }
+        let genesis = self.genesis_hash.trim();
+        if genesis.is_empty() || genesis.len() > 128 || !genesis.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err("genesis_hash must be 1..=128 hex characters — it is what distinguishes two ledgers that reuse the same addresses".into());
         }
         if self.gates.len() > self.max_gates {
             return Err(format!(
@@ -451,7 +470,10 @@ pub struct PolicyVersion {
     pub version: u64,
     /// Canonical digest over every field above plus the network/genesis identifier.
     pub policy_hash: String,
+    /// The ledger this version was frozen for: the cohort byte plus the genesis identity. Frozen
+    /// with the policy so a later re-point of the application cannot silently reinterpret it.
     pub network: u8,
+    pub genesis_hash: String,
     /// The policy, frozen. Never mutated in place.
     pub policy: GatePolicy,
     /// Revision of the application this version was cut from.
@@ -479,6 +501,7 @@ impl PolicyVersion {
             version: self.version + 1,
             policy_hash: hash_policy(hasher, app, gate, self.version + 1),
             network: self.network,
+            genesis_hash: self.genesis_hash.clone(),
             policy: gate.clone(),
             app_revision: app.revision,
             created_unix: now_unix(),
@@ -498,7 +521,12 @@ impl PolicyVersion {
 pub fn canonical_form(app: &Application, gate: &GatePolicy, version: u64) -> Vec<u8> {
     let mut canonical = String::new();
     canonical.push_str(&format!("v1|{}|{}|{}", app.application_id, gate.gate_id, version));
-    canonical.push_str(&format!("|{}|{}|{}", app.owner_credential, app.topology.topology_code(), app.revision));
+    // The application's revision is deliberately EXCLUDED: it is bookkeeping that moves on every
+    // edit, while a policy version's digest must stay stable for exactly as long as that version
+    // is the published truth. What IS included is everything that changes what the policy MEANS:
+    // the owner (who may re-publish), the topology (how tiers resolve) and every gate field.
+    canonical.push_str(&format!("|{}|{}|{}", app.owner_credential, app.topology.topology_code(), app.network));
+    canonical.push_str(&format!("|{}", app.genesis_hash));
     canonical.push_str(&format!(
         "|{}|{}|{}|{}|{}",
         gate.resource_address, gate.threshold_raw, gate.divisibility, gate.symbol, gate.name
@@ -586,6 +614,8 @@ mod tests {
             gates: vec![],
             revision: 1,
             production: true,
+            network: crate::network::LOCALNET,
+            genesis_hash: "00f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0".into(),
         }
     }
 
@@ -728,9 +758,32 @@ mod tests {
         g4.symbol = g.symbol.clone();
         assert_ne!(hash_policy(&h, &a, &g4, 1), base, "a ticker clone must not share a hash");
 
+        // The revision is bookkeeping, NOT identity: a version's digest has to stay stable while
+        // that version is the published truth, so unrelated edits elsewhere in the application must
+        // not move it. (An earlier build included the revision and refused to load its own registry
+        // the moment an operator wired tiers on an already-published application.)
         let mut a2 = a.clone();
-        a2.revision = 2;
-        assert_ne!(base, hash_policy(&h, &a2, &g, 1), "revision must change the hash");
+        a2.revision = 99;
+        assert_eq!(base, hash_policy(&h, &a2, &g, 1), "the revision must NOT move a published digest");
+
+        // The ledger identity is identity, though: a gate on another cohort, or on another chain
+        // that reuses the same addresses, is a different gate and must never share a digest.
+        let mut other_net = a.clone();
+        other_net.network = crate::network::STAGENET;
+        assert_ne!(base, hash_policy(&h, &other_net, &g, 1), "the cohort must change the hash");
+        let mut other_genesis = a.clone();
+        other_genesis.genesis_hash = "deadbeef".into();
+        assert_ne!(base, hash_policy(&h, &other_genesis, &g, 1), "the genesis identity must change the hash");
+        // Ownership and topology decide what the policy means, so they stay in.
+        let mut other_owner = a.clone();
+        other_owner.owner_credential = "someone-else".into();
+        assert_ne!(base, hash_policy(&h, &other_owner, &g, 1), "the owner must change the hash");
+        let mut other_topology = a.clone();
+        other_topology.topology = match a.topology {
+            GateTopology::Independent => GateTopology::Hierarchical,
+            GateTopology::Hierarchical => GateTopology::Independent,
+        };
+        assert_ne!(base, hash_policy(&h, &other_topology, &g, 1), "the topology must change the hash");
 
         let mut g5 = g.clone();
         g5.grants = vec!["x".into()];
@@ -750,7 +803,8 @@ mod tests {
             gate_id: g.gate_id.clone(),
             version: 1,
             policy_hash: hash_policy(&h, &a, &g, 1),
-            network: 30,
+            network: crate::network::LOCALNET,
+            genesis_hash: a.genesis_hash.clone(),
             policy: g.clone(),
             app_revision: a.revision,
             created_unix: 1,
