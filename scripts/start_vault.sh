@@ -115,7 +115,7 @@ fi
 
 echo
 echo "== The Haunted Vault is up =="
-echo "  game:     http://127.0.0.1:${BIND##*:}/game"
+echo "  site:     http://127.0.0.1:${BIND##*:}/"
 echo "  demo API: http://127.0.0.1:${BIND##*:}/"
 echo "  bridge log:  /home/pdark/gg-logs/vault-bridge.log"
 if [ -n "${GG_TG_BOT_TOKEN:-}" ] && [ "${1:-}" = "--with-telegram" ]; then

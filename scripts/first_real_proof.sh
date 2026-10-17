@@ -118,7 +118,7 @@ cat <<EOF
 
 The network is wired. Nothing has been proven yet: the proof is YOUR click.
 
-  1. Open  http://127.0.0.1:${BRIDGE_PORT}/game   (hard-refresh: Ctrl+Shift+R)
+  1. Open  http://127.0.0.1:${BRIDGE_PORT}/   (hard-refresh: Ctrl+Shift+R)
   2. Click  "Connect a wallet". Ghost Gate should report the walletd adapter and its consensus
      proof mode. If it says no usable wallet answered, tell me — the wiring is wrong, not you.
   3. In The Crypt, click  "Break the seal". Approve the proof in the wallet daemon.

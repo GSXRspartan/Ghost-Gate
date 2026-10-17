@@ -386,13 +386,6 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             },
 
             Route::Asset(name) => self.serve_asset(name),
-            Route::SpireAsset(name) => {
-                // The name is re-checked inside serve_asset against the Spire allowlist; here it
-                // only gains its directory. An owned String, because the borrow belongs to the
-                // request line, not to this handler.
-                let name = format!("spire/{}", name);
-                self.serve_asset(&name)
-            }
             Route::Challenge(id) => self.issue_challenge(id, request).await,
             Route::Prove(id) => self.prove(id, request).await,
             Route::Credential(id) => self.credential(id, request).await,
@@ -484,32 +477,19 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
     fn serve_asset(&self, name: &str) -> Response {
         // Belt and braces: `Route::resolve` already restricts this to three names, and the check below
         // means a future route cannot widen it by accident.
-        if !(
-            matches!(
-                name,
-                "index.html"
-                    | "app.css"
-                    | "app.js"
-                    | "js/ghost/capabilities.js"
-                    | "js/ghost/provider.js"
-                    | "js/ghost/ghost-gate.js"
-                    | "js/ghost/test.js"
-                    | "vendor/tari-connector.js"
-                    | "vendor/tari-dapp.d.ts"
-                    | "game/index.html"
-                    | "game/sanctum.js"
-                    | "game/story.js"
-                    | "game/chapters.js"
-                    | "game/game.css"
-                    | "telegram/join.html"
-                    | "telegram/claim.js"
-                    | "spire/index.html"
-                    | "spire/spire.css"
-                    | "spire/ghostgate.css"
-                    | "spire/ghostgate.js"
-            ) || (name.starts_with("spire/")
-                && (crate::http::Route::is_spire_script(name.strip_prefix("spire/").unwrap_or(""))
-                    || crate::http::Route::is_spire_sound(name.strip_prefix("spire/").unwrap_or(""))))
+        if !matches!(
+            name,
+            "index.html"
+                | "app.css"
+                | "app.js"
+                | "js/ghost/capabilities.js"
+                | "js/ghost/provider.js"
+                | "js/ghost/ghost-gate.js"
+                | "js/ghost/test.js"
+                | "vendor/tari-connector.js"
+                | "vendor/tari-dapp.d.ts"
+                | "telegram/join.html"
+                | "telegram/claim.js"
         ) {
             return Response::error(404, "GG: no such asset");
         }
@@ -520,21 +500,12 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             return Response::error(404, "GG: no such asset");
         }
         let path = self.asset_dir.join(name);
-        // Audio is binary: it must not pass through the UTF-8 lossy conversion below, which would
-        // mangle it into noise that no browser can play.
-        if name.ends_with(".mp3") {
-            return match std::fs::read(&path) {
-                Ok(bytes) => Response::binary(200, "audio/mpeg", bytes),
-                Err(_) => Response::error(404, format!("GG: {name} is not present in the asset directory")),
-            };
-        }
         match std::fs::read(&path) {
             Ok(bytes) => Response {
                 status: 200,
-                raw: None,
                 content_type: match name {
-                    "index.html" | "game/index.html" | "telegram/join.html" | "spire/index.html" => "text/html; charset=utf-8",
-                    "app.css" | "game/game.css" | "spire/spire.css" | "spire/ghostgate.css" => "text/css; charset=utf-8",
+                    "index.html" | "telegram/join.html" => "text/html; charset=utf-8",
+                    "app.css" => "text/css; charset=utf-8",
                     // A declaration file is source text, not JavaScript.
                     "vendor/tari-dapp.d.ts" => "text/plain; charset=utf-8",
                     _ => "text/javascript; charset=utf-8",
@@ -1219,7 +1190,7 @@ where
         };
 
         let body = render(&response);
-        let _ = tokio::time::timeout(WRITE_TIMEOUT, socket.write_all(&body)).await;
+        let _ = tokio::time::timeout(WRITE_TIMEOUT, socket.write_all(body.as_bytes())).await;
         let _ = socket.shutdown().await;
     }
 }

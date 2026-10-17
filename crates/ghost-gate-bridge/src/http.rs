@@ -56,10 +56,6 @@ pub struct Response {
     pub status: u16,
     pub content_type: &'static str,
     pub body: String,
-    /// Binary payload for the rare assets that are not text (the Spire's audio). When set it is
-    /// written instead of `body`, which then stays empty. An mp3 is bytes, not lossy UTF-8, and a
-    /// bridge that mangles its own assets is a bridge the game cannot use.
-    pub raw: Option<Vec<u8>>,
 }
 
 impl Response {
@@ -76,13 +72,7 @@ impl Response {
             status,
             content_type: "application/json",
             body,
-            raw: None,
         }
-    }
-
-    /// A raw binary payload (audio, images). Never routed through the UTF-8 text path.
-    pub fn binary(status: u16, content_type: &'static str, bytes: Vec<u8>) -> Self {
-        Self { status, content_type, body: String::new(), raw: Some(bytes) }
     }
 
     pub fn error(status: u16, message: impl std::fmt::Display) -> Self {
@@ -114,10 +104,6 @@ pub enum Route<'a> {
     /// That is not cosmetic: a page on any other origin would need CORS, and a CORS-enabled wallet
     /// bridge is a wallet bridge every page can reach.
     Asset(&'a str),
-    /// A file of the Buried Spire game (the reused dungeon crawler), addressed relative to
-    /// `web/spire/`. Same fixed-allowlist discipline as `Asset`: the route only captures the
-    /// name, and the serve path re-checks it against the game's file list before touching disk.
-    SpireAsset(&'a str),
     /// No such route.
     NotFound,
 }
@@ -154,78 +140,11 @@ impl<'a> Route<'a> {
             ("GET", ["vendor", "tari-connector.js"]) => Route::Asset("vendor/tari-connector.js"),
             ("GET", ["vendor", "tari-dapp.d.ts"]) => Route::Asset("vendor/tari-dapp.d.ts"),
             // The Haunted Vault. Same fixed-name rule as every other asset.
-            ("GET", ["game"]) => Route::Asset("game/index.html"),
-            ("GET", ["game", "sanctum.js"]) => Route::Asset("game/sanctum.js"),
-            ("GET", ["game", "story.js"]) => Route::Asset("game/story.js"),
-            ("GET", ["game", "chapters.js"]) => Route::Asset("game/chapters.js"),
-            ("GET", ["game", "game.css"]) => Route::Asset("game/game.css"),
-            // The Buried Spire — the reused dungeon crawler (upstream: albader94/maze-game-html,
-            // MIT). Every file is a fixed allowlist name; there is no dynamic path serving.
-            ("GET", ["spire"]) => Route::Asset("spire/index.html"),
-            ("GET", ["spire", "spire.css"]) => Route::Asset("spire/spire.css"),
-            ("GET", ["spire", "ghostgate.css"]) => Route::Asset("spire/ghostgate.css"),
-            ("GET", ["spire", "ghostgate.js"]) => Route::Asset("spire/ghostgate.js"),
-            ("GET", ["spire", name]) if Self::is_spire_script(name) => Route::SpireAsset(name),
-            ("GET", ["spire", "sound", name]) if Self::is_spire_sound(name) => Route::SpireAsset(name),
             // The Telegram join flow, served same-origin so the credential flow works.
             ("GET", ["telegram", "join"]) => Route::Asset("telegram/join.html"),
             ("GET", ["telegram", "claim.js"]) => Route::Asset("telegram/claim.js"),
             _ => Route::NotFound,
         }
-    }
-
-    /// The Buried Spire's JavaScript files, by exact name. The game's scripts were imported
-    /// upstream-intact (minus the removed leaderboard/PWA), so this list is the game's own module
-    /// list plus Ghost Gate's shim — a new file must be added HERE and to disk, never served by
-    /// pattern.
-    pub fn is_spire_script(name: &str) -> bool {
-        matches!(
-            name,
-            "config.js"
-                | "messages.js"
-                | "utils.js"
-                | "soundManager.js"
-                | "gameState.js"
-                | "tutorial.js"
-                | "input.js"
-                | "mapGenerator.js"
-                | "entities.js"
-                | "inventory.js"
-                | "renderer.js"
-                | "gameLogic.js"
-                | "storyNarration.js"
-                | "main.js"
-                | "ghostgate.js"
-        )
-    }
-
-    /// The Buried Spire's sound files, by exact name (imported flat from upstream's tree; the two
-    /// "Wind through passages" files were renamed on import because a space in a URL segment is a
-    /// request-parsing hazard this bridge does not need).
-    pub fn is_spire_sound(name: &str) -> bool {
-        matches!(
-            name,
-            "Underground_ambience.mp3"
-                | "backfround-sound.mp3"
-                | "gold-orb.mp3"
-                | "white-orb.mp3"
-                | "red-orb.mp3"
-                | "green-orb.mp3"
-                | "purple-orb.mp3"
-                | "blue-orb.mp3"
-                | "ghoul-detection.mp3"
-                | "Footsteps_Stone.mp3"
-                | "stalking.mp3"
-                | "Death_sound_Ominous.mp3"
-                | "Orb_collection.mp3"
-                | "Button_selection.mp3"
-                | "wind-passage-1.mp3"
-                | "wind-passage-2.mp3"
-                | "part1.mp3"
-                | "part2.mp3"
-                | "part3.mp3"
-                | "part4.mp3"
-        )
     }
 }
 
@@ -320,7 +239,7 @@ fn url_decode(s: &str) -> String {
 /// `Content-Length` and `Connection: close` are both mandatory here and neither is negotiable: without
 /// the first the browser hangs, and without the second a client may keep the socket open and let this
 /// process accumulate one per request.
-pub fn render(response: &Response) -> Vec<u8> {
+pub fn render(response: &Response) -> String {
     let reason = match response.status {
         200 => "OK",
         400 => "Bad Request",
@@ -332,26 +251,14 @@ pub fn render(response: &Response) -> Vec<u8> {
         503 => "Service Unavailable",
         _ => "OK",
     };
-    let head = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\n\r\n",
+    format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\n\r\n{}",
         response.status,
         reason,
         response.content_type,
-        response.raw.as_ref().map_or(response.body.len(), |b| b.len()),
-    );
-    match &response.raw {
-        // Binary and text both flow out as bytes; the head is assembled once either way.
-        Some(bytes) => {
-            let mut out = head.into_bytes();
-            out.extend_from_slice(bytes);
-            out
-        }
-        None => {
-            let mut out = head.into_bytes();
-            out.extend_from_slice(response.body.as_bytes());
-            out
-        }
-    }
+        response.body.len(),
+        response.body
+    )
 }
 
 #[cfg(test)]
@@ -404,8 +311,6 @@ mod tests {
         assert_eq!(Route::resolve("GET", "/"), Route::Asset("index.html"));
         assert_eq!(Route::resolve("GET", "/js/ghost/provider.js"), Route::Asset("js/ghost/provider.js"));
         assert_eq!(Route::resolve("GET", "/vendor/tari-connector.js"), Route::Asset("vendor/tari-connector.js"));
-        assert_eq!(Route::resolve("GET", "/game"), Route::Asset("game/index.html"));
-        assert_eq!(Route::resolve("GET", "/game/sanctum.js"), Route::Asset("game/sanctum.js"));
         // The fixed-name list must stay closed: no subdirectory walk, no query suffix.
         assert_eq!(Route::resolve("GET", "/js/ghost/../secret.js"), Route::NotFound);
         assert_eq!(Route::resolve("GET", "/vendor/../Cargo.toml"), Route::NotFound);
@@ -500,25 +405,23 @@ mod tests {
     }
 
     #[test]
-    fn a_rendered_response_declares_its_length_and_closes() -> Result<(), Box<dyn std::error::Error>> {
-        let rendered = String::from_utf8(render(&Response::json(200, &serde_json::json!({"ok": true}))))?;
+    fn a_rendered_response_declares_its_length_and_closes() {
+        let rendered = render(&Response::json(200, &serde_json::json!({"ok": true})));
         assert!(rendered.starts_with("HTTP/1.1 200 OK\r\n"));
         assert!(rendered.contains("Content-Length: 11\r\n"), "{rendered}");
         assert!(rendered.contains("Connection: close\r\n"));
         // `no-store` matters: a cached challenge response would let a page replay one it never saw.
         assert!(rendered.contains("Cache-Control: no-store\r\n"));
         assert!(rendered.ends_with("\r\n\r\n{\"ok\":true}"));
-        Ok(())
     }
 
     #[test]
-    fn an_error_response_is_json_with_a_reason() -> Result<(), Box<dyn std::error::Error>> {
-        let r = String::from_utf8(render(&Response::error(
+    fn an_error_response_is_json_with_a_reason() {
+        let r = render(&Response::error(
             403,
             "GG: origin http://evil.test is not permitted",
-        )))?;
+        ));
         assert!(r.starts_with("HTTP/1.1 403 Forbidden\r\n"));
         assert!(r.ends_with("{\"error\":\"GG: origin http://evil.test is not permitted\"}"));
-        Ok(())
     }
 }
