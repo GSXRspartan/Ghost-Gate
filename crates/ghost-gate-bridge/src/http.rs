@@ -48,6 +48,10 @@ pub struct Request {
     pub host: Option<String>,
     /// The request body, already bounded by the caller.
     pub body: String,
+    /// The `X-GG-Attempt` header: the Privacy Lab's per-attempt trace id, when the visitor supplied
+    /// one. Parsed into its own field (rather than kept as a header map) so that only this one
+    /// header can ever be read by a route, and so nothing else a client sends is even in memory.
+    pub attempt: Option<String>,
 }
 
 /// A response, ready to serialise.
@@ -84,6 +88,12 @@ impl Response {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Route<'a> {
     Health,
+    /// `GET /lab/gates` — the authoritative gate list, from the administrator's registry.
+    LabGates,
+    /// `GET /lab/trace?attempt=<id>` — the sanitised event stream for ONE attempt.
+    LabTrace,
+    /// `POST /lab/simulate` — the explicitly labelled offline simulation. Never a session.
+    LabSimulate,
     WalletStatus,
     /// `GET /gate/:id`
     Gate(&'a str),
@@ -120,6 +130,15 @@ impl<'a> Route<'a> {
         let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
         match (method, segments.as_slice()) {
             ("GET", ["health"]) => Route::Health,
+            // ---- the Privacy Lab ----
+            ("GET", ["lab", "gates"]) => Route::LabGates,
+            ("GET", ["lab", "trace"]) => Route::LabTrace,
+            ("POST", ["lab", "simulate"]) => Route::LabSimulate,
+            // The Lab's own page and assets.
+            ("GET", ["lab"]) => Route::Asset("lab/index.html"),
+            ("GET", ["lab", "lab.css"]) => Route::Asset("lab/lab.css"),
+            ("GET", ["lab", "lab.js"]) => Route::Asset("lab/lab.js"),
+            ("GET", ["lab", "gate-list.js"]) => Route::Asset("lab/gate-list.js"),
             ("GET", ["wallet", "status"]) => Route::WalletStatus,
             ("GET", ["gate", id]) => Route::Gate(id),
             ("POST", ["gate", id, "challenge"]) => Route::Challenge(id),
@@ -182,6 +201,7 @@ pub fn parse_request(raw: &str) -> Option<Request> {
 
     let mut origin = None;
     let mut host = None;
+    let mut attempt = None;
     for line in lines {
         if line.is_empty() {
             break;
@@ -192,6 +212,13 @@ pub fn parse_request(raw: &str) -> Option<Request> {
                 origin = Some(value);
             } else if name.eq_ignore_ascii_case("host") {
                 host = Some(value);
+            } else if name.eq_ignore_ascii_case("x-gg-attempt") {
+                // Shape-checked once, here, so that no route has to re-validate it and nothing
+                // downstream can mistake arbitrary client text for an attempt id.
+                let trimmed = value.trim();
+                if trimmed.len() == 32 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+                    attempt = Some(trimmed.to_string());
+                }
             }
         }
     }
@@ -204,6 +231,7 @@ pub fn parse_request(raw: &str) -> Option<Request> {
         origin,
         host,
         body: raw[body_start..].to_string(),
+        attempt,
     })
 }
 

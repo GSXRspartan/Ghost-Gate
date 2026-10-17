@@ -50,6 +50,7 @@ pub mod origin;
 pub mod policy;
 pub mod server;
 pub mod session;
+pub mod trace;
 pub mod wallet;
 pub mod xtm;
 
