@@ -1,0 +1,1659 @@
+/* Base Styles */
+* {
+    box-sizing: border-box;
+    -webkit-tap-highlight-color: transparent;
+}
+
+html, body {
+    margin: 0;
+    padding: 0;
+    background: #000;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    height: 100dvh;
+    width: 100vw;
+    font-family: monospace;
+    color: white;
+    overflow: hidden;
+    touch-action: none;
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+}
+
+#gameContainer {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    touch-action: none;
+    overflow: hidden;
+}
+
+canvas {
+    border: 2px solid #333;
+    background: #111;
+    touch-action: none;
+    -ms-touch-action: none;
+}
+
+/* Mobile responsive adjustments */
+@media (max-width: 768px), (max-height: 500px) {
+    body {
+        height: 100dvh;
+    }
+
+    #gameContainer {
+        width: 100vw;
+        height: 100vh;
+        height: 100dvh;
+    }
+
+    canvas {
+        border: none;
+    }
+
+    #ui {
+        font-size: 11px !important;
+        padding: 6px !important;
+        min-width: auto !important;
+    }
+}
+
+/* Landscape mobile: tighter UI */
+@media (max-height: 500px) and (orientation: landscape) {
+    #ui {
+        font-size: 10px !important;
+        top: 2px !important;
+        left: 2px !important;
+    }
+}
+
+/* Portrait mobile: ensure canvas and container fill full screen */
+@media (max-width: 768px) and (orientation: portrait) {
+    html, body {
+        padding-top: env(safe-area-inset-top, 0px);
+    }
+
+    #gameContainer {
+        width: 100vw;
+        height: 100vh;
+        height: 100dvh;
+        align-items: flex-start;
+        justify-content: flex-start;
+    }
+
+    canvas {
+        border: none;
+    }
+
+    /* Settings button hidden on mobile (handled in input.js mobile CSS) */
+}
+
+/* Prevent text selection everywhere in the game */
+#gameContainer, #gameContainer * {
+    -webkit-user-select: none;
+    user-select: none;
+} /* Game UI with Gothic Theme - Hidden (now rendered on canvas) */
+#ui {
+    display: none !important;
+}
+
+/* Minimap with Gothic Theme - Hidden (now rendered on canvas) */
+#minimap {
+    display: none !important;
+}
+
+/* Inventory with Gothic Theme - Hidden (now rendered on canvas) */
+#inventory {
+    display: none !important;
+}
+
+.inventory-slot {
+    width: 48px;
+    height: 48px;
+    border: 2px solid #654321;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 22px;
+    background: linear-gradient(135deg, rgba(26,15,8,0.8), rgba(15,8,5,0.9));
+    position: relative;
+    transition: all 0.3s ease;
+    box-shadow: inset 0 2px 4px rgba(139,69,19,0.3);
+}
+
+.inventory-slot::before {
+    content: attr(data-key);
+    position: absolute;
+    top: -12px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 10px;
+    font-family: serif;
+    color: #8B4513;
+    background: rgba(42,24,16,0.9);
+    padding: 2px 5px;
+    border-radius: 4px;
+    border: 1px solid #654321;
+}
+
+.inventory-slot.active {
+    border-color: #DAA520;
+    box-shadow: 0 0 18px rgba(218, 165, 32, 0.7);
+    background: linear-gradient(135deg, rgba(218,165,32,0.15), rgba(139,69,19,0.2));
+}
+
+/* Light Bar with Gothic Theme */
+.light-bar {
+    width: 170px;
+    height: 18px;
+    background: #1a0f08;
+    border: 2px solid #654321;
+    margin-top: 5px;
+    border-radius: 10px;
+    overflow: hidden;
+    box-shadow: inset 0 2px 4px rgba(0,0,0,0.6);
+}
+
+.light-fill {
+    height: 100%;
+    background: linear-gradient(to right, #DAA520, #8B4513);
+    transition: width 0.3s;
+    border-radius: 8px;
+    box-shadow: 0 0 8px rgba(218,165,32,0.5);
+}
+
+/* Power Indicator with Gothic Theme */
+.power-indicator {
+    margin-top: 7px;
+    font-size: 12px;
+    font-family: serif;
+    color: #8B4513;
+    text-shadow: 1px 1px 2px rgba(139,0,0,0.5);
+}
+
+/* Mode Badge with Gothic Theme */
+.mode-badge {
+    background: linear-gradient(135deg, #8B4513, #654321);
+    color: #DAA520;
+    padding: 3px 8px;
+    border-radius: 6px;
+    border: 1px solid #654321;
+    font-size: 11px;
+    font-family: serif;
+    margin-top: 5px;
+    display: inline-block;
+    box-shadow: 0 2px 4px rgba(139,69,19,0.4);
+}
+
+/* Story/Message Display */
+#story {
+    display: none;
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: rgba(0,0,0,0.9);
+    color: white;
+    padding: 20px;
+    border-radius: 8px;
+    z-index: 1000;
+    max-width: 400px;
+    text-align: center;
+    border: 2px solid #ffeb3b;
+}
+
+/* PWA Install Prompt */
+#installPrompt {
+    display: none;
+    position: fixed;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(0,0,0,0.9);
+    color: white;
+    padding: 15px;
+    border-radius: 8px;
+    z-index: 10000;
+}
+
+.install-btn {
+    background: #8B4513;
+    color: white;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.install-dismiss-btn {
+    background: transparent;
+    color: #ccc;
+    border: 1px solid #ccc;
+    padding: 8px 16px;
+    border-radius: 4px;
+    cursor: pointer;
+    margin-left: 8px;
+}
+
+/* ============================================
+   CSP-Safe Styles (moved from inline styles)
+   ============================================ */
+
+/* --- Animations (moved from dynamic <style> elements) --- */
+
+@keyframes achievementSlide {
+    from { transform: translateX(20px); opacity: 0; }
+    to { transform: translateX(0); opacity: 1; }
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+@keyframes glow {
+    from { text-shadow: 0 0 25px rgba(139,0,0,0.8); }
+    to { text-shadow: 0 0 35px rgba(139,0,0,1), 0 0 45px rgba(255,215,0,0.8); }
+}
+
+/* --- Victory Screen --- */
+
+.victory-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(45deg, rgba(10,5,5,0.95), rgba(42,24,16,0.98));
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-start;
+    align-items: center;
+    z-index: 1000;
+    color: #ffffff;
+    text-align: center;
+    animation: fadeIn 2s ease-in;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+.victory-content {
+    max-width: 600px;
+    padding: 40px 40px 60px;
+    margin: auto 0;
+}
+
+.victory-title {
+    color: #FFD700;
+    font-size: 3.5em;
+    margin-bottom: 20px;
+    text-shadow: 0 0 25px rgba(139,0,0,0.8);
+    animation: glow 2s ease-in-out infinite alternate;
+    font-family: serif;
+}
+
+.victory-subtitle {
+    color: #CD853F;
+    font-size: 2em;
+    margin-bottom: 30px;
+    text-shadow: 0 0 15px rgba(139,0,0,0.5);
+    font-family: serif;
+}
+
+.victory-story-box {
+    background: rgba(139,69,19,0.2);
+    border: 3px solid #8B4513;
+    border-radius: 15px;
+    padding: 35px;
+    margin: 30px 0;
+    box-shadow: 0 0 35px rgba(139,69,19,0.4);
+}
+
+.victory-story-text {
+    font-size: 1.4em;
+    line-height: 1.7;
+    color: #DAA520;
+    font-family: serif;
+}
+
+.victory-story-text strong {
+    color: #FFD700;
+}
+
+.victory-story-epilogue {
+    font-size: 1.2em;
+    color: #8B4513;
+    font-family: serif;
+}
+
+.victory-stats {
+    margin: 35px 0;
+    color: #8B4513;
+    font-family: serif;
+}
+
+.victory-stats p {
+    font-size: 1.1em;
+}
+
+.victory-stats strong {
+    color: #DAA520;
+}
+
+.victory-menu-btn {
+    background: linear-gradient(45deg, #8B4513, #654321);
+    color: #FFD700;
+    border: 3px solid #DAA520;
+    padding: 18px 36px;
+    font-size: 1.3em;
+    border-radius: 10px;
+    cursor: pointer;
+    margin: 15px;
+    min-height: 48px;
+    box-shadow: 0 6px 20px rgba(139,69,19,0.5);
+    transition: all 0.3s ease;
+    font-family: serif;
+    font-weight: bold;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+}
+
+/* --- Debug Panel --- */
+
+.debug-label {
+    color: #ffff00;
+    font-weight: bold;
+}
+
+/* --- Confirmation Dialog --- */
+
+.confirm-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.8);
+    z-index: 10000;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+.confirm-dialog {
+    background: linear-gradient(135deg, #111 0%, #222 50%, #111 100%);
+    border: 3px solid #ffeb3b;
+    border-radius: 15px;
+    padding: 30px;
+    max-width: 500px;
+    width: 90%;
+    text-align: center;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+    position: relative;
+}
+
+.confirm-corner {
+    position: absolute;
+    width: 20px;
+    height: 20px;
+    border: 2px solid #ffeb3b;
+    background: #111;
+}
+
+.confirm-corner--top-left {
+    top: -10px;
+    left: -10px;
+    border-right: none;
+    border-bottom: none;
+}
+
+.confirm-corner--top-right {
+    top: -10px;
+    right: -10px;
+    border-left: none;
+    border-bottom: none;
+}
+
+.confirm-corner--bottom-left {
+    bottom: -10px;
+    left: -10px;
+    border-right: none;
+    border-top: none;
+}
+
+.confirm-corner--bottom-right {
+    bottom: -10px;
+    right: -10px;
+    border-left: none;
+    border-top: none;
+}
+
+.confirm-title {
+    color: #ffeb3b;
+    margin: 0 0 20px 0;
+    font-family: monospace;
+    font-size: 24px;
+    text-shadow: 0 0 10px rgba(255, 235, 59, 0.5);
+}
+
+.confirm-message {
+    color: #fff;
+    margin: 0 0 30px 0;
+    font-family: monospace;
+    font-size: 16px;
+    line-height: 1.5;
+    text-shadow: 0 0 5px rgba(255, 255, 255, 0.3);
+}
+
+.confirm-buttons {
+    display: flex;
+    gap: 15px;
+    justify-content: center;
+}
+
+.confirm-btn {
+    border-radius: 8px;
+    padding: 12px 24px;
+    font-family: monospace;
+    font-weight: bold;
+    font-size: 14px;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    text-shadow: 0 0 5px rgba(0, 0, 0, 0.5);
+}
+
+.confirm-btn--ok {
+    background: linear-gradient(135deg, #4CAF50, #45a049);
+    color: white;
+    border: 2px solid #4CAF50;
+    box-shadow: 0 4px 15px rgba(76, 175, 80, 0.3);
+}
+
+.confirm-btn--cancel {
+    background: linear-gradient(135deg, #f44336, #da190b);
+    color: white;
+    border: 2px solid #f44336;
+    box-shadow: 0 4px 15px rgba(244, 67, 54, 0.3);
+}
+
+/* --- Settings Modal --- */
+
+.settings-modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.95);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 10000;
+    font-family: serif;
+}
+
+.settings-modal-content {
+    background: linear-gradient(135deg, #2a1810 0%, #1a0f08 50%, #0f0705 100%);
+    border: 3px solid #8B4513;
+    border-radius: 15px;
+    padding: 30px;
+    max-width: 700px;
+    width: 90%;
+    max-height: 85vh;
+    overflow-y: auto;
+    box-shadow: 0 0 30px rgba(139, 69, 19, 0.5), inset 0 0 20px rgba(218, 165, 32, 0.1);
+    position: relative;
+}
+
+.settings-corner {
+    position: absolute;
+    width: 20px;
+    height: 20px;
+    background: #ffeb3b;
+    transform: rotate(45deg);
+}
+
+.settings-corner--tl { top: -3px; left: -3px; }
+.settings-corner--tr { top: -3px; right: -3px; }
+.settings-corner--bl { bottom: -3px; left: -3px; }
+.settings-corner--br { bottom: -3px; right: -3px; }
+
+.settings-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 25px;
+}
+
+.settings-title {
+    margin: 0;
+    color: #FFD700;
+    text-shadow: 0 0 15px rgba(139, 0, 0, 0.7);
+    font-size: 24px;
+    font-weight: bold;
+    font-family: serif;
+}
+
+.settings-close-btn {
+    background: none;
+    border: 2px solid #DAA520;
+    color: #DAA520;
+    font-size: 22px;
+    cursor: pointer;
+    padding: 10px 14px;
+    min-width: 44px;
+    min-height: 44px;
+    border-radius: 5px;
+    font-weight: bold;
+    text-shadow: 0 0 10px rgba(218, 165, 32, 0.5);
+    font-family: serif;
+}
+
+.pause-actions {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 12px;
+    margin-bottom: 25px;
+}
+
+.pause-btn {
+    padding: 18px 20px;
+    min-height: 48px;
+    font-size: 18px;
+    border: 2px solid #8B4513;
+    border-radius: 8px;
+    cursor: pointer;
+    font-weight: bold;
+    font-family: serif;
+    text-shadow: 0 0 10px rgba(139, 0, 0, 0.3);
+    box-shadow: 0 4px 15px rgba(101, 67, 33, 0.3);
+}
+
+.pause-btn--resume {
+    background: linear-gradient(135deg, #8B4513, #654321);
+    color: #FFD700;
+    border-color: #DAA520;
+    text-shadow: 0 0 10px rgba(139, 0, 0, 0.5);
+    box-shadow: 0 4px 15px rgba(139, 69, 19, 0.3);
+}
+
+.pause-btn--restart {
+    background: linear-gradient(135deg, #654321, #3d2817);
+    color: #CD853F;
+}
+
+.pause-btn--checkpoint {
+    background: linear-gradient(135deg, #654321, #3d2817);
+    color: #9370DB;
+}
+
+.pause-btn--quit {
+    background: linear-gradient(135deg, #654321, #3d2817);
+    color: #DC143C;
+    text-shadow: 0 0 10px rgba(139, 0, 0, 0.5);
+}
+
+.tab-bar {
+    display: flex;
+    gap: 3px;
+    margin-bottom: 25px;
+    border-radius: 10px;
+    overflow: hidden;
+    background: #222;
+    border: 2px solid #333;
+}
+
+.tab-btn {
+    flex: 1;
+    padding: 15px 8px;
+    min-height: 48px;
+    background: #654321;
+    color: #8B4513;
+    border: none;
+    cursor: pointer;
+    font-weight: bold;
+    font-family: monospace;
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.tab-panel--hidden {
+    display: none;
+}
+
+.tab-btn.active {
+    background: linear-gradient(135deg, #DAA520, #8B4513);
+    color: #000;
+    text-shadow: 0 0 5px rgba(0,0,0,0.5);
+}
+
+.settings-grid {
+    display: grid;
+    gap: 25px;
+}
+
+.settings-sub-grid {
+    display: grid;
+    gap: 20px;
+}
+
+.settings-section-title {
+    margin: 0;
+    color: #ffeb3b;
+    text-shadow: 0 0 10px rgba(255, 235, 59, 0.5);
+    font-size: 20px;
+}
+
+.settings-card {
+    background: rgba(255, 235, 59, 0.1);
+    padding: 15px;
+    border-radius: 8px;
+    border: 1px solid #333;
+}
+
+.settings-label {
+    display: block;
+    margin-bottom: 10px;
+    color: #ffeb3b;
+    font-weight: bold;
+}
+
+.settings-label--inline {
+    display: block;
+    margin-bottom: 8px;
+    color: #ffeb3b;
+    font-weight: bold;
+}
+
+.settings-select {
+    width: 100%;
+    padding: 10px;
+    min-height: 44px;
+    background: #222;
+    color: #fff;
+    border: 2px solid #333;
+    border-radius: 5px;
+    font-family: monospace;
+}
+
+.settings-checkbox-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+}
+
+.settings-checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: #fff;
+    background: rgba(255, 235, 59, 0.1);
+    padding: 12px;
+    border-radius: 8px;
+    border: 1px solid #333;
+    cursor: pointer;
+}
+
+.settings-checkbox {
+    accent-color: #ffeb3b;
+    transform: scale(1.5);
+}
+
+.settings-bold {
+    font-weight: bold;
+}
+
+.settings-value {
+    color: #fff;
+}
+
+.settings-range {
+    width: 100%;
+    accent-color: #ffeb3b;
+    height: 8px;
+    min-height: 48px;
+}
+
+.settings-action-row {
+    display: flex;
+    gap: 15px;
+    margin-top: 10px;
+}
+
+.settings-apply-btn {
+    flex: 1;
+    padding: 15px;
+    background: linear-gradient(135deg, #4caf50, #66bb6a);
+    color: white;
+    border: 2px solid #4caf50;
+    border-radius: 8px;
+    cursor: pointer;
+    font-weight: bold;
+    font-family: monospace;
+    text-shadow: 0 0 10px rgba(76, 175, 80, 0.5);
+    box-shadow: 0 4px 15px rgba(76, 175, 80, 0.3);
+}
+
+.settings-reset-btn {
+    flex: 1;
+    padding: 15px;
+    background: linear-gradient(135deg, #ff9800, #ffb74d);
+    color: white;
+    border: 2px solid #ff9800;
+    border-radius: 8px;
+    cursor: pointer;
+    font-weight: bold;
+    font-family: monospace;
+    text-shadow: 0 0 10px rgba(255, 152, 0, 0.5);
+    box-shadow: 0 4px 15px rgba(255, 152, 0, 0.3);
+}
+
+.settings-message {
+    display: none;
+    padding: 15px;
+    background: rgba(76, 175, 80, 0.2);
+    border: 2px solid #4caf50;
+    border-radius: 8px;
+    color: #4caf50;
+    text-align: center;
+    font-weight: bold;
+    text-shadow: 0 0 10px rgba(76, 175, 80, 0.5);
+}
+
+/* --- Stats Panel --- */
+
+.stats-grid {
+    display: grid;
+    gap: 20px;
+}
+
+.stats-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 15px;
+    font-size: 14px;
+}
+
+.stats-card {
+    padding: 15px;
+    background: rgba(255, 235, 59, 0.1);
+    border-radius: 8px;
+    border: 2px solid #333;
+    box-shadow: 0 2px 8px rgba(255, 235, 59, 0.1);
+}
+
+.stats-card strong {
+    color: #ffeb3b;
+    text-shadow: 0 0 8px rgba(255, 235, 59, 0.5);
+}
+
+.stats-card span {
+    color: #fff;
+    font-size: 16px;
+}
+
+.stats-progress-section {
+    margin-top: 10px;
+}
+
+.stats-progress-header {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 8px;
+}
+
+.stats-progress-header strong {
+    color: #ffeb3b;
+    text-shadow: 0 0 10px rgba(255, 235, 59, 0.5);
+}
+
+.stats-progress-header span {
+    color: #fff;
+    font-weight: bold;
+}
+
+.stats-progress-bar {
+    width: 100%;
+    background: #222;
+    border-radius: 10px;
+    overflow: hidden;
+    border: 2px solid #333;
+    box-shadow: inset 0 2px 5px rgba(0,0,0,0.5);
+}
+
+.stats-progress-fill {
+    height: 25px;
+    background: linear-gradient(90deg, #ffeb3b, #ff9800);
+    transition: width 0.5s ease;
+    box-shadow: 0 0 10px rgba(255, 235, 59, 0.5);
+}
+
+/* --- Achievements Panel --- */
+
+.achievements-title {
+    margin: 0 0 20px 0;
+    color: #ffeb3b;
+    text-shadow: 0 0 10px rgba(255, 235, 59, 0.5);
+    font-size: 20px;
+}
+
+.achievements-scroll {
+    max-height: 400px;
+    overflow-y: auto;
+    padding-right: 10px;
+}
+
+.achievement-item {
+    display: flex;
+    align-items: center;
+    gap: 15px;
+    padding: 12px;
+    border-radius: 8px;
+    margin-bottom: 8px;
+    border: 1px solid;
+}
+
+.achievement-item--unlocked {
+    background: rgba(255, 235, 59, 0.2);
+    opacity: 1;
+    border-color: #ffeb3b;
+    box-shadow: 0 2px 8px rgba(255, 235, 59, 0.2);
+}
+
+.achievement-item--locked {
+    background: rgba(255, 235, 59, 0.05);
+    opacity: 0.3;
+    border-color: #666;
+}
+
+.achievement-icon {
+    font-size: 24px;
+    text-shadow: 0 0 8px rgba(255, 235, 59, 0.5);
+}
+
+.achievement-info {
+    flex: 1;
+}
+
+.achievement-name--unlocked {
+    font-weight: bold;
+    color: #ffeb3b;
+    text-shadow: 0 0 10px rgba(255, 235, 59, 0.3);
+}
+
+.achievement-name--locked {
+    font-weight: bold;
+    color: #888;
+}
+
+.achievement-desc--unlocked {
+    font-size: 12px;
+    opacity: 0.9;
+    margin-top: 2px;
+    color: #fff;
+}
+
+.achievement-desc--locked {
+    font-size: 12px;
+    opacity: 0.9;
+    margin-top: 2px;
+    color: #666;
+}
+
+.achievement-status--unlocked {
+    font-size: 10px;
+    color: #4caf50;
+    margin-top: 2px;
+    font-weight: bold;
+}
+
+.achievement-status--locked {
+    font-size: 10px;
+    color: #666;
+    margin-top: 2px;
+}
+
+.achievements-tip {
+    margin-top: 20px;
+    padding: 20px;
+    background: rgba(255, 235, 59, 0.1);
+    border-radius: 10px;
+    border: 2px solid #333;
+    font-size: 13px;
+    color: #fff;
+    box-shadow: 0 2px 8px rgba(255, 235, 59, 0.1);
+}
+
+.achievements-tip strong {
+    color: #ffeb3b;
+    text-shadow: 0 0 8px rgba(255, 235, 59, 0.5);
+}
+
+.achievements-empty {
+    text-align: center;
+    opacity: 0.6;
+    padding: 30px;
+    color: #aaa;
+    font-size: 16px;
+}
+
+/* --- Help Panel --- */
+
+.help-scroll {
+    max-height: 400px;
+    overflow-y: auto;
+    padding-right: 10px;
+}
+
+.help-section {
+    margin-bottom: 25px;
+    padding: 20px;
+    background: rgba(255, 235, 59, 0.1);
+    border-radius: 10px;
+    border: 2px solid #333;
+    box-shadow: 0 2px 8px rgba(255, 235, 59, 0.1);
+}
+
+.help-section--tips {
+    padding: 20px;
+    background: rgba(255, 152, 0, 0.1);
+    border-radius: 10px;
+    border: 2px solid #ff9800;
+    box-shadow: 0 2px 8px rgba(255, 152, 0, 0.1);
+}
+
+.help-section h4 {
+    margin: 0 0 12px 0;
+    color: #ffeb3b;
+    text-shadow: 0 0 8px rgba(255, 235, 59, 0.5);
+}
+
+.help-section--tips h4 {
+    margin: 0 0 12px 0;
+    color: #ff9800;
+    text-shadow: 0 0 8px rgba(255, 152, 0, 0.5);
+}
+
+.help-section h4.help-orb-title {
+    margin-bottom: 15px;
+}
+
+.help-text {
+    margin: 0;
+    color: #fff;
+    line-height: 1.5;
+    font-size: 14px;
+}
+
+.help-controls {
+    color: #fff;
+    line-height: 1.7;
+    font-size: 14px;
+}
+
+.help-controls strong,
+.help-survival strong {
+    color: #ffeb3b;
+}
+
+.help-orb-grid {
+    display: grid;
+    gap: 10px;
+    color: #fff;
+    font-size: 13px;
+}
+
+.help-orb-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px;
+    border-radius: 5px;
+}
+
+.help-orb-item--blue { background: rgba(100, 181, 246, 0.2); border: 1px solid #64b5f6; }
+.help-orb-item--gold { background: rgba(255, 235, 59, 0.2); border: 1px solid #ffeb3b; }
+.help-orb-item--purple { background: rgba(156, 39, 176, 0.2); border: 1px solid #9c27b0; }
+.help-orb-item--green { background: rgba(76, 175, 80, 0.2); border: 1px solid #4caf50; }
+.help-orb-item--white { background: rgba(255, 255, 255, 0.2); border: 1px solid #ffffff; }
+.help-orb-item--red { background: rgba(244, 67, 54, 0.2); border: 1px solid #f44336; }
+.help-orb-item--wisp { background: rgba(204, 204, 255, 0.2); border: 1px solid #ccccff; }
+
+.help-orb-symbol {
+    font-size: 18px;
+}
+
+.help-orb-symbol--blue { color: #64b5f6; text-shadow: 0 0 8px #64b5f6; }
+.help-orb-symbol--gold { color: #ffeb3b; text-shadow: 0 0 8px #ffeb3b; }
+.help-orb-symbol--purple { color: #9c27b0; text-shadow: 0 0 8px #9c27b0; }
+.help-orb-symbol--green { color: #4caf50; text-shadow: 0 0 8px #4caf50; }
+.help-orb-symbol--white { color: #ffffff; text-shadow: 0 0 8px #ffffff; }
+.help-orb-symbol--red { color: #f44336; text-shadow: 0 0 8px #f44336; }
+.help-orb-symbol--wisp { color: #ccccff; text-shadow: 0 0 8px #ccccff; }
+
+.help-orb-name--blue { color: #64b5f6; }
+.help-orb-name--gold { color: #ffeb3b; }
+.help-orb-name--purple { color: #9c27b0; }
+.help-orb-name--green { color: #4caf50; }
+.help-orb-name--white { color: #ffffff; }
+.help-orb-name--red { color: #f44336; }
+.help-orb-name--wisp { color: #ccccff; }
+
+.help-survival {
+    color: #fff;
+    line-height: 1.7;
+    font-size: 14px;
+}
+
+.help-tips-text {
+    color: #fff;
+    line-height: 1.7;
+    font-size: 13px;
+}
+
+/* --- Achievement Notification --- */
+
+.achievement-notification {
+    position: fixed;
+    top: 145px;
+    right: 10px;
+    background: linear-gradient(135deg, #FFD700, #FFA500);
+    color: #000;
+    padding: 8px 16px;
+    border-radius: 8px;
+    box-shadow: 0 4px 15px rgba(255, 215, 0, 0.3);
+    z-index: 10001;
+    font-family: Arial, sans-serif;
+    font-weight: bold;
+    animation: achievementSlide 0.5s ease-out;
+    pointer-events: none;
+}
+
+.achievement-notification-inner {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.achievement-notification-icon {
+    font-size: 24px;
+}
+
+.achievement-notification-name {
+    font-size: 14px;
+}
+
+/* --- Error Messages --- */
+
+.error-toast {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    background: rgba(255, 0, 0, 0.9);
+    color: white;
+    padding: 15px;
+    border-radius: 5px;
+    z-index: 10000;
+    max-width: 300px;
+    font-family: Arial, sans-serif;
+    font-size: 14px;
+}
+
+.critical-error {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: #ff0000;
+    color: white;
+    padding: 20px;
+    border-radius: 10px;
+    z-index: 99999;
+    text-align: center;
+    max-width: 500px;
+}
+
+.critical-error-btn {
+    background: white;
+    color: #ff0000;
+    border: none;
+    padding: 10px 20px;
+    border-radius: 5px;
+    cursor: pointer;
+    margin-top: 10px;
+}
+
+/* --- Tutorial Popup --- */
+
+.tutorial-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.9);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 15000;
+    font-family: monospace;
+    pointer-events: auto;
+}
+
+.tutorial-dialog {
+    background: linear-gradient(135deg, #2a1810 0%, #1a0f08 50%, #0f0705 100%);
+    border: 3px solid #8B4513;
+    border-radius: 15px;
+    padding: 30px;
+    max-width: 600px;
+    width: 90%;
+    box-shadow: 0 0 30px rgba(139, 69, 19, 0.5), inset 0 0 20px rgba(218, 165, 32, 0.1);
+    position: relative;
+    text-align: center;
+    font-family: serif;
+    pointer-events: auto;
+}
+
+.tutorial-inner-border {
+    position: absolute;
+    top: 5px;
+    left: 5px;
+    right: 5px;
+    bottom: 5px;
+    border: 1px solid #DAA520;
+    border-radius: 10px;
+}
+
+.tutorial-corner {
+    position: absolute;
+    color: #DAA520;
+    font-size: 16px;
+}
+
+.tutorial-corner--tl { top: 10px; left: 10px; }
+.tutorial-corner--tr { top: 10px; right: 15px; }
+.tutorial-corner--bl { bottom: 10px; left: 10px; }
+.tutorial-corner--br { bottom: 10px; right: 15px; }
+
+.tutorial-step-counter {
+    position: absolute;
+    top: 15px;
+    right: 15px;
+    color: #CD853F;
+    font-size: 12px;
+    font-weight: bold;
+}
+
+.tutorial-title {
+    margin: 0 0 20px 0;
+    color: #FFD700;
+    text-shadow: 0 0 15px rgba(139, 0, 0, 0.7);
+    font-size: 24px;
+    font-weight: bold;
+}
+
+.tutorial-message-box {
+    margin-bottom: 25px;
+    padding: 20px;
+    background: rgba(139, 69, 19, 0.2);
+    border-radius: 10px;
+    border: 2px solid #654321;
+    line-height: 1.6;
+}
+
+.tutorial-message-text {
+    margin: 0;
+    color: #CD853F;
+    font-size: 16px;
+}
+
+.tutorial-instruction-box {
+    margin-bottom: 25px;
+    padding: 15px;
+    background: rgba(139, 69, 19, 0.3);
+    border-radius: 8px;
+    border: 2px solid #8B4513;
+}
+
+.tutorial-instruction-text {
+    margin: 0;
+    color: #DAA520;
+    font-size: 14px;
+    font-weight: bold;
+}
+
+.tutorial-success-text {
+    margin: 0;
+    color: #4caf50;
+    font-size: 14px;
+    font-weight: bold;
+}
+
+.tutorial-actions {
+    display: flex;
+    gap: 15px;
+    justify-content: center;
+    align-items: center;
+}
+
+.tutorial-continue-btn {
+    padding: 14px 28px;
+    min-height: 48px;
+    min-width: 120px;
+    background: linear-gradient(135deg, #8B4513, #654321);
+    color: #FFD700;
+    border: 2px solid #DAA520;
+    border-radius: 8px;
+    cursor: pointer;
+    font-weight: bold;
+    font-family: serif;
+    font-size: 16px;
+    text-shadow: 0 0 10px rgba(139, 0, 0, 0.5);
+    box-shadow: 0 4px 15px rgba(139, 69, 19, 0.3);
+    transition: all 0.3s ease;
+    pointer-events: auto;
+    z-index: 16000;
+}
+
+.tutorial-skip-btn {
+    padding: 14px 28px;
+    min-height: 48px;
+    min-width: 100px;
+    background: linear-gradient(135deg, #654321, #3d2817);
+    color: #CD853F;
+    border: 2px solid #8B4513;
+    border-radius: 8px;
+    cursor: pointer;
+    font-weight: bold;
+    font-family: serif;
+    font-size: 16px;
+    text-shadow: 0 0 10px rgba(139, 0, 0, 0.3);
+    box-shadow: 0 4px 15px rgba(101, 67, 33, 0.3);
+    transition: all 0.3s ease;
+    pointer-events: auto;
+    z-index: 16000;
+}
+
+.tutorial-dismiss-hint {
+    margin-top: 15px;
+    color: #654321;
+    font-size: 12px;
+}
+
+/* --- Story Narration --- */
+
+.story-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: #000;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    z-index: 10000;
+    opacity: 0;
+    transition: opacity 1s ease-in-out;
+}
+
+.story-text {
+    max-width: 800px;
+    padding: 40px;
+    text-align: center;
+    color: #d4af37;
+    font-size: 24px;
+    line-height: 1.8;
+    font-family: 'Courier New', monospace;
+    text-shadow: 0 0 10px rgba(212, 175, 55, 0.5);
+    opacity: 0;
+    transition: opacity 0.8s ease-in-out;
+}
+
+.story-nav {
+    position: absolute;
+    bottom: 30px;
+    left: 0;
+    right: 0;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 16px;
+    padding: 0 30px;
+}
+
+.story-btn {
+    padding: 14px 28px;
+    min-width: 44px;
+    min-height: 44px;
+    background: rgba(212, 175, 55, 0.2);
+    border: 1px solid #d4af37;
+    color: #d4af37;
+    font-family: 'Courier New', monospace;
+    font-size: 16px;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    opacity: 0.7;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+}
+
+.story-skip-btn {
+    position: absolute;
+    top: 30px;
+    left: 30px;
+}
+
+/* --- Notification Toast --- */
+
+.game-notification {
+    position: fixed;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(0, 0, 0, 0.9);
+    color: #fff;
+    padding: 12px 20px;
+    border-radius: 8px;
+    border: 1px solid #444;
+    backdrop-filter: blur(5px);
+    font-family: monospace;
+    font-size: 14px;
+    z-index: 1000;
+    max-width: 80%;
+    text-align: center;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    overflow: hidden;
+    opacity: 0;
+    transition: opacity 0.3s ease-in-out;
+    pointer-events: none;
+}
+
+/* --- Mobile Help Button --- */
+
+.mobile-help-btn {
+    position: fixed;
+    top: 10px;
+    right: 10px;
+    z-index: 1000;
+    display: none;
+}
+
+/* --- Settings Button --- */
+
+.settings-btn {
+    position: fixed;
+    top: 10px;
+    right: 10px;
+    background: rgba(42, 24, 16, 0.85);
+    color: #DAA520;
+    border: 2px solid #8B4513;
+    border-radius: 8px;
+    padding: 10px 14px;
+    min-width: 44px;
+    min-height: 44px;
+    cursor: pointer;
+    font-size: 18px;
+    z-index: 1000;
+    pointer-events: auto;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+}
+
+/* --- Debug Panel --- */
+
+.debug-panel {
+    position: fixed;
+    top: 10px;
+    left: 10px;
+    background: rgba(0, 0, 0, 0.8);
+    color: #00ff00;
+    padding: 10px;
+    border-radius: 5px;
+    font-family: 'Courier New', monospace;
+    font-size: 12px;
+    z-index: 9999;
+    min-width: 200px;
+    max-height: 400px;
+    overflow-y: auto;
+}
+
+/* --- FPS Display --- */
+
+.fps-display {
+    position: fixed;
+    top: 50px;
+    right: 10px;
+    background: rgba(0, 0, 0, 0.7);
+    color: #00ff00;
+    padding: 5px 10px;
+    border-radius: 3px;
+    font-family: 'Courier New', monospace;
+    font-size: 14px;
+    z-index: 9998;
+}
+
+/* --- Save Indicator --- */
+
+.save-indicator {
+    position: fixed;
+    top: 80px;
+    right: 10px;
+    background: rgba(0, 255, 0, 0.8);
+    color: white;
+    padding: 5px 10px;
+    border-radius: 3px;
+    font-size: 12px;
+    z-index: 9997;
+}
+
+/* --- Name Entry --- */
+
+.name-entry-backdrop {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: transparent;
+    z-index: 9999;
+}
+
+/* --- Mobile Input Styles (moved from dynamic <style> element) --- */
+
+#virtualJoystick {
+    position: fixed;
+    bottom: 20px;
+    left: 20px;
+    width: 120px;
+    height: 120px;
+    display: none;
+    z-index: 1000;
+    touch-action: none;
+}
+
+.joystick-outer {
+    width: 100%;
+    height: 100%;
+    border: 3px solid rgba(255, 255, 255, 0.3);
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.4);
+    position: relative;
+    touch-action: none;
+}
+
+.joystick-inner {
+    width: 46px;
+    height: 46px;
+    background: rgba(255, 255, 255, 0.6);
+    border: 2px solid rgba(255, 255, 255, 0.8);
+    border-radius: 50%;
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    touch-action: none;
+}
+
+#mobileActions {
+    position: fixed;
+    bottom: 20px;
+    right: 15px;
+    display: none;
+    flex-direction: column;
+    gap: 10px;
+    z-index: 1000;
+    touch-action: none;
+}
+
+.mobile-btn {
+    width: 56px;
+    height: 56px;
+    min-width: 44px;
+    min-height: 44px;
+    border: 2px solid rgba(255, 255, 255, 0.3);
+    border-radius: 10px;
+    background: rgba(0, 0, 0, 0.7);
+    color: white;
+    font-size: 16px;
+    font-weight: bold;
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.mobile-btn:active, .mobile-btn.active {
+    background: rgba(255, 255, 255, 0.25);
+    transform: scale(0.92);
+}
+
+.mobile-pause-btn {
+    background: rgba(139, 69, 19, 0.7);
+    border-color: rgba(218, 165, 32, 0.5);
+    font-size: 12px;
+    letter-spacing: 2px;
+}
+
+.orb-btn {
+    font-family: monospace;
+    font-size: 22px;
+    font-weight: bold;
+    transition: background 0.3s ease, color 0.3s ease, border-color 0.3s ease;
+}
+
+/* Show/hide mobile controls based on game state */
+body.mobile-active #virtualJoystick,
+body.mobile-active #mobileActions {
+    display: flex;
+}
+
+body.mobile-active #mobileHelpBtn {
+    display: none;
+}
+
+/* Hide joystick and action buttons during menus/death */
+body.mobile-menu #virtualJoystick,
+body.mobile-menu #mobileActions,
+body.mobile-menu #mobileHelpBtn {
+    display: none;
+}
+
+/* Hide settings button on mobile - pause button serves same purpose */
+body.mobile-active #settingsButton,
+body.mobile-menu #settingsButton {
+    display: none !important;
+}
+
+/* Ensure tutorial and story overlays have touch-friendly buttons */
+#tutorialPopup button,
+#storyOverlay button,
+#victory-overlay button,
+#settingsModal button {
+    min-width: 44px;
+    min-height: 48px;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+}
+
+/* Mobile-friendly story overlay text */
+@media (max-width: 768px) {
+    #storyOverlay #storyText {
+        font-size: 18px !important;
+        padding: 20px !important;
+        max-width: 90vw !important;
+    }
+
+    #tutorialPopup > div > div {
+        max-width: 95vw !important;
+        padding: 20px !important;
+    }
+
+    #victory-overlay > div {
+        max-width: 95vw !important;
+        padding: 20px !important;
+        font-size: 16px !important;
+    }
+
+    #victory-overlay h1 {
+        font-size: 2em !important;
+    }
+
+    #victory-overlay h2 {
+        font-size: 1.3em !important;
+    }
+
+    /* Larger tap targets for mobile */
+    #tutorialPopup button,
+    #storyOverlay button,
+    #victory-overlay button,
+    #settingsModal button {
+        min-height: 48px;
+        padding: 14px 28px !important;
+        font-size: 18px !important;
+    }
+}
+
+/* Landscape adjustments for mobile controls */
+@media (max-height: 500px) and (orientation: landscape) {
+    #virtualJoystick {
+        width: 90px;
+        height: 90px;
+        bottom: 10px;
+        left: 10px;
+    }
+
+    .joystick-inner {
+        width: 36px;
+        height: 36px;
+    }
+
+    #mobileActions {
+        bottom: 10px;
+        right: 10px;
+        gap: 6px;
+    }
+
+    .mobile-btn {
+        width: 44px;
+        height: 44px;
+    }
+}
