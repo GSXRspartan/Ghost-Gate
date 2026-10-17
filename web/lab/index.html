@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <title>Ghost Gate — Privacy Lab</title>
+    <meta name="description" content="Prove enough. Reveal less. A privacy-verification lab: prove a minimum threshold without disclosing your balance.">
+    <link rel="stylesheet" href="/lab/lab.css">
+</head>
+<body>
+<div id="lab-root">
+
+    <header class="masthead">
+        <div>
+            <h1><span class="gg">GHOST GATE</span> · PRIVACY LAB</h1>
+            <div class="tagline">Prove enough. Reveal less.</div>
+        </div>
+        <nav>
+            <span class="mode-badge" id="mode-badge"><span class="dot"></span><span id="mode-label">loading</span></span>
+            <div class="view-switch" role="tablist" aria-label="View">
+                <button id="view-simple" role="tab" aria-selected="true">SIMPLE</button>
+                <button id="view-technical" role="tab" aria-selected="false">TECHNICAL</button>
+            </div>
+        </nav>
+    </header>
+
+    <main>
+        <!-- ============ gate + wallet ============ -->
+        <section class="card" id="gate-card">
+            <h2><span class="n">01</span>Choose what you are proving</h2>
+            <p class="sub">Gates come from the administrator's published policy. This page cannot change a threshold.</p>
+            <label for="gate-select" class="sub">Gate</label>
+            <select id="gate-select" aria-label="Gate"></select>
+            <div class="gate-facts" id="gate-facts"></div>
+        </section>
+
+        <section class="card" id="wallet-card">
+            <h2><span class="n">02</span>Choose how you will prove it</h2>
+            <p class="sub">A wallet is asked to build a statement about a minimum value. It is never asked for a key, a seed or an exact balance.</p>
+            <label for="wallet-select" class="sub">Wallet / proof method</label>
+            <select id="wallet-select" aria-label="Wallet or proof method"></select>
+            <p class="sub" id="wallet-note" style="margin-top:0.6rem"></p>
+        </section>
+
+        <!-- ============ SIMPLE VIEW ============ -->
+        <section id="simple-view">
+            <section class="card" id="steps-card">
+                <h2><span class="n">03</span>What happens when you press Prove</h2>
+                <p class="sub">Nine steps. Each one reflects a real operation this system performs — none of them is decoration.</p>
+                <ol class="steps" id="steps"></ol>
+                <div style="margin-top:1.2rem; display:flex; gap:0.8rem; flex-wrap:wrap;">
+                    <button class="cta" id="prove">Prove access</button>
+                    <button class="ghost" id="simulate">Run the offline simulation</button>
+                </div>
+                <div class="outcome" id="outcome" hidden>
+                    <div class="verdict" id="outcome-title"></div>
+                    <div class="why" id="outcome-body"></div>
+                    <div class="why" id="outcome-detail"></div>
+                </div>
+            </section>
+
+            <section class="card xray">
+                <h2><span class="n">04</span>Privacy X-ray</h2>
+                <p class="sub">What each proof mode reveals, and what it keeps. These lists describe the real protocols, not a promise.</p>
+                <div class="grid-2">
+                    <div>
+                        <h3>WHAT THE VERIFIER LEARNS</h3>
+                        <ul class="learns" id="xray-learns"></ul>
+                    </div>
+                    <div>
+                        <h3>WHAT REMAINS PRIVATE</h3>
+                        <ul class="private" id="xray-private"></ul>
+                    </div>
+                </div>
+                <p class="note" id="xray-note"></p>
+            </section>
+        </section>
+
+        <!-- ============ TECHNICAL VIEW ============ -->
+        <section id="technical-view" hidden>
+            <section class="card">
+                <h2><span class="n">03</span>Protocol inspector</h2>
+                <p class="sub">Real events from the bridge, wallet and network, as they happen. Every field here passed a server-side allowlist.</p>
+                <div class="terminal" id="terminal">
+                    <div class="terminal-bar">
+                        <span class="dot"></span>
+                        <span>GHOST GATE PROTOCOL INSPECTOR</span>
+                        <span class="spacer"></span>
+                        <span id="attempt-label">no attempt</span>
+                        <button id="term-pause" type="button">PAUSE</button>
+                        <button id="term-copy" type="button">COPY</button>
+                        <button id="term-export" type="button">EXPORT</button>
+                    </div>
+                    <div class="terminal-tools">
+                        <input type="text" id="term-filter" placeholder="filter events (code, source, text)…" aria-label="Filter events">
+                        <select id="term-sev" aria-label="Minimum severity" style="max-width:9rem;">
+                            <option value="all">all severities</option>
+                            <option value="info">info +</option>
+                            <option value="notice">notice +</option>
+                            <option value="error">errors only</option>
+                        </select>
+                    </div>
+                    <div class="terminal-log" id="term-log">
+                        <div class="terminal-empty">No verification attempt yet. Choose a gate and press <strong>Prove access</strong>, or run the offline simulation.<span class="caret"></span></div>
+                    </div>
+                </div>
+                <p class="sub" style="margin-top:0.8rem" id="prov-note"></p>
+            </section>
+        </section>
+
+        <!-- ============ TELEGRAM ============ -->
+        <section class="card" id="telegram-card">
+            <h2><span class="n">05</span>Telegram group verification</h2>
+            <p class="sub">Prove here, then bind the verification to a Telegram account to obtain a single-use invite. The bot asks the same bridge about your session; it never sees a wallet.</p>
+            <button class="cta" id="tg-start">Start Telegram verification</button>
+            <p class="sub" id="tg-note" style="margin-top:0.7rem"></p>
+        </section>
+    </main>
+
+    <footer class="lab-footer">
+        Ghost Gate — Privacy Lab. A minimum threshold can be proven without disclosing the amount held;
+        the verifier learns a lower bound, never a balance. Your session expires; a fresh proof is then required.<br>
+        Administrators configure gates at <a href="/admin">the dashboard</a>. Nothing on this page can change a published policy.
+        <span id="version-line"></span>
+    </footer>
+
+</div>
+<script type="module" src="/lab/lab.js"></script>
+</body>
+</html>

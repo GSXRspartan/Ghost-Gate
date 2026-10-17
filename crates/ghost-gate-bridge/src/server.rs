@@ -657,6 +657,11 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                 | "vendor/tari-dapp.d.ts"
                 | "telegram/join.html"
                 | "telegram/claim.js"
+                // The Privacy Lab page and its two assets. A fixed set, like every other asset:
+                // there is no dynamic path under /lab, only the three files the Lab actually uses.
+                | "lab/index.html"
+                | "lab/lab.css"
+                | "lab/lab.js"
         ) {
             return Response::error(404, "GG: no such asset");
         }
@@ -671,8 +676,8 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             Ok(bytes) => Response {
                 status: 200,
                 content_type: match name {
-                    "index.html" | "telegram/join.html" => "text/html; charset=utf-8",
-                    "app.css" => "text/css; charset=utf-8",
+                    "index.html" | "telegram/join.html" | "lab/index.html" => "text/html; charset=utf-8",
+                    "app.css" | "lab/lab.css" => "text/css; charset=utf-8",
                     // A declaration file is source text, not JavaScript.
                     "vendor/tari-dapp.d.ts" => "text/plain; charset=utf-8",
                     _ => "text/javascript; charset=utf-8",
@@ -2479,5 +2484,97 @@ mod tests {
             1,
             "a refused proof must not burn the challenge; the user can try again"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // The Privacy Lab
+    // ------------------------------------------------------------------
+
+    /// The gate list is the registry's public policy — and nothing else. A visitor can read a
+    /// threshold (which the chain publishes anyway); there is no field here that could be a balance.
+    #[tokio::test]
+    async fn lab_gates_lists_the_registry_and_nothing_else() {
+        let mut b = bridge(FakeWallet::new());
+        let r = b.handle(&get("/lab/gates")).await;
+        assert_eq!(r.status, 200);
+        let v: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        let gates = v["gates"].as_array().expect("an array of gates");
+        assert!(!gates.is_empty(), "the harness bridge has at least one gate");
+        let g = &gates[0];
+        for expected in ["gateId", "symbol", "thresholdRaw", "divisibility", "proofMode", "activatable", "sessionsAvailable"] {
+            assert!(g.get(expected).is_some(), "missing {expected}: {g}");
+        }
+        // The threshold is a STRING (exact integers never pass through a float).
+        assert!(g["thresholdRaw"].is_string(), "threshold must be exact: {g}");
+        // No field that could carry a balance, a key or a token.
+        let forbidden = ["balance", "amount", "key", "seed", "token", "witness", "preimage", "owner"];
+        for k in forbidden {
+            assert!(g.get(k).is_none(), "the gate list must not carry {k}: {g}");
+        }
+    }
+
+    /// The labelled offline simulation: real event SHAPE, zero authority.
+    #[tokio::test]
+    async fn lab_simulation_shapes_events_and_grants_nothing() {
+        let mut b = bridge(FakeWallet::new());
+        let r = b.handle(&post("/lab/simulate", serde_json::json!({ "gateId": "g1" }))).await;
+        assert_eq!(r.status, 200);
+        let v: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(v["simulated"], true, "a simulation says so at the top level");
+        assert!(v["session"].is_null(), "a simulation issues NO session: {v}");
+        // The grant event carries the simulated flag and simulated wording.
+        let events = v["trace"]["events"].as_array().unwrap();
+        assert!(events.len() >= 8, "a full walkthrough has events: {}", events.len());
+        let grant = events.iter().find(|e| e["code"] == "access.granted").expect("a grant event");
+        assert_eq!(grant["detail"]["simulated"], true, "the grant is flagged simulated");
+        let message = grant["message"].as_str().unwrap();
+        assert!(message.contains("SIMULATED"), "the grant message says SIMULATED: {message}");
+        // And NO access grant was recorded in the bridge's real grant map.
+        assert!(b.access_grants.is_empty(), "the simulation touched no real grant");
+    }
+
+    /// One visitor's trace is not another's: the attempt id is the only key, and it is unguessable.
+    #[tokio::test]
+    async fn lab_traces_are_scoped_to_their_attempt_id() {
+        let mut b = bridge(FakeWallet::new());
+        let mine = "a".repeat(32);
+        // Create a trace the way the challenge route does.
+        let mut req = post("/gate/g1/challenge", serde_json::json!({}));
+        req.attempt = Some(mine.clone());
+        b.handle(&req).await;
+        // I can read mine.
+        let mut read = get(&format!("/lab/trace?attempt={mine}"));
+        read.query.insert("attempt".into(), mine.clone());
+        let r = b.handle(&read).await;
+        assert_eq!(r.status, 200, "my own trace is readable");
+        // Someone else's is not: a different id 404s.
+        let theirs = "b".repeat(32);
+        let mut foreign = get("/lab/trace");
+        foreign.query.insert("attempt".into(), theirs.clone());
+        assert_eq!(b.handle(&foreign).await.status, 404, "another attempt's trace is not readable");
+        // And an unguessable/malformed id is a plain 404 — no hint that it was malformed.
+        let mut junk = get("/lab/trace");
+        junk.query.insert("attempt".into(), "../../etc/passwd".into());
+        assert_eq!(b.handle(&junk).await.status, 404, "a traversal-shaped id is just unknown");
+    }
+
+    /// The header is shape-checked once, at parse time, so no route re-implements the rule.
+    #[test]
+    fn the_attempt_header_is_shape_checked_at_parse() {
+        let raw = "GET /lab/trace HTTP/1.1\r\nHost: 127.0.0.1:7799\r\nX-GG-Attempt: nothex\r\n\r\n";
+        assert_eq!(parse_request(raw).unwrap().attempt, None, "a malformed id never reaches a route");
+        let good = "GET /lab/trace HTTP/1.1\r\nHost: 127.0.0.1:7799\r\nX-GG-Attempt: abcdef0123456789abcdef0123456789\r\n\r\n";
+        assert_eq!(parse_request(good).unwrap().attempt.as_deref(), Some("abcdef0123456789abcdef0123456789"));
+    }
+
+    /// No diagnostic route can change a security decision: each is read-only or simulation-only.
+    #[tokio::test]
+    async fn lab_routes_cannot_change_a_policy_or_mint_a_real_session() {
+        let mut b = bridge(FakeWallet::new());
+        // /lab/gates is GET-only; a POST is not a route at all.
+        assert_eq!(b.handle(&post("/lab/gates", serde_json::json!({ "threshold": 1 }))).await.status, 404);
+        // /lab/simulate mints nothing: it returns a null session and records no grant (asserted above).
+        // Reading a trace is a GET; a POST to it is not a route.
+        assert_eq!(b.handle(&post("/lab/trace", serde_json::json!({}))).await.status, 404);
     }
 }
