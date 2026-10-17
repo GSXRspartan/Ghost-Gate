@@ -400,7 +400,10 @@ async fn the_million_xtm_gate_accepts_a_wallet_above_the_threshold_and_refuses_o
 
     let mut settled = false;
     let mut artifact_opt: Option<XtmProofArtifact> = None;
-    for round in 0..30 {
+    // 130 coinbases is one UTXO scan backlog; the wallet's scan is disk-bound (a round can take
+    // ~15s on a busy machine), so give it minutes, not seconds, and keep the tip moving so older
+    // coinbases mature out of time-lock while the scan catches up.
+    for round in 0..90 {
         tokio::time::sleep(Duration::from_secs(2)).await;
         let outcome = wallet
             .create_proof_transaction(threshold_micro, [8u8; 32], MicroMinotari(5))
@@ -412,7 +415,7 @@ async fn the_million_xtm_gate_accepts_a_wallet_above_the_threshold_and_refuses_o
                 break;
             },
             Ok(XtmProofOutcome::CannotAfford) => {
-                if round % 5 == 4 {
+                if round % 10 == 9 {
                     net.mine_blocks(&wallet.receive_address().unwrap(), 2).await;
                 }
                 continue;
@@ -442,11 +445,23 @@ async fn the_million_xtm_gate_accepts_a_wallet_above_the_threshold_and_refuses_o
         tip_height_at_issue: 0,
     };
     net.mine_blocks(&wallet.receive_address().unwrap(), 2).await;
-    let receipt = tokio::time::timeout(Duration::from_secs(90), async {
+    // Mining + the wallet's UTXO scan are disk-bound: on a busy machine a scan round alone can take
+    // ~15s, so 90s was not enough for the proof to mine and be read back. 4 minutes is still a
+    // bound — a hung miner fails the test, just later.
+    // While waiting, keep mining: a block template carries the mempool, so every new block is
+    // another chance for the broadcast proof to be included. (The node's own miner does this too;
+    // driving it from the test makes the wait bounded by the TEST, not by ambient miner timing.)
+    let mut wait_rounds = 0u32;
+    let receipt = tokio::time::timeout(Duration::from_secs(300), async {
         loop {
             match verify_xtm_proof(&mut reader, &challenge, &artifact, now_unix()).await {
                 Ok(receipt) => return Ok(receipt),
                 Err(ghost_gate_core::xtm::XtmProofError::NotMined) => {
+                    wait_rounds += 1;
+                    if wait_rounds % 10 == 0 {
+                        net.mine_blocks(&wallet.receive_address().unwrap(), 1).await;
+                        println!("verify wait: mined round {wait_rounds}");
+                    }
                     tokio::time::sleep(Duration::from_millis(500)).await;
                 },
                 Err(other) => return Err(other),

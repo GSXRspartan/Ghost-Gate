@@ -350,8 +350,13 @@ impl ProofWalletService {
         //    what keeps the gate's semantics honest end to end.
         let fpg = fee_per_gram.as_u64();
         let fee_for_value = move |_value: u64| -> u64 { 1_000 + fpg * 24 };
-        let output_value = largest_affordable_output_value(spendable, fee_for_value)
-            .ok_or(crate::service::ServiceError::CannotAfford)?;
+        // Nothing spendable at all (funds pending-in, coinbase maturing) is the SAME user
+        // condition as "the balance cannot carry the threshold": an outcome the caller waits and
+        // retries on, not an internal error. Surfacing it as Err made the bridge report a refusal
+        // where the retry signal belonged.
+        let Some(output_value) = largest_affordable_output_value(spendable, fee_for_value) else {
+            return Ok(XtmProofOutcome::CannotAfford);
+        };
 
         // 3. A first look at affordability, on the conservative model. Never a verdict: the
         //    real fee is read from the kernel after construction.
@@ -365,7 +370,10 @@ impl ProofWalletService {
         //    output value, and nothing is broadcast yet.
         let memo = MemoField::new_open_from_string("Ghost Gate threshold proof", TxType::PaymentToSelf)
             .map_err(|e| crate::service::ServiceError::Wallet(format!("memo: {e}")))?;
-        let (_fee_estimated, transaction, tx_id) = self
+        // The output manager can still conclude NotEnoughFunds between the balance read above and
+        // the build (an encumbrance landed in between). Same answer as the solver's: an outcome the
+        // caller retries on, not an error.
+        let built = self
             .wallet
             .output_manager_service
             .create_pay_to_self_transaction(
@@ -377,8 +385,12 @@ impl ProofWalletService {
                 memo,
                 MicroMinotari(output_value),
             )
-            .await
-            .map_err(map_output_error)?;
+            .await;
+        let (_fee_estimated, transaction, tx_id) = match built {
+            Ok(v) => v,
+            Err(OutputManagerError::NotEnoughFunds { .. }) => return Ok(XtmProofOutcome::CannotAfford),
+            Err(other) => return Err(map_output_error(other)),
+        };
 
         // 5. The exact boundary, against the *real* kernel fee the wallet just computed. This is
         //    the same comparison the verifier will run on chain; running it here prevents a

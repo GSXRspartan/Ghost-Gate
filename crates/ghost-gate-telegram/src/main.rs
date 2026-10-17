@@ -42,8 +42,13 @@
 //!
 //! # What a POC deliberately does not do
 //!
-//! - Grants are in-memory: a restart forgets them (safe failure — access simply lapses until
-//!   re-verified, and nothing stale outlives the process).
+//! - Grant state is in-memory: a restart forgets it (safe failure — access simply lapses until
+//!   re-verified, and nothing stale outlives the process). When the bridge is REGISTRY-BACKED, the
+//!   expiry, revocation and policy-hash decisions live in the registry, not here: the bot asks the
+//!   bridge on every decision, a dashboard revocation reaches the chat within one tick, and the
+//!   session is visible (and revocable) next to every other one. A restart still forgets the
+//!   user→session mapping — the registry keeps the session, the bot just no longer knows whose it
+//!   was, so the user re-verifies. On a legacy bridge, the bot's own TTL applies exactly as before.
 //! - Long polling (`getUpdates`), not webhooks: nothing public to spoof.
 //! - Membership checks are *point-in-time*: between two verifications ownership may change. The
 //!   product claim is exactly "held enough at verification time", and the ticker enforces that
@@ -92,6 +97,24 @@ pub struct ProofStatus {
     state: String,
     #[serde(default)]
     result: Option<Receipt>,
+    /// The verified-access session the bridge issued for this proof, when it is registry-backed.
+    /// Its expiry, revocation and policy-hash checks live in the REGISTRY, not in this bot: the
+    /// dashboard can see and revoke it, and a policy replacement kills it. `None` from a legacy
+    /// bridge (or an application with no access plane) — then the bot's own TTL applies.
+    #[serde(default)]
+    access: Option<AccessGrantView>,
+}
+
+/// The wire form of a session grant (registry crate's `AccessGrant`, camelCase).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccessGrantView {
+    token: String,
+    application_id: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    proven_gate: String,
+    expires_unix: u64,
 }
 
 #[derive(Debug)]
@@ -106,6 +129,18 @@ struct Grant {
     expires: Instant,
     proof_id: String,
     invite_link: String,
+    /// The registry-backed session this grant was issued under, when the bridge has an access
+    /// plane. While this is Some, the SERVER decides expiry, revocation and policy validity — the
+    /// bot asks on every tick instead of trusting its own clock. `None` is the legacy bridge path:
+    /// the local TTL is then the only rule, exactly as before.
+    server: Option<ServerGrant>,
+}
+
+#[derive(Debug, Clone)]
+struct ServerGrant {
+    token: String,
+    application_id: String,
+    expires_unix: u64,
 }
 
 /// The Telegram Bot API surface this POC uses.
@@ -178,6 +213,8 @@ impl TelegramApi for FixtureTelegram {
 /// for the configured gate; anything else answers "not found", so negative cases are still real.
 pub struct FixtureBridge {
     gate: String,
+    /// Fixture answer for the access check; `None` defers (bridge outage).
+    pub access_authorized: Option<bool>,
 }
 
 impl BridgeClient for FixtureBridge {
@@ -191,9 +228,17 @@ impl BridgeClient for FixtureBridge {
                     attested_minimum: 100_000,
                     substate_id: format!("utxo_fixture_{proof_id}"),
                 }),
+                access: None,
             });
         }
         Err("404: no such proof".into())
+    }
+
+    async fn access_check(&self, _application_id: &str, _gate_id: &str, _token: &str) -> Result<bool, String> {
+        match self.access_authorized {
+            Some(v) => Ok(v),
+            None => Err("fixture outage".into()),
+        }
     }
 }
 
@@ -267,6 +312,10 @@ impl TelegramApi for TelegramBot {
 #[allow(async_fn_in_trait)]
 pub trait BridgeClient: Send {
     async fn proof_status(&self, proof_id: &str) -> Result<ProofStatus, String>;
+    /// The server-side decision for one (application, gate, token). `Ok(false)` is a DECISION (the
+    /// session expired, was revoked, or no longer matches the policy); `Err` is "could not ask" —
+    /// a bridge outage — which the ticker treats as "defer, decide next tick", not as a refusal.
+    async fn access_check(&self, application_id: &str, gate_id: &str, token: &str) -> Result<bool, String>;
 }
 
 pub struct HttpBridge {
@@ -286,6 +335,27 @@ impl BridgeClient for HttpBridge {
         let resp = self.http.get(&url).send().await.map_err(|e| e.to_string())?;
         let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
         serde_json::from_value(v).map_err(|e| e.to_string())
+    }
+
+    async fn access_check(&self, application_id: &str, gate_id: &str, token: &str) -> Result<bool, String> {
+        // Any non-200 is a decision of "no": a missing session, an expired one, a revoked one and a
+        // policy mismatch all mean the same thing to a door. Only a transport failure is Err.
+        let url = format!(
+            "{}/access/check?application={}&gate={}&token={}",
+            self.base,
+            urlencode(application_id),
+            urlencode(gate_id),
+            urlencode(token),
+        );
+        let resp = match self.http.get(&url).send().await {
+            Ok(r) => r,
+            Err(e) => return Err(e.to_string()),
+        };
+        if !resp.status().is_success() {
+            return Ok(false);
+        }
+        let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+        Ok(v.get("authorized").and_then(|a| a.as_bool()).unwrap_or(false))
     }
 }
 
@@ -339,15 +409,31 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
     /// `/join`: mints a single-use token bound to this Telegram account.
     pub async fn join(&mut self, user: i64, base_url: &str, claim_base: &str) -> Result<String, String> {
         // A user rejoining while a grant is live gets told, rather than silently minting a second
-        // proof obligation.
-        if let Some(g) = self.grants.get(&user)
-            && g.expires > Instant::now()
-        {
-            let left = g.expires.duration_since(Instant::now()).as_secs().max(1);
-            return Ok(format!(
-                "Your access is already verified for another {} minute(s). I'll ask for a fresh proof when it lapses.",
-                (left + 59) / 60
-            ));
+        // proof obligation. A server-backed grant is ASKED, not trusted from memory: if the session
+        // was revoked or expired while the bot was looking away, the user simply rejoins.
+        let existing = self.grants.get(&user).map(|g| (g.server.clone(), g.expires));
+        if let Some((server, expires)) = existing {
+            let alive = match &server {
+                Some(sg) => {
+                    matches!(
+                        self.bridge
+                            .access_check(&sg.application_id, &self.gate, &sg.token)
+                            .await,
+                        Ok(true)
+                    )
+                }
+                None => expires > Instant::now(),
+            };
+            if alive {
+                let left = expires.duration_since(Instant::now()).as_secs().max(1);
+                return Ok(format!(
+                    "Your access is already verified for another {} minute(s). I'll ask for a fresh proof when it lapses.",
+                    (left + 59) / 60
+                ));
+            }
+            if server.is_some() {
+                self.grants.remove(&user);
+            }
         }
         let mut bytes = [0u8; 32];
         rand::fill(&mut bytes);
@@ -426,16 +512,32 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
         self.tokens.get_mut(token).expect("checked above").used = true;
 
         let link = self.telegram.create_single_seat_invite(self.chat).await?;
+        // The bridge hands back the session the registry issued for this proof, when it has an
+        // access plane. From then on the SERVER owns the clock: expiry, revocation and policy
+        // replacements all apply to this user the moment they happen, and the session appears in
+        // the administrator dashboard next to every other one.
+        let server = status.access.map(|a| ServerGrant {
+            token: a.token,
+            application_id: a.application_id,
+            expires_unix: a.expires_unix,
+        });
+        let (expires, minutes) = match &server {
+            Some(sg) => {
+                let remaining = sg.expires_unix.saturating_sub(now_unix());
+                (Instant::now() + Duration::from_secs(remaining), (remaining + 59) / 60)
+            }
+            None => (Instant::now() + self.access_ttl, self.access_ttl.as_secs() / 60),
+        };
         self.grants.insert(
             user,
-            Grant { expires: Instant::now() + self.access_ttl, proof_id: proof_id.to_string(), invite_link: link.clone() },
+            Grant { expires, proof_id: proof_id.to_string(), invite_link: link.clone(), server },
         );
         self.telegram
             .send_message(
                 user,
                 &format!(
                     "Verified: the network attested at least the threshold, and I never learned a balance. Doors open for {} minute(s). I'll ask for a fresh proof when it lapses.",
-                    self.access_ttl.as_secs() / 60
+                    minutes
                 ),
             )
             .await
@@ -450,12 +552,23 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
         let now = Instant::now();
         // Tokens whose TTL passed — used or not — are state nobody can act on any more.
         self.tokens.retain(|_, t| t.expires > now);
-        let expired: Vec<i64> = self
+        // Legacy grants (no server session) expire on the bot's clock, as before. Server-backed
+        // grants are ASKED: the registry's expiry, revocation and policy-hash checks are the
+        // authority, so a revocation in the dashboard reaches this chat within one tick.
+        let mut expired: Vec<i64> = self
             .grants
             .iter()
-            .filter(|(_, g)| g.expires <= now)
+            .filter(|(_, g)| g.server.is_none() && g.expires <= now)
             .map(|(u, _)| *u)
             .collect();
+        for (user, g) in self.grants.iter() {
+            let Some(sg) = &g.server else { continue };
+            match self.bridge.access_check(&sg.application_id, &self.gate, &sg.token).await {
+                Ok(true) => {}
+                Ok(false) => expired.push(*user), // a decision: expired, revoked, or policy moved
+                Err(_) => {}                      // could not ask — defer to the next tick
+            }
+        }
         for user in expired {
             let grant = self.grants.remove(&user).expect("just filtered");
             // Kick (ban+unban) so the seat frees and re-joining is possible after re-verification.
@@ -563,7 +676,7 @@ async fn run() -> i32 {
         FIXTURE_POLL_PAUSE.store(true, std::sync::atomic::Ordering::Relaxed);
         // In fixture mode the bot never reads Telegram, so it mints one join token at startup for
         // the fixture user and prints everything needed to drive the lifecycle by hand.
-        let mut bot = Bot::new(FixtureTelegram, FixtureBridge { gate: gate.clone() }, chat, gate.clone());
+        let mut bot = Bot::new(FixtureTelegram, FixtureBridge { gate: gate.clone(), access_authorized: None }, chat, gate.clone());
         let reply = bot
             .join(FIXTURE_TG_USER, &bridge_base, &format!("http://127.0.0.1:{claim_port}"))
             .await
@@ -837,6 +950,8 @@ mod tests {
     /// The bridge's answers, scripted per proof id.
     struct FakeBridge {
         answers: HashMap<String, ProofStatus>,
+        /// The access-check answer; `None` means "bridge unreachable" (deferral).
+        access: Option<Result<bool, String>>,
     }
 
     impl FakeBridge {
@@ -849,6 +964,27 @@ mod tests {
                     attested_minimum: 100_000,
                     substate_id: "utxo_x".into(),
                 }),
+                access: None,
+            }
+        }
+
+        /// An acceptance that also carries the registry-issued session: what a registry-backed
+        /// bridge returns, with `expires_unix` `days` out.
+        fn accepted_with_access(gate: &str, days: u64) -> ProofStatus {
+            ProofStatus {
+                state: "credential_accepted".into(),
+                result: Some(Receipt {
+                    gate_id: gate.into(),
+                    mode: "credential".into(),
+                    attested_minimum: 100_000,
+                    substate_id: "utxo_x".into(),
+                }),
+                access: Some(AccessGrantView {
+                    token: "sess-token".into(),
+                    application_id: "community".into(),
+                    proven_gate: gate.into(),
+                    expires_unix: now_unix() + days * 86_400,
+                }),
             }
         }
     }
@@ -859,6 +995,10 @@ mod tests {
                 .get(proof_id)
                 .cloned()
                 .ok_or_else(|| "404: no such proof".into())
+        }
+
+        async fn access_check(&self, _application_id: &str, _gate_id: &str, _token: &str) -> Result<bool, String> {
+            self.access.clone().unwrap_or(Err("bridge unreachable".into()))
         }
     }
 
@@ -881,7 +1021,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_join_link_is_single_use_and_bound_to_one_account() {
-        let bridge = FakeBridge { answers: HashMap::from([("proof1".to_string(), FakeBridge::accepted("crypt"))]) };
+        let bridge = FakeBridge { answers: HashMap::from([("proof1".to_string(), FakeBridge::accepted("crypt"))]), access: None };
         let (mut bot, tg) = bot_owned(bridge);
         let (token, reply) = mint_join(&mut bot, 42).await;
         assert!(reply.contains("for you alone"), "the reply says so: {reply}");
@@ -899,7 +1039,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_claim_with_a_proof_for_another_gate_is_refused() {
-        let bridge = FakeBridge { answers: HashMap::from([("proof2".to_string(), FakeBridge::accepted("abyss"))]) };
+        let bridge = FakeBridge { answers: HashMap::from([("proof2".to_string(), FakeBridge::accepted("abyss"))]), access: None };
         let (mut bot, _tg) = bot_owned(bridge);
         let (token, _) = mint_join(&mut bot, 7).await;
         let err = bot.claim(&token, "proof2").await.expect_err("wrong gate");
@@ -912,8 +1052,8 @@ mod tests {
         // The page claims a proof the bridge has never accepted — the bot must re-read, not trust.
         let bridge = FakeBridge { answers: HashMap::from([(
             "proof3".to_string(),
-            ProofStatus { state: "submitted".into(), result: None },
-        )]) };
+            ProofStatus { state: "submitted".into(), result: None, access: None },
+        )]), access: None };
         let (mut bot, _tg) = bot_owned(bridge);
         let (token, _) = mint_join(&mut bot, 8).await;
         let err = bot.claim(&token, "proof3").await.expect_err("unverified proof");
@@ -923,7 +1063,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_expired_join_link_refuses_and_is_gone() {
-        let bridge = FakeBridge { answers: HashMap::new() };
+        let bridge = FakeBridge { answers: HashMap::new(), access: None };
         let (mut bot, _tg) = bot_owned(bridge);
         bot.join_ttl = Duration::from_millis(1);
         let (token, _) = mint_join(&mut bot, 9).await;
@@ -934,7 +1074,7 @@ mod tests {
 
     #[tokio::test]
     async fn grants_expire_and_are_revoked_by_the_ticker() {
-        let bridge = FakeBridge { answers: HashMap::from([("proof5".to_string(), FakeBridge::accepted("crypt"))]) };
+        let bridge = FakeBridge { answers: HashMap::from([("proof5".to_string(), FakeBridge::accepted("crypt"))]), access: None };
         let (mut bot, tg) = bot_owned(bridge);
         bot.access_ttl = Duration::from_millis(30);
         let (token, _) = mint_join(&mut bot, 10).await;
@@ -955,7 +1095,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_live_grant_blocks_a_duplicate_join_with_a_second_proof() {
-        let bridge = FakeBridge { answers: HashMap::from([("proof6".to_string(), FakeBridge::accepted("crypt"))]) };
+        let bridge = FakeBridge { answers: HashMap::from([("proof6".to_string(), FakeBridge::accepted("crypt"))]), access: None };
         let (mut bot, _tg) = bot_owned(bridge);
         let (token, _) = mint_join(&mut bot, 11).await;
         bot.claim(&token, "proof6").await.unwrap();
@@ -968,7 +1108,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_replayed_update_cannot_act_twice() {
-        let bridge = FakeBridge { answers: HashMap::new() };
+        let bridge = FakeBridge { answers: HashMap::new(), access: None };
         let (mut bot, _tg) = bot_owned(bridge);
         // The same update twice: the second is a resend, and must be a no-op.
         assert!(bot.seen_updates.insert(101));
@@ -985,7 +1125,7 @@ mod tests {
     async fn the_claim_endpoint_enforces_loopback_hosts_and_json_content_type() {
         // Phase-6 recheck regressions, pre-fixed: (a) a rebound host must not be answered, (b) a
         // CORS-safelisted content type must not bypass the preflight the JSON contract relies on.
-        let bridge = FakeBridge { answers: HashMap::from([("fixture_smoke".to_string(), FakeBridge::accepted("crypt"))]) };
+        let bridge = FakeBridge { answers: HashMap::from([("fixture_smoke".to_string(), FakeBridge::accepted("crypt"))]), access: None };
         let (mut bot, _tg) = bot_owned(bridge);
         let (token, _) = mint_join(&mut bot, 13).await;
         let body = serde_json::json!({ "token": token, "proof_id": "fixture_smoke" }).to_string();
@@ -1010,7 +1150,7 @@ mod tests {
     #[tokio::test]
     async fn pending_join_tokens_are_capped() {
         // The F-03 class on the bot: /join is cheap, so the pending set must be bounded.
-        let bridge = FakeBridge { answers: HashMap::new() };
+        let bridge = FakeBridge { answers: HashMap::new(), access: None };
         let (mut bot, _tg) = bot_owned(bridge);
         for u in 0..(MAX_PENDING_TOKENS + 10) {
             bot.join(u as i64, "http://x", "http://y").await.unwrap();
@@ -1025,7 +1165,7 @@ mod tests {
     #[tokio::test]
     async fn the_claim_endpoint_answers_http_properly() {
         // The endpoint's behaviour over its real parsing path.
-        let bridge = FakeBridge { answers: HashMap::from([("proof7".to_string(), FakeBridge::accepted("crypt"))]) };
+        let bridge = FakeBridge { answers: HashMap::from([("proof7".to_string(), FakeBridge::accepted("crypt"))]), access: None };
         let (mut bot, _tg) = bot_owned(bridge);
         let (token, _) = mint_join(&mut bot, 12).await;
         let body = serde_json::json!({ "token": token, "proof_id": "proof7" }).to_string();
@@ -1041,5 +1181,82 @@ mod tests {
         // Replay with the same body: the token is consumed, so it refuses now.
         let response2 = handle_claim_http(&mut bot, &request).await;
         assert!(response2.contains("403"), "{response2}");
+    }
+
+
+    // The registry-backed bridge: the bot asks the server on every decision instead of keeping its
+    // own clock. These pin the three cases that matter — server says alive, server says dead,
+    // server unreachable.
+    #[tokio::test]
+    async fn a_server_backed_grant_lives_as_long_as_the_registry_says() {
+        // A 7-day session, far beyond the bot's own tiny TTL: the LOCAL clock must not end it.
+        let bridge = FakeBridge {
+            answers: HashMap::from([("proofs1".to_string(), FakeBridge::accepted_with_access("crypt", 7))]),
+            access: Some(Ok(true)),
+        };
+        let (mut bot, tg) = bot_owned(bridge);
+        bot.access_ttl = Duration::from_millis(30);
+        let (token, _) = mint_join(&mut bot, 21).await;
+        bot.claim(&token, "proofs1").await.expect("granted");
+        let fake = tg.lock().unwrap();
+        let said = fake.messages.iter().find(|(_, m)| m.contains("Doors open")).expect("the success message was sent").1.clone();
+        drop(fake);
+        assert!(said.contains("Doors open for 10080 minute(s)"), "the duration is the server's, not the bot's: {said}");
+        assert_eq!(bot.grant_count(), 1);
+
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        bot.tick().await;
+        assert_eq!(bot.grant_count(), 1, "the local TTL must not expire a server-backed session");
+        assert!(tg.lock().unwrap().kicked.is_empty(), "nobody was kicked");
+    }
+
+    #[tokio::test]
+    async fn a_server_revocation_kicks_within_one_tick() {
+        // The dashboard revoked the session: the next tick frees the seat, even though the bot's
+        // own TTL would have kept the user for days.
+        let bridge = FakeBridge {
+            answers: HashMap::from([("proofs2".to_string(), FakeBridge::accepted_with_access("crypt", 7))]),
+            access: Some(Ok(false)),
+        };
+        let (mut bot, tg) = bot_owned(bridge);
+        let (token, _) = mint_join(&mut bot, 22).await;
+        bot.claim(&token, "proofs2").await.expect("granted");
+        bot.tick().await;
+        assert_eq!(bot.grant_count(), 0, "the revoked grant is gone");
+        let fake = tg.lock().unwrap();
+        assert_eq!(fake.kicked, vec![22], "the seat was freed");
+        assert_eq!(fake.unbanned, vec![22], "the door was left open for re-verification");
+    }
+
+    #[tokio::test]
+    async fn a_bridge_outage_defers_the_decision_instead_of_kicking() {
+        // Could not ask: neither grant nor kick. The next tick decides; a transient outage must not
+        // empty a community of verified members.
+        let bridge = FakeBridge {
+            answers: HashMap::from([("proofs3".to_string(), FakeBridge::accepted_with_access("crypt", 7))]),
+            access: Some(Err("connection refused".into())),
+        };
+        let (mut bot, tg) = bot_owned(bridge);
+        let (token, _) = mint_join(&mut bot, 23).await;
+        bot.claim(&token, "proofs3").await.expect("granted");
+        bot.tick().await;
+        assert_eq!(bot.grant_count(), 1, "the decision was deferred");
+        assert!(tg.lock().unwrap().kicked.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_dead_server_session_is_silently_replaced_by_a_fresh_join() {
+        // The user rejoins after their server session ended: no "already verified" lie, no error —
+        // the old grant is dropped and a fresh proof obligation is minted.
+        let bridge = FakeBridge {
+            answers: HashMap::from([("proofs4".to_string(), FakeBridge::accepted_with_access("crypt", 7))]),
+            access: Some(Ok(false)),
+        };
+        let (mut bot, _tg) = bot_owned(bridge);
+        let (token, _) = mint_join(&mut bot, 24).await;
+        bot.claim(&token, "proofs4").await.expect("granted");
+        let reply = bot.join(24, "http://127.0.0.1:7799", "http://127.0.0.1:7808").await.unwrap();
+        assert!(!reply.contains("already verified"), "the dead session is not claimed as live: {reply}");
+        assert!(reply.contains("/telegram/join/"), "a fresh join link is minted: {reply}");
     }
 }
