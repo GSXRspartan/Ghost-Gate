@@ -79,7 +79,7 @@ fi
 echo "walletd: ${WALLETD_URL}  (base-path ${WALLETD_BASE}, MVP-patched)"
 
 # ---------------------------------------------------------------- 3. deploy
-say "3. publish templates, mint the resource, deploy the three gates"
+say "3. publish templates, mint the resource, deploy the gate"
 GG_WALLETD_ENDPOINT="$WALLETD_URL" \
 GG_WALLETD_TOKEN="${GG_WALLETD_TOKEN:-}" \
   "$BIN/deploy_vault" | tee "$LOGDIR/deploy_vault.out"
@@ -90,7 +90,7 @@ GATES="$(sed -n "s/.*GG_BRIDGE_GATES='\([^']*\)'.*/\1/p" "$LOGDIR/deploy_vault.o
 [ -n "$GATES" ] || { echo "deploy_vault did not print a bridge config line; see $LOGDIR/deploy_vault.out"; exit 5; }
 echo "captured gate config (${#GATES} chars)"
 case "$GATES" in
-  crypt=*) ;;
+  *=*) ;;
   *) echo "the captured gate config does not look right: $GATES"; exit 5 ;;
 esac
 
@@ -110,23 +110,29 @@ setsid nohup "$BIN/ghost-gate-bridge" > "$LOGDIR/vault-bridge.log" 2>&1 < /dev/n
 sleep 3
 curl -s -m 4 "http://127.0.0.1:${BRIDGE_PORT}/health" || { echo "bridge did not come up"; tail -20 "$LOGDIR/vault-bridge.log"; exit 6; }
 echo
-grep -E "gate\(s\)|crypt:|vault:|abyss:|wallet" "$LOGDIR/vault-bridge.log" | head -8
+grep -E "gate\(s\)|access plane|wallet|listening" "$LOGDIR/vault-bridge.log" | head -8
 
 # ---------------------------------------------------------------- 5. hand to the operator
 say "5. your turn — the operator"
 cat <<EOF
 
-The network is wired. Nothing has been proven yet: the proof is YOUR click.
+The network is wired. Nothing has been proven yet: the proof is YOUR click, in your wallet.
 
-  1. Open  http://127.0.0.1:${BRIDGE_PORT}/   (hard-refresh: Ctrl+Shift+R)
-  2. Click  "Connect a wallet". Ghost Gate should report the walletd adapter and its consensus
+  1. Open  http://127.0.0.1:${BRIDGE_PORT}/lab   (hard-refresh: Ctrl+Shift+R)
+  2. Pick the deployed gate. The card shows the exact threshold the gate requires, read from the
+     published policy — the page cannot change it.
+  3. Choose "Wallet daemon (consensus)". The Lab should report a reachable wallet and its consensus
      proof mode. If it says no usable wallet answered, tell me — the wiring is wrong, not you.
-  3. In The Crypt, click  "Break the seal". Approve the proof in the wallet daemon.
-  4. When consensus decides, the door opens and you can  "Enter".
+  4. Press "Prove access" and approve the proof in the wallet daemon when it asks. That approval is
+     the operator boundary: nothing signs without you.
+  5. Switch to TECHNICAL. Every line there is a real event recorded by the bridge, the wallet or the
+     network, sanitized through a server-side allowlist. Watch consensus.observed, then the verdict.
+  6. Access is granted only by the SERVER. A green page is not proof; the inspector is the record.
 
 Proof of record: this is the first end-to-end consensus proof through the MVP-patched walletd.
-If a step fails, send me the bridge log (${LOGDIR}/vault-bridge.log) and the walletd log
-(${LOGDIR}/gg-walletd.log) — both are verbatim evidence, nothing is summarised away.
+If a step fails, send me the bridge log (${LOGDIR}/vault-bridge.log), the walletd log
+(${LOGDIR}/gg-walletd.log) and the Lab's EXPORTED trace — all three are verbatim evidence,
+nothing is summarised away.
 
 Logs: ${LOGDIR}/{vault-bridge.log,gg-walletd.log,deploy_vault.out}
 EOF

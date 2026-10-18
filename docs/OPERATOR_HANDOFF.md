@@ -35,7 +35,7 @@ Our built binaries (all in `/home/pdark/gg-ootle-target/debug/`): `ghost-gate-br
 
 ## 3. URLs to open on the gaming PC (Windows Chrome)
 
-- **Game**: <http://127.0.0.1:7799/game> — works NOW in preview mode.
+- **Privacy Lab**: <http://127.0.0.1:7799/lab> — works NOW; the offline simulation needs nothing.
 - Demo/API walkthrough: <http://127.0.0.1:7799/>
 - Health: <http://127.0.0.1:7799/health> · Wallet status: <http://127.0.0.1:7799/wallet/status>
 - Telegram join page (needs a live join link): <http://127.0.0.1:7799/telegram/join>
@@ -88,12 +88,12 @@ The pinned toolchain/protoc/native-deps exports are inside the scripts — no ma
 
 ## 8. Tests that require YOUR interaction (in order)
 
-1. **Preview walk-through now** (no wallet needed): open <http://127.0.0.1:7799/game> → "Preview
+1. **Preview walk-through now** (no wallet needed): open <http://127.0.0.1:7799/lab> → "Preview
    without a wallet" → all three chambers, three puzzles, three whispers, animations; check the
    PREVIEW banner; DevTools Network tab must show no `/gate/*/challenge|prove|credential` calls
    during preview; reload re-seals everything.
 2. **When the shared localnet is up** (monitor says so): start our walletd per §5 →
-   `deploy_vault` (prints the bridge config line) → restart the bridge with it → play The Crypt
+   `deploy_vault` (prints the bridge config line) → restart the bridge with it → prove a threshold in the Privacy Lab
    for real (click Break the Seal; approve in the wallet UI if configured to require it).
 3. **Sapient**: install in Windows Chrome from the release page, fund a local account from the
    faucet/demo wallet, then the game's credential path; then `docs/MANUAL_TEST.md`'s six cases.
@@ -139,10 +139,10 @@ The pinned toolchain/protoc/native-deps exports are inside the scripts — no ma
 
 ## 13. Exact next operator steps (the short path to playing)
 
-1. (Now) Open <http://127.0.0.1:7799/game> and run the preview walk-through (§8.1).
+1. (Now) Open <http://127.0.0.1:7799/lab> and run the offline simulation (§8).1).
 2. (When the monitor log announces the localnet) Start our walletd (§5), then:
    `GG_WALLETD_ENDPOINT=http://127.0.0.1:18130/walletd GG_WALLETD_TOKEN=<key> deploy_vault` (it prints the bridge line),
    restart the bridge with that line + `GG_INDEXER_ENDPOINT=<their indexer>`,
-   then play The Crypt for real and attempt the full manual six-case flow (`docs/MANUAL_TEST.md`).
+   then prove a real threshold in the Privacy Lab and attempt the full manual flow (`docs/MANUAL_TEST.md`).
 3. (Any time) Install Sapient → the credential-mode cases; create the Telegram bot → `--with-telegram`.
 4. Before any public contest submission: say the word — nothing has been published, pushed, or broadcast.

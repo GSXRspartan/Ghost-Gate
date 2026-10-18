@@ -5,11 +5,9 @@ demo machine; nothing requires publishing anything without operator approval.
 
 ## The two demonstrations
 
-1. **Main: The Haunted Vault** (`/game`) — an atmospheric descent where three sealed doors open
-   only through genuine private token-threshold proofs. Real gameplay (puzzles, relics, secrets)
-   wrapped around a real consensus property.
-2. **Secondary: Ghost Gate Telegram** — the same verifier granting expiring, re-verifiable
-   community membership, with no balances and no keys.
+1. **The Privacy Lab** (`/lab`) — the contest application's home. Choose a gate, choose a wallet,
+   prove the minimum threshold, and watch either a plain-English walkthrough or the sanitized
+   protocol inspector. No game, no puzzle, no fictional result.
 
 ## Screenshot set (reproducible)
 
@@ -17,13 +15,11 @@ Take these in Windows Chrome against `http://127.0.0.1:7799` (bridge started per
 `scripts/start_vault.sh`). Save under `docs/screenshots/` (not committed unless the operator
 wants them in the repo).
 
-1. **Title screen** — `/game`, top of page: the GHOST GATE wordmark with the ember flicker, both
-   buttons visible. Full window, dark theme.
 2. **The Sanctum** — after "Descend": three doors with the thresholds the bridge reported
    (`100k / 500k / 2M` raw with display conversions), the relics/whispers HUD.
 3. **Preview banner** — after "Preview without a wallet": the PREVIEW banner across the top and
    each open door carrying the "PREVIEW — not verified" label.
-4. **The Crypt puzzle** — inside the first chamber: the epitaph and the four candles, two lit.
+4. **the Lab puzzle** — inside the first chamber: the epitaph and the four candles, two lit.
 5. **Relic modal** — after completing a puzzle: the relic art, title and lore.
 6. **Door opening** — mid-animation: doors ajar with the ember glow between them (use Chrome's
    screenshot-after-animation trick: press the door's Enter, then screenshot during the 2.1s

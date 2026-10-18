@@ -121,12 +121,11 @@ neither may name a UTXO in its error.
 
 ## The Haunted Vault (game) manual pass
 
-On the demo machine, after `scripts/start_vault.sh` (the game is now **The Lost Epoch** — three
-chapters, one story):
+The contest application is the Privacy Lab. Manual verification below is for THAT page.
 
-1. **Startup** — open `/game`: the title screen must be the FIRST thing visible (no dialog over
-   it), offering "Connect a wallet" and "Enter Preview".
-2. **Preview walk-through** — choose "Enter Preview", verify the banner says PREVIEW, then play all
+1. **Open the Lab** — `http://127.0.0.1:7799/lab` (hard-refresh). The gate card must show the
+   threshold the administrator published, in the asset's own units, with the raw value beside it.
+2. **Choose a wallet** — the note must say whether it is usable, and why not if it is not.
    three chapters in order:
    - **Chapter I (Crypt of Lost Transactions):** hear all three witnesses, examine the stones, accuse
      an innocent stone first (the game must explain WHY it checks out), then accuse the right one —
