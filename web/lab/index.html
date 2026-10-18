@@ -8,6 +8,8 @@
     <link rel="stylesheet" href="/lab/lab.css">
 </head>
 <body>
+<div id="matrix-edges" aria-hidden="true"></div>
+
 <div id="lab-root">
 
     <header class="masthead">
@@ -24,60 +26,102 @@
         </nav>
     </header>
 
-    <main>
-        <!-- ============ gate + wallet ============ -->
-        <section class="card" id="gate-card">
-            <h2><span class="n">01</span>Choose what you are proving</h2>
-            <p class="sub">Gates come from the administrator's published policy. This page cannot change a threshold.</p>
-            <label for="gate-select" class="sub">Gate</label>
-            <select id="gate-select" aria-label="Gate"></select>
-            <div class="gate-facts" id="gate-facts"></div>
-        </section>
+    <!-- Top-level system status: honest pills only. Configuration is not health; reachability is
+         probed live; XTM is blocked by design until its proof implementation exists. -->
+    <div class="status-strip" id="status-strip" role="status" aria-label="System status">
+        <span class="pill" id="pill-bridge"><span class="dot"></span><span class="k">BRIDGE</span><span class="v" id="pill-bridge-v">checking…</span></span>
+        <span class="pill" id="pill-network"><span class="dot"></span><span class="k">NETWORK</span><span class="v" id="pill-network-v">…</span></span>
+        <span class="pill" id="pill-walletd"><span class="dot"></span><span class="k">WALLETD</span><span class="v" id="pill-walletd-v">checking…</span></span>
+        <span class="pill" id="pill-indexer"><span class="dot"></span><span class="k">INDEXER</span><span class="v" id="pill-indexer-v">…</span></span>
+        <span class="pill" id="pill-modes"><span class="dot"></span><span class="k">MODES</span><span class="v" id="pill-modes-v">…</span></span>
+        <span class="pill" id="pill-gates"><span class="dot"></span><span class="k">GATES</span><span class="v" id="pill-gates-v">…</span></span>
+    </div>
 
-        <section class="card" id="wallet-card">
-            <h2><span class="n">02</span>Choose how you will prove it</h2>
-            <p class="sub">A wallet is asked to build a statement about a minimum value. It is never asked for a key, a seed or an exact balance.</p>
-            <label for="wallet-select" class="sub">Wallet / proof method</label>
-            <select id="wallet-select" aria-label="Wallet or proof method"></select>
-            <p class="sub" id="wallet-note" style="margin-top:0.6rem"></p>
-        </section>
+    <main class="dash">
 
         <!-- ============ SIMPLE VIEW ============ -->
-        <section id="simple-view">
-            <section class="card" id="steps-card">
-                <h2><span class="n">03</span>What happens when you press Prove</h2>
-                <p class="sub">Nine steps. Each one reflects a real operation this system performs — none of them is decoration.</p>
-                <ol class="steps" id="steps"></ol>
-                <div style="margin-top:1.2rem; display:flex; gap:0.8rem; flex-wrap:wrap;">
-                    <button class="cta" id="prove">Prove access</button>
-                    <button class="ghost" id="simulate">Run the offline simulation</button>
-                </div>
-                <div class="outcome" id="outcome" hidden>
-                    <div class="verdict" id="outcome-title"></div>
-                    <div class="why" id="outcome-body"></div>
-                    <div class="why" id="outcome-detail"></div>
-                </div>
-            </section>
+        <div id="simple-view" class="dash-grid">
 
-            <section class="card xray">
-                <h2><span class="n">04</span>Privacy X-ray</h2>
-                <p class="sub">What each proof mode reveals, and what it keeps. These lists describe the real protocols, not a promise.</p>
-                <div class="grid-2">
+            <div class="col-main">
+                <section class="card" id="gate-card">
+                    <h2><span class="n">01</span>Choose what you are proving</h2>
+                    <p class="sub" id="gate-count-note">Gates come from the administrator's published policy. This page cannot change a threshold.</p>
+                    <label for="gate-select" class="sub">Gate</label>
+                    <select id="gate-select" aria-label="Gate"></select>
+                    <div class="gate-target" id="gate-target">
+                        <div class="gt-min">
+                            <div class="k">MINIMUM PROVEN</div>
+                            <div class="v" id="gt-minimum">—</div>
+                        </div>
+                        <div class="gt-side">
+                            <div class="fact"><div class="k">Asset</div><div class="v" id="gt-asset">—</div></div>
+                            <div class="fact"><div class="k">Raw units</div><div class="v" id="gt-raw">—</div></div>
+                            <div class="fact"><div class="k">Divisibility</div><div class="v" id="gt-div">—</div></div>
+                        </div>
+                        <div class="gt-wide">
+                            <div class="fact">
+                                <div class="k">Resource</div>
+                                <div class="v mono-trunc" id="gt-resource"><code>—</code><button type="button" class="copy-btn" id="copy-resource" title="Copy resource address" hidden>COPY</button></div>
+                            </div>
+                        </div>
+                        <div class="gt-badges" id="gt-badges">
+                            <span class="badge" id="gt-mode"></span>
+                            <span class="badge" id="gt-sessions"></span>
+                            <span class="badge" id="gt-availability" hidden></span>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="card" id="wallet-card">
+                    <h2><span class="n">02</span>Choose how you will prove it</h2>
+                    <label for="wallet-select" class="sub">Wallet / proof method</label>
+                    <select id="wallet-select" aria-label="Wallet or proof method"></select>
+                    <p class="wallet-pill" id="wallet-note" role="status"></p>
+                </section>
+
+                <section class="card" id="steps-card">
+                    <div class="steps-head">
+                        <h2><span class="n">03</span>What happens when you press Prove</h2>
+                        <div class="actions" id="actions">
+                            <button class="cta" id="prove">Prove access</button>
+                            <button class="ghost" id="simulate">Run the offline simulation</button>
+                        </div>
+                    </div>
+                    <p class="sub">Nine steps. Each one reflects a real operation this system performs — none of them is decoration.</p>
+                    <ol class="steps" id="steps"></ol>
+                    <div class="outcome" id="outcome" hidden>
+                        <div class="verdict" id="outcome-title"></div>
+                        <div class="why" id="outcome-body"></div>
+                        <div class="why" id="outcome-detail"></div>
+                    </div>
+                </section>
+            </div>
+
+            <aside class="col-side">
+                <section class="card xray" id="xray-card">
+                    <h2><span class="n">04</span>Privacy X-ray</h2>
+                    <p class="sub">What each proof mode reveals, and what it keeps.</p>
                     <div>
                         <h3>WHAT THE VERIFIER LEARNS</h3>
                         <ul class="learns" id="xray-learns"></ul>
-                    </div>
-                    <div>
                         <h3>WHAT REMAINS PRIVATE</h3>
                         <ul class="private" id="xray-private"></ul>
                     </div>
-                </div>
-                <p class="note" id="xray-note"></p>
-            </section>
-        </section>
+                    <p class="note" id="xray-note"></p>
+                </section>
+
+                <section class="card telegram" id="telegram-card">
+                    <h2><span class="n">05</span>Telegram group verification</h2>
+                    <p class="sub">A gate the administrator scoped to Telegram can verify you for a group. The bot asks the BRIDGE about your session — it never sees a wallet, a key or a balance.</p>
+                    <p class="sub" id="tg-gate-note">Checking which gates allow Telegram…</p>
+                    <button class="cta" id="tg-start">Open the Telegram verification</button>
+                    <p class="sub" id="tg-note" style="margin-top:0.6rem"></p>
+                </section>
+            </aside>
+        </div>
 
         <!-- ============ TECHNICAL VIEW ============ -->
-        <section id="technical-view" hidden>
+        <div id="technical-view" hidden>
             <section class="card">
                 <h2><span class="n">03</span>Protocol inspector</h2>
                 <p class="sub">Real events from the bridge, wallet and network, as they happen. Every field here passed a server-side allowlist.</p>
@@ -100,27 +144,11 @@
                             <option value="error">errors only</option>
                         </select>
                     </div>
-                    <div class="terminal-log" id="term-log">
-                        <div class="terminal-empty">No verification attempt yet. Choose a gate and press <strong>Prove access</strong>, or run the offline simulation.<span class="caret"></span></div>
-                    </div>
+                    <div class="terminal-log" id="term-log"></div>
                 </div>
                 <p class="sub" style="margin-top:0.8rem" id="prov-note"></p>
             </section>
-        </section>
-
-        <!-- ============ TELEGRAM ============ -->
-        <section class="card" id="telegram-card">
-            <h2><span class="n">05</span>Telegram group verification</h2>
-            <p class="sub">A gate the administrator scoped to Telegram can verify you for a group. Your wallet proves the threshold; the bot asks the BRIDGE about your session — it never sees a wallet, a key or a balance.</p>
-            <ul class="steps" style="margin-bottom:1rem">
-                <li><div><div class="step-title">1 · Pick a Telegram-scoped gate</div><div class="step-note" id="tg-gate-note">Checking which gates allow Telegram…</div></div></li>
-                <li><div><div class="step-title">2 · Verify with a supported wallet</div><div class="step-note">One approval creates the proof output; one signs the challenge. No seed, no keys.</div></div></li>
-                <li><div><div class="step-title">3 · Bind to your Telegram account</div><div class="step-note">The bot mints a single-use join token; the verification page claims it. Your Telegram id is visible to Telegram and to the bot by nature.</div></div></li>
-                <li><div><div class="step-title">4 · Receive a single-seat invite</div><div class="step-note">Forwarded links grant nobody else. The seat is freed when your session expires, and re-verification is then required.</div></div></li>
-            </ul>
-            <button class="cta" id="tg-start">Open the Telegram verification</button>
-            <p class="sub" id="tg-note" style="margin-top:0.7rem"></p>
-        </section>
+        </div>
     </main>
 
     <footer class="lab-footer">

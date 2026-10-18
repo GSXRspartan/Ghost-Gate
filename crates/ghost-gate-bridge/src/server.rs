@@ -404,6 +404,13 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                     "version": crate::BRIDGE_VERSION,
                     "gates": self.gates.ids().collect::<Vec<_>>(),
                     "live_challenges": self.challenges.live(),
+                    // What this deployment is CONFIGURED for. Configuration is not health: the UI
+                    // still probes /wallet/status for reachability, and "configured" must never be
+                    // read as "synchronized". These flags only say whether the process was wired
+                    // with the dependency at all, so the Lab can say "not configured" honestly.
+                    "registry_backed": self.access.is_some(),
+                    "credential_configured": self.chain.is_some(),
+                    "xtm_configured": self.xtm_chain.is_some(),
                 }),
             ),
 

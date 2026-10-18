@@ -31,6 +31,7 @@ const state = {
     events: [],
     paused: false,
     lastSeq: 0,
+    gateListSig: null,   // signature of the last-rendered gate list (avoid rebuilding an open dropdown)
 };
 
 // ---------------------------------------------------------------- formatting
@@ -90,20 +91,13 @@ const STEPS = [
     },
 ];
 
-// ---------------------------------------------------------------- gate loading
-async function loadGates() {
-    const { ok, body } = await api("/lab/gates");
-    if (!ok) {
-        $("gate-select").innerHTML = '<option value="">bridge unreachable</option>';
-        return;
-    }
-    state.gates = body.gates || [];
+/** Populate the gate picker from the registry. The registry is the only source; a value typed
+ *  here can never become a threshold. */
+function populateGateSelect() {
     const sel = $("gate-select");
     sel.innerHTML = "";
     if (!state.gates.length) {
         sel.innerHTML = '<option value="">no gate published yet</option>';
-        renderGateFacts(null);
-        loadTelegramScope();
         return;
     }
     for (const g of state.gates) {
@@ -113,7 +107,6 @@ async function loadGates() {
         sel.append(opt);
     }
     sel.onchange = () => selectGate(sel.value);
-    selectGate(state.gates[0].gateId);
 }
 
 function selectGate(gateId) {
@@ -125,35 +118,73 @@ function selectGate(gateId) {
     $("outcome").hidden = true;
 }
 
-/** Facts are read from the registry response — never from a value typed here. */
+/** Facts are read from the registry response — never from a value typed here.
+ *  The "minimum proven" is the visually dominant fact: it is the ONLY thing being proven,
+ *  and the one number a judge should read in the first two seconds. */
 function renderGateFacts(gate) {
-    const host = $("gate-facts");
-    host.innerHTML = "";
+    $("gate-count-note").textContent = state.gates.length
+        ? `${state.gates.length} configured gate${state.gates.length === 1 ? "" : "s"} — read from the administrator's published policy; this page cannot change a threshold.`
+        : "Gates come from the administrator's published policy. This page cannot change a threshold.";
+
     if (!gate) {
-        host.innerHTML = '<div class="fact"><div class="k">state</div><div class="v bad">no gate configured</div></div>';
+        $("gt-minimum").textContent = "no gate configured";
+        $("gt-minimum").classList.add("bad");
+        $("gt-asset").textContent = "—";
+        $("gt-raw").textContent = "—";
+        $("gt-div").textContent = "—";
+        $("gt-resource").firstElementChild.textContent = "—";
+        $("copy-resource").hidden = true;
+        $("gt-mode").textContent = "no gate";
+        $("gt-mode").className = "badge";
+        $("gt-sessions").textContent = "sessions unavailable";
+        $("gt-sessions").className = "badge bad";
+        $("gt-availability").hidden = true;
         renderXray(null);
+        loadTelegramScope();
         return;
     }
+    $("gt-minimum").classList.remove("bad");
     const human = formatAmount(gate.thresholdRaw, gate.divisibility);
-    const facts = [
-        ["asset", gate.symbol || "(unlabelled)", "green"],
-        ["minimum proven", `≥ ${human} ${gate.symbol || ""}`.trim(), "green"],
-        ["raw units", gate.thresholdRaw, ""],
-        ["resource", gate.resourceAddress ? `${gate.resourceAddress.slice(0, 12)}…` : "—", ""],
-        ["divisibility", gate.divisibility, ""],
-        ["proof mode", gate.proofMode === "consensus" ? "consensus (wallet daemon)" : gate.proofMode, ""],
-        ["sessions", gate.sessionsAvailable ? "issued server-side" : "not issued (preview)", gate.sessionsAvailable ? "green" : "bad"],
-    ];
-    if (!gate.activatable) {
-        facts.push(["availability", "experimental — not functional", "bad"]);
+    $("gt-minimum").textContent = `≥ ${human} ${gate.symbol || ""}`.trim();
+    $("gt-asset").textContent = gate.symbol || "(unlabelled)";
+    $("gt-asset").title = gate.resourceAddress || "";
+    $("gt-raw").textContent = String(gate.thresholdRaw);
+    $("gt-div").textContent = String(gate.divisibility);
+
+    const resource = gate.resourceAddress || "";
+    const code = $("gt-resource").firstElementChild;
+    code.textContent = resource ? `${resource.slice(0, 12)}…${resource.slice(-6)}` : "—";
+    code.title = resource;
+    $("copy-resource").hidden = !resource;
+    $("copy-resource").onclick = async () => {
+        await navigator.clipboard.writeText(resource);
+        $("copy-resource").textContent = "COPIED";
+        setTimeout(() => ($("copy-resource").textContent = "COPY"), 1200);
+    };
+
+    const modeName = gate.proofMode === "consensus" ? "consensus · wallet daemon" : gate.proofMode;
+    $("gt-mode").textContent = modeName;
+    $("gt-mode").className = `badge ${gate.activatable ? "ok" : "warn"}`;
+    $("gt-mode").title = gate.activatable
+        ? "This proof mode can be activated on this deployment."
+        : "Experimental: shown, refused, never advertised as functional.";
+
+    if (gate.sessionsAvailable) {
+        $("gt-sessions").textContent = "sessions · issued server-side";
+        $("gt-sessions").className = "badge ok";
+        $("gt-sessions").title = "Access is granted by the server against the verified session.";
+    } else {
+        $("gt-sessions").textContent = "sessions · not issued (preview)";
+        $("gt-sessions").className = "badge bad";
+        $("gt-sessions").title = "This bridge is not registry-backed, so no access session is issued.";
     }
-    for (const [k, v, cls] of facts) {
-        const d = document.createElement("div");
-        d.className = "fact";
-        d.innerHTML = `<div class="k"></div><div class="v ${cls}"></div>`;
-        d.querySelector(".k").textContent = k;
-        d.querySelector(".v").textContent = String(v);
-        host.append(d);
+
+    if (!gate.activatable) {
+        $("gt-availability").hidden = false;
+        $("gt-availability").textContent = "experimental — cannot activate";
+        $("gt-availability").className = "badge bad";
+    } else {
+        $("gt-availability").hidden = true;
     }
     renderXray(gate);
     loadTelegramScope();
@@ -169,12 +200,11 @@ async function renderWallets() {
 
     const options = [];
     // The consensus path needs a wallet daemon; the bridge knows whether one is there.
-    const health = await api("/health").catch(() => ({ body: {} }));
     if (gate.proofMode === "consensus") {
-        options.push({ id: "walletd", label: "Wallet daemon (consensus) — the real threshold proof", ready: true });
+        options.push({ id: "walletd", label: "Wallet daemon · consensus" });
     }
-    options.push({ id: "sapient", label: "Sapient / Tari desktop wallet (credential)", ready: gate.proofMode === "consensus" ? true : true });
-    options.push({ id: "universe", label: "Universe (in-app browser wallet)", ready: true });
+    options.push({ id: "sapient", label: "Tari desktop wallet · credential" });
+    options.push({ id: "universe", label: "Universe · in-app wallet" });
 
     for (const o of options) {
         const opt = document.createElement("option");
@@ -189,6 +219,7 @@ async function renderWallets() {
 async function selectMode(id) {
     state.mode = id;
     const note = $("wallet-note");
+    note.classList.remove("ok", "warn", "bad");
     // Probe the selected provider for real; report what is actually there.
     let provider = id === "walletd" ? walletdProvider(location.origin) : id === "universe" ? universeProvider() : sapientProvider();
     let usable = { usable: false, reason: "not probed", modes: [] };
@@ -199,12 +230,18 @@ async function selectMode(id) {
         usable = { usable: false, reason: "provider did not answer", modes: [] };
     }
     if (id === "walletd") {
-        note.textContent = usable.usable
-            ? "A wallet daemon is reachable. The consensus path proves a stealth threshold on chain."
-            : "No wallet daemon reachable — the consensus path cannot run here. Start walletd, or choose another method.";
+        if (usable.usable) {
+            note.classList.add("ok");
+            note.textContent = "Wallet daemon reachable. The consensus path proves a stealth threshold on chain.";
+        } else {
+            note.classList.add("warn");
+            note.textContent = "Wallet daemon not reachable. Start walletd or choose another supported proof method.";
+        }
     } else if (usable.usable) {
-        note.textContent = "This wallet can build the credential statement this gate accepts. " + (usable.modes || []).join(", ");
+        note.classList.add("ok");
+        note.textContent = "This wallet can build the credential statement this gate accepts.";
     } else {
+        note.classList.add("bad");
         note.textContent = `This wallet cannot prove this gate: ${usable.reason || "unsupported"}`;
     }
 }
@@ -446,8 +483,14 @@ function renderTerminal() {
         if (!filter) return true;
         return [e.code, e.source, e.message, JSON.stringify(e.detail || {})].join(" ").toLowerCase().includes(filter);
     });
+    if (!shown.length && state.events.length) {
+        renderTerminalEmpty($("term-log"), "No events match the current filter.", false);
+        return;
+    }
     if (!shown.length) {
-        log.innerHTML = '<div class="terminal-empty">no events match the filter</div>';
+        // The honest empty state: the REAL event categories the inspector will show, ghosted.
+        // Nothing here is a log — these are the labels and what each source means.
+        renderTerminalEmpty($("term-log"), null, true);
         return;
     }
     log.innerHTML = "";
@@ -479,6 +522,50 @@ function renderTerminal() {
     if (!state.paused) log.scrollTop = log.scrollHeight;
 }
 
+/** The inspector's empty states. `categories` renders the REAL event categories the inspector will
+ *  show once an attempt runs — ghosted, clearly labelled as categories, never as fabricated logs. */
+function renderTerminalEmpty(log, filterMessage, categories) {
+    log.innerHTML = "";
+    const box = document.createElement("div");
+    box.className = "terminal-empty";
+    if (filterMessage) {
+        const h = document.createElement("div");
+        h.className = "headline";
+        h.textContent = filterMessage;
+        box.append(h);
+    } else {
+        const h = document.createElement("div");
+        h.className = "headline";
+        h.innerHTML = `No verification attempt yet.<span class="caret"></span>`;
+        const hint = document.createElement("div");
+        hint.textContent = "Choose a gate and press Prove access, or run the offline simulation to inspect a safe example trace.";
+        box.append(h, hint);
+    }
+    if (categories) {
+        const catsTitle = document.createElement("span");
+        catsTitle.className = "cats-title";
+        catsTitle.textContent = "EVENT CATEGORIES — labels, not logs:";
+        const cats = document.createElement("div");
+        cats.className = "cats";
+        const rows = [
+            ["bridge", "issues the single-use challenge, records the verdict"],
+            ["wallet", "builds and signs the statement; its contents never cross the boundary"],
+            ["consensus", "commits the transaction; the floor becomes public"],
+            ["verifier", "compares floor ≥ threshold against the published policy"],
+        ];
+        for (const [src, note2] of rows) {
+            const r = document.createElement("div");
+            r.className = "cat";
+            r.innerHTML = '<span class="src"></span><span class="note2"></span>';
+            r.querySelector(".src").textContent = src;
+            r.querySelector(".note2").textContent = note2;
+            cats.append(r);
+        }
+        box.append(catsTitle, cats);
+    }
+    log.append(box);
+}
+
 function setModeBadge(sim) {
     const badge = $("mode-badge");
     badge.className = "mode-badge " + (sim ? "sim" : "live");
@@ -494,31 +581,161 @@ function setView(v) {
     $("view-technical").setAttribute("aria-selected", String(v === "technical"));
 }
 
-// ---------------------------------------------------------------- telegram
+// ---------------------------------------------------------------- status strip
+// Honest states only: configuration is reported from /health (what this process was WIRED with),
+// reachability is probed live (/wallet/status), and a mode that cannot activate is BLOCKED —
+// never "unavailable for now", which would imply it might work later today.
+const NETWORK_NAMES = { 0: "mainnet", 1: "stagenet", 2: "nextnet", 16: "localnet", 36: "igor", 38: "esmeralda" };
+const networkName = (b) => NETWORK_NAMES[b] || `byte 0x${Number(b || 0).toString(16).padStart(2, "0")}`;
+
+function setPill(id, cls, text) {
+    const pill = $(id);
+    pill.classList.remove("ok", "warn", "bad");
+    if (cls) pill.classList.add(cls);
+    pill.querySelector(".v").textContent = text;
+    pill.title = `${pill.querySelector(".k").textContent}: ${text}`;
+}
+
+async function refreshStatus() {
+    // Bridge + configuration flags: one cheap call, and the ONLY place that may say "healthy".
+    const health = await api("/health").catch(() => null);
+    if (health && health.ok) {
+        setPill("pill-bridge", "ok", `healthy v${health.body.version || "?"}`);
+        setPill("pill-indexer", health.body.credential_configured ? "ok" : "", health.body.credential_configured ? "configured" : "not configured");
+        // Chain sync is not asserted here: "configured" says what this process was wired with,
+        // nothing more. The verifier refuses proofs it cannot verify against real chain state.
+    } else {
+        setPill("pill-bridge", "bad", "unreachable");
+        setPill("pill-indexer", "", "unknown");
+    }
+
+    // Walletd reachability: probed for real, and the network name comes from the WALLET when it
+    // answers (the operator's configured cohort), falling back to the gates' registry byte.
+    const ws = await api("/wallet/status").catch(() => null);
+    if (ws && ws.ok && ws.body.reachable) {
+        setPill("pill-walletd", "ok", ws.body.has_default_account ? "reachable · account ready" : "reachable · no account");
+    } else if (ws && ws.status === 503) {
+        setPill("pill-walletd", "bad", "not reachable");
+    } else {
+        setPill("pill-walletd", "bad", "unreachable");
+    }
+
+    // Capabilities + network from the registry. Sorted by threshold ascending: the first gate a
+    // judge sees should be the cheapest one, not an alphabetical accident of the registry's map.
+    const { ok, body } = await api("/lab/gates").catch(() => ({ ok: false, body: {} }));
+    const gates = (ok && body.gates) || [];
+    gates.sort((a, b) => {
+        const d = BigInt(a.thresholdRaw) < BigInt(b.thresholdRaw) ? -1 : BigInt(a.thresholdRaw) > BigInt(b.thresholdRaw) ? 1 : String(a.gateId).localeCompare(String(b.gateId));
+        return d;
+    });
+    state.gates = gates;
+    const modes = [];
+    if (gates.some((g) => g.proofMode === "consensus")) modes.push("consensus");
+    if (gates.some((g) => g.proofMode === "credential")) modes.push("credential");
+    modes.push("XTM blocked");
+    setPill("pill-modes", "", modes.join(" · "));
+    setPill("pill-gates", gates.length ? "ok" : "warn", gates.length ? `${gates.length} configured` : "none");
+
+    const netByte = gates[0] && gates[0].network !== undefined ? gates[0].network : null;
+    const netName = (ws && ws.ok && ws.body.reachable && ws.body.network_name) || (netByte !== null ? networkName(netByte) : null);
+    if (netName) setPill("pill-network", "ok", netName);
+    else setPill("pill-network", "warn", "unknown");
+
+    // Rebuild the picker only when the list actually changed: rebuilding on every refresh would
+    // slam a dropdown shut under the operator's cursor.
+    const sig = JSON.stringify(gates.map((g) => [g.gateId, g.thresholdRaw, g.useMode]));
+    if (sig !== state.gateListSig) {
+        state.gateListSig = sig;
+        populateGateSelect();
+    }
+    const stillThere = state.gate && gates.some((g) => g.gateId === state.gate.gateId);
+    if (!stillThere) {
+        if (gates.length) selectGate(gates[0].gateId);
+        else if (state.gate) selectGate(null);
+        else renderGateFacts(null);
+    }
+    loadTelegramScope();
+    return gates;
+}
+
+// ---------------------------------------------------------------- matrix edges
+// Ambient, low-opacity code columns on the page edges. Generated once, CSS-animated only
+// (transform), behind the content, pointer-events none, and NOT STARTED at all when the visitor
+// prefers reduced motion.
+function startMatrixEdges() {
+    const host = document.getElementById("matrix-edges");
+    if (!host || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const glyphs = "01ｱｲｳｴｵｶｷｸｹｺｻｼｽｾﾀﾁﾂﾃﾄﾅﾆﾈﾊﾋﾎﾏﾐﾑﾒﾓﾗﾘﾙﾚﾛABCDEF0123456789";
+    const positions = ["6px", "40px", "1fr", "40px", "6px"]; // two outer columns per side
+    const sides = ["left", "right"];
+    let seed = 0x9e3779b9;
+    const rnd = () => {
+        // deterministic xorshift: the ambient pattern is decorative, never security-relevant
+        seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5;
+        return Math.abs(seed % 1000) / 1000;
+    };
+    for (const side of sides) {
+        for (let c = 0; c < positions.length; c++) {
+            if (positions[c] === "1fr") continue; // never near the content's centre
+            const col = document.createElement("div");
+            col.className = "col";
+            col.style[side] = positions[c];
+            col.style.setProperty("--fall", `${16 + Math.floor(rnd() * 20)}s`);
+            col.style.setProperty("--delay", `${(-rnd() * 20).toFixed(1)}s`);
+            const lines = 120;
+            let text = "";
+            for (let i = 0; i < lines; i++) text += glyphs[Math.floor(rnd() * glyphs.length)] + "\n";
+            col.textContent = text;
+            col.style.animationDelay = `${(-rnd() * 24).toFixed(1)}s`;
+            host.append(col);
+        }
+    }
+}
+
+/** Which gates an administrator has scoped for Telegram — stated before anyone clicks. A gate with
+ *  no Telegram scope must never feel clickable: the card goes inactive and the button is disabled. */
+function loadTelegramScope() {
+    const card = $("telegram-card");
+    const btn = $("tg-start");
+    const note = $("tg-gate-note");
+    const scoped = state.gates.filter((g) => g.useMode === "telegram" || g.useMode === "both");
+    const currentScoped = state.gate && (state.gate.useMode === "telegram" || state.gate.useMode === "both");
+
+    const setInactive = (why) => {
+        card.classList.add("inactive");
+        btn.disabled = true;
+        btn.textContent = "Not configured for these gates";
+        note.textContent = why;
+    };
+    const setActive = () => {
+        card.classList.remove("inactive");
+        btn.disabled = false;
+        btn.textContent = "Open the Telegram verification";
+    };
+
+    if (!state.gates.length) {
+        setInactive("No gate is configured yet. An administrator can scope a gate to Telegram in the dashboard.");
+    } else if (!scoped.length) {
+        setInactive(`Telegram access is not configured: none of the ${state.gates.length} configured gate(s) allow Telegram membership. The administrator can change this per gate in the dashboard.`);
+    } else if (!currentScoped) {
+        setInactive(`This gate ("${state.gate.gateId}") authorizes the website only. Switch to ${scoped.map((g) => g.gateId).join(", ")} or re-scope in the dashboard.`);
+    } else {
+        setActive();
+        note.textContent = `${scoped.map((g) => g.gateId).join(", ")} may be used for Telegram membership.`;
+    }
+}
+
 $("tg-start").onclick = async () => {
     const gate = state.gate;
-    if (!gate) { $("tg-note").textContent = "Choose a gate first."; return; }
+    if (!gate) return;
     if (gate.useMode === "website") {
-        $("tg-note").textContent = `This gate ("${gate.gateId}") authorizes the WEBSITE only. An administrator can scope a gate to Telegram as well; until then it cannot mint group membership.`;
+        loadTelegramScope();
         return;
     }
     $("tg-note").textContent = "Opening the verification page — the flow continues in the bot's window.";
     // The real flow lives at /telegram/join; the button that proves it is there.
     window.location.href = `/telegram/join?gate=${encodeURIComponent(gate.gateId)}`;
 };
-
-/** Which gates an administrator has scoped for Telegram — stated before anyone clicks. */
-async function loadTelegramScope() {
-    const note = $("tg-gate-note");
-    const scoped = state.gates.filter((g) => g.useMode === "telegram" || g.useMode === "both");
-    if (!state.gates.length) {
-        note.textContent = "No gate is configured yet.";
-    } else if (!scoped.length) {
-        note.textContent = `None of the ${state.gates.length} configured gate(s) allow Telegram membership. The administrator can change this per gate in the dashboard.`;
-    } else {
-        note.textContent = `${scoped.map((g) => g.gateId).join(", ")} may be used for Telegram membership.`;
-    }
-}
 
 // ---------------------------------------------------------------- wiring
 $("view-simple").onclick = () => setView("simple");
@@ -558,10 +775,15 @@ function renderExport() {
 (async function boot() {
     setView("simple");
     setModeBadge(false);
+    $("prov-note").textContent = "Provenance: bridge = this process; wallet = the wallet's own answer; consensus = the network; verifier = checks this codebase performs. Events are recorded server-side and pass an allowlist before they reach this page.";
+    renderSteps();
+    renderTerminalEmpty($("term-log"), null, true);
+    startMatrixEdges();
+    // The status strip is the first thing a judge reads; refresh it quietly so a walletd that
+    // comes up (or dies) is reflected without a manual reload.
+    await refreshStatus();
+    await loadTelegramScope();
     const health = await api("/health").catch(() => ({ body: {} }));
     $("version-line").textContent = health.body.version ? ` bridge ${health.body.version}` : "";
-    $("prov-note").textContent = "Provenance: bridge = this process; wallet = the wallet's own answer; consensus = the network; verifier = checks this codebase performs. Events are recorded server-side and pass an allowlist before they reach this page.";
-    // The X-ray and steps exist before any gate loads.
-    renderSteps();
-    await loadGates();
+    setInterval(() => { refreshStatus().catch(() => {}); }, 20_000);
 })();
