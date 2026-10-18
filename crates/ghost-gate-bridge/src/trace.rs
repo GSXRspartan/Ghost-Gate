@@ -82,28 +82,41 @@ pub struct TraceEvent {
 
 /// The closed set of detail fields. A struct, not a map: adding a field here is a deliberate,
 /// reviewable act, which is exactly what a `HashMap<String, Value>` would destroy.
+///
+/// A field that does not apply is omitted entirely rather than serialised as `null`: an inspector
+/// full of nulls hides the values that matter and invites the reader to think something is missing
+/// when it simply does not apply.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Detail {
     /// The gate this attempt is about (its administrator-chosen id).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub gate_id: Option<String>,
     /// A SHORT handle of something the network publishes to everyone (a transaction, a block). Never
     /// a visitor's own identifier.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub public_ref: Option<String>,
-    /// The proof mode's public name (`consensus`, `credential`, …).
+    /// The proof mode's public name (`consensus`, `credential`, ...).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub proof_mode: Option<&'static str>,
     /// A threshold the GATE published, in raw units. A gate's threshold is public by design.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub required_raw: Option<u64>,
     /// A **floor** the network attested — a lower bound, never the amount held.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub attested_floor_raw: Option<u64>,
     /// A count of items, never the items.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub input_count: Option<u32>,
     /// How long something took, in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
     /// A session's remaining life, in seconds. The visitor's own session, by their own action.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub session_valid_secs: Option<u64>,
     /// Whether the attempt was the labelled offline simulation. A simulation must be visibly a
     /// simulation in every view.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub simulated: Option<bool>,
 }
 

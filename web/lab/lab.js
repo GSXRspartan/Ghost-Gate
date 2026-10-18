@@ -138,7 +138,7 @@ function renderGateFacts(gate) {
         ["asset", gate.symbol || "(unlabelled)", "green"],
         ["minimum proven", `≥ ${human} ${gate.symbol || ""}`.trim(), "green"],
         ["raw units", gate.thresholdRaw, ""],
-        ["resource", gate.resourceAddress || "—", ""],
+        ["resource", gate.resourceAddress ? `${gate.resourceAddress.slice(0, 12)}…` : "—", ""],
         ["divisibility", gate.divisibility, ""],
         ["proof mode", gate.proofMode === "consensus" ? "consensus (wallet daemon)" : gate.proofMode, ""],
         ["sessions", gate.sessionsAvailable ? "issued server-side" : "not issued (preview)", gate.sessionsAvailable ? "green" : "bad"],
@@ -314,6 +314,11 @@ async function prove() {
     state.simulated = false;
 
     // 1. A fresh challenge, bound to a brand-new attempt id (which opens the trace).
+    // The id is ours — 128 bits from crypto.getRandomValues — and it is the only key to this
+    // attempt's trace. The bridge shape-checks it and stores nothing else about it.
+    state.attemptId = Array.from(crypto.getRandomValues(new Uint8Array(16)))
+        .map((b) => b.toString(16).padStart(2, "0")).join("");
+    $("attempt-label").textContent = `attempt ${state.attemptId.slice(0, 8)}… · live`;
     advance("challenge");
     const ch = await api(`/gate/${gate.gateId}/challenge`, { method: "POST", body: "{}" });
     if (!ch.ok) {
@@ -401,6 +406,7 @@ async function simulate() {
     }
     state.attemptId = body.attemptId;
     state.events = (body.trace && body.trace.events) || [];
+    $("attempt-label").textContent = `attempt ${body.attemptId.slice(0, 8)}… · simulated`;
     setModeBadge(true);
     renderTerminal();
     // The Simple view mirrors the same events, so the two views cannot disagree.
