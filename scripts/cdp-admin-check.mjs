@@ -214,6 +214,12 @@ async function main() {
   );
   check("every gate offers a tier checkbox for every other gate", tierBoxes === 6, `${tierBoxes} boxes`);
 
+  console.log("\n== 3b. a gate records where it may be used ==");
+  const scopePresent = await evaluate("!!document.querySelector('[id^=scope-]')");
+  check("the scope control is offered per application", scopePresent === true);
+  const scopeOptions = await evaluate("[...document.querySelectorAll('[id^=scope-] option')].map(o=>o.value).join(',')");
+  check("it offers exactly website / telegram / both", scopeOptions === "website,telegram,both", scopeOptions);
+
   console.log("\n== 4. wiring a tier with a real click saves and survives a reload ==");
   // gold opens silver: click gold's row, silver's box.
   await evaluate(
