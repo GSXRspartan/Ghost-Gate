@@ -103,6 +103,7 @@ async function loadGates() {
     if (!state.gates.length) {
         sel.innerHTML = '<option value="">no gate published yet</option>';
         renderGateFacts(null);
+        loadTelegramScope();
         return;
     }
     for (const g of state.gates) {
@@ -155,6 +156,7 @@ function renderGateFacts(gate) {
         host.append(d);
     }
     renderXray(gate);
+    loadTelegramScope();
 }
 
 // ---------------------------------------------------------------- wallets
@@ -495,11 +497,28 @@ function setView(v) {
 // ---------------------------------------------------------------- telegram
 $("tg-start").onclick = async () => {
     const gate = state.gate;
-    if (!gate) { $("tg-note").textContent = "choose a gate first."; return; }
-    $("tg-note").textContent = `To bind this gate to Telegram: complete the verification above for "${gate.gateId}", then open the join link the bridge issues. The bot re-checks your session with the bridge; it never sees a wallet address or a key.`;
+    if (!gate) { $("tg-note").textContent = "Choose a gate first."; return; }
+    if (gate.useMode === "website") {
+        $("tg-note").textContent = `This gate ("${gate.gateId}") authorizes the WEBSITE only. An administrator can scope a gate to Telegram as well; until then it cannot mint group membership.`;
+        return;
+    }
+    $("tg-note").textContent = "Opening the verification page — the flow continues in the bot's window.";
     // The real flow lives at /telegram/join; the button that proves it is there.
     window.location.href = `/telegram/join?gate=${encodeURIComponent(gate.gateId)}`;
 };
+
+/** Which gates an administrator has scoped for Telegram — stated before anyone clicks. */
+async function loadTelegramScope() {
+    const note = $("tg-gate-note");
+    const scoped = state.gates.filter((g) => g.useMode === "telegram" || g.useMode === "both");
+    if (!state.gates.length) {
+        note.textContent = "No gate is configured yet.";
+    } else if (!scoped.length) {
+        note.textContent = `None of the ${state.gates.length} configured gate(s) allow Telegram membership. The administrator can change this per gate in the dashboard.`;
+    } else {
+        note.textContent = `${scoped.map((g) => g.gateId).join(", ")} may be used for Telegram membership.`;
+    }
+}
 
 // ---------------------------------------------------------------- wiring
 $("view-simple").onclick = () => setView("simple");

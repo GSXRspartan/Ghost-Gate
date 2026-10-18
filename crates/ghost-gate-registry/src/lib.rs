@@ -432,6 +432,12 @@ pub struct Bindings {
     pub revoked_session_prefixes: Vec<String>,
 }
 
+/// The scope a gate had before the field existed: the website. An upgrade must never grant a
+/// gate a new surface by omission.
+fn default_use_mode() -> String {
+    "website".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GateBindingSnapshot {
     pub application_id: String,
@@ -457,6 +463,10 @@ pub struct GateBindingSnapshot {
     pub genesis_hash: String,
     /// Which surfaces this gate may authorize (`website`, `telegram`, `both`). The Telegram bot
     /// refuses a website-only gate; the Lab shows the scope rather than implying it.
+    ///
+    /// Defaults to `website` so a bindings snapshot written before this field existed keeps its
+    /// previous meaning: the bridge serves the website and gains no Telegram surface by upgrade.
+    #[serde(default = "default_use_mode")]
     pub use_mode: String,
 }
 

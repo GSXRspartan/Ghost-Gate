@@ -111,8 +111,14 @@
         <!-- ============ TELEGRAM ============ -->
         <section class="card" id="telegram-card">
             <h2><span class="n">05</span>Telegram group verification</h2>
-            <p class="sub">Prove here, then bind the verification to a Telegram account to obtain a single-use invite. The bot asks the same bridge about your session; it never sees a wallet.</p>
-            <button class="cta" id="tg-start">Start Telegram verification</button>
+            <p class="sub">A gate the administrator scoped to Telegram can verify you for a group. Your wallet proves the threshold; the bot asks the BRIDGE about your session — it never sees a wallet, a key or a balance.</p>
+            <ul class="steps" style="margin-bottom:1rem">
+                <li><div><div class="step-title">1 · Pick a Telegram-scoped gate</div><div class="step-note" id="tg-gate-note">Checking which gates allow Telegram…</div></div></li>
+                <li><div><div class="step-title">2 · Verify with a supported wallet</div><div class="step-note">One approval creates the proof output; one signs the challenge. No seed, no keys.</div></div></li>
+                <li><div><div class="step-title">3 · Bind to your Telegram account</div><div class="step-note">The bot mints a single-use join token; the verification page claims it. Your Telegram id is visible to Telegram and to the bot by nature.</div></div></li>
+                <li><div><div class="step-title">4 · Receive a single-seat invite</div><div class="step-note">Forwarded links grant nobody else. The seat is freed when your session expires, and re-verification is then required.</div></div></li>
+            </ul>
+            <button class="cta" id="tg-start">Open the Telegram verification</button>
             <p class="sub" id="tg-note" style="margin-top:0.7rem"></p>
         </section>
     </main>

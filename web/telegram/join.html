@@ -13,10 +13,31 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>Ghost Gate — Telegram verification</title>
+<!-- Same design system as the Privacy Lab, so the verification flow reads as one product. -->
+<link rel="stylesheet" href="/lab/lab.css">
+<style>
+  body.vault { background: var(--ink); color: var(--text); font-family: var(--sans); }
+  #app { max-width: 680px; margin: 0 auto; padding: 3rem 1.25rem 5rem; }
+  .proof-box { background: linear-gradient(180deg, var(--panel) 0%, var(--ink-2) 100%);
+    border: 1px solid var(--line); border-radius: 14px; padding: 1.6rem 1.7rem; }
+  .proof-box h2 { color: var(--green); letter-spacing: .16em; font-size: 1.05rem; margin: 0 0 .4rem; }
+  .hint { color: var(--dim); font-size: .88rem; line-height: 1.6; }
+  .proof-steps { list-style: none; counter-reset: s; padding: 0; margin: 1.2rem 0 0; }
+  .proof-steps li { counter-increment: s; display: grid; grid-template-columns: 1.9rem 1fr; gap: .8rem;
+    padding: .65rem 0; border-top: 1px solid var(--line); color: var(--dim); font-size: .88rem; }
+  .proof-steps li::before { content: counter(s); font-family: var(--mono); width: 1.7rem; height: 1.7rem;
+    line-height: 1.7rem; text-align: center; border: 1px solid var(--line); border-radius: 50%; }
+  .proof-steps li.active { color: var(--text); }
+  .proof-steps li.active::before { border-color: var(--green); color: var(--green); box-shadow: 0 0 0 4px var(--green-glow); }
+  .proof-steps li.done::before { background: var(--green); border-color: var(--green); color: var(--ink); content: "✓"; }
+  .error { color: var(--bad); font-size: .88rem; margin-top: 1rem; }
+  .tg-head a { color: var(--green); text-decoration: none; font-size: .85rem; letter-spacing: .06em; }
+</style>
 </head>
 <body class="vault">
 <div id="vignette" aria-hidden="true"></div>
-<main id="app" style="max-width:640px;margin:0 auto;padding:3rem 1.25rem">
+<p class="tg-head" style="max-width:680px;margin:2rem auto 0"><a href="/lab">← Privacy Lab</a></p>
+<main id="app">
   <section class="proof-box">
     <h2 style="letter-spacing:.2em">Telegram verification</h2>
     <p class="hint" id="tg-line">Reading your join link…</p>
