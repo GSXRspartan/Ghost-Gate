@@ -55,6 +55,7 @@ name = "ghost-gate-core"
 version = "0.1.0"
 dependencies = [
  "minicbor",
+ "serde",
  "tari_template_lib_types",
 ]
 

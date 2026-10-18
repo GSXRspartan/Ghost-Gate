@@ -59,13 +59,13 @@ struct TestNet {
 
 async fn spawn_base_node(dir: &std::path::Path) -> TestNet {
     // Ports from the OS: a random seed offset keeps two concurrent tests off each other's
-    // listeners (libtest runs tests in parallel by default).
+    // listeners (libtest runs tests in parallel by default, and a full workspace run adds many
+    // more processes). The window is WIDE (1000 ports per slot) because a 300-port window
+    // collided under load and a collision shows up as a mystifying "gRPC never came up" rather
+    // than as an obvious bind error.
     let seed: u16 = rand::random();
-    let (port, grpc_port, http_port) = (
-        12000 + (seed % 300),
-        12300 + (seed % 300),
-        12600 + (seed % 300),
-    );
+    let base = 12_000 + (seed % 1_000);
+    let (port, grpc_port, http_port) = (base, base + 300, base + 600);
     let base_node_address: Multiaddr = format!("/ip4/127.0.0.1/tcp/{port}").parse().unwrap();
     let base_node_identity = NodeIdentity::random(&mut rand::rng(), base_node_address, PeerFeatures::COMMUNICATION_NODE);
     let identity = base_node_identity.clone();
