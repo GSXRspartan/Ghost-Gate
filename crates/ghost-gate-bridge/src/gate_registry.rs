@@ -174,6 +174,9 @@ pub enum GateRegistrationError {
 #[derive(Debug, Clone, Default)]
 pub struct GateRegistry {
     gates: std::collections::BTreeMap<String, GateBinding>,
+    /// The administrator's scope per gate id (website / telegram / both), from the registry
+    /// snapshot. Kept beside the binding so the Lab and the bot read the SAME answer.
+    use_modes: std::collections::BTreeMap<String, String>,
 }
 
 impl GateRegistry {
@@ -185,6 +188,18 @@ impl GateRegistry {
     ///
     /// The caller is an operator with chain access, so `binding` is trusted here; everything after
     /// this call is checked against it.
+    /// Records the administrator's scope for a gate. Called from the snapshot reload, never by a
+    /// caller that could invent one.
+    pub fn set_use_mode(&mut self, id: &str, mode: &str) {
+        self.use_modes.insert(id.to_string(), mode.to_string());
+    }
+
+    /// The scope recorded for a gate, defaulting to `website` when unknown (the conservative default:
+    /// a gate with no recorded scope authorizes the website, never Telegram by accident).
+    pub fn use_mode_of(&self, id: &str) -> Option<String> {
+        Some(self.use_modes.get(id).cloned().unwrap_or_else(|| "website".into()))
+    }
+
     pub fn register(
         &mut self,
         id: impl Into<String>,

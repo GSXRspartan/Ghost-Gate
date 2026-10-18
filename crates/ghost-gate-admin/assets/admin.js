@@ -240,7 +240,7 @@ function renderApps(state) {
 
     // Gates table.
     const table = document.createElement("table");
-    table.innerHTML = "<tr><th>Gate</th><th>Name</th><th>Resource</th><th>Threshold</th><th>Mode</th><th>Session</th><th>Grants</th><th>State</th><th></th></tr>";
+    table.innerHTML = "<tr><th>Gate</th><th>Name</th><th>Threshold</th><th>Mode</th><th>Session</th><th>Used on</th><th>Grants</th><th>State</th><th></th></tr>";
     for (const g of app.gates) {
       const tr = document.createElement("tr");
       const th = g.thresholdRaw;
@@ -249,10 +249,10 @@ function renderApps(state) {
       tr.innerHTML = `
         <td class="mono">${esc(g.gateId)}</td>
         <td>${esc(g.name)}</td>
-        <td class="mono">${esc(short(g.resourceAddress, 18))}</td>
         <td title="${esc(th)} raw units">${esc(human)} ${esc(g.symbol)}</td>
         <td>${esc(g.proofMode)}${g.activatable ? "" : " (draft — " + esc(g.blockedReason || "unsupported") + ")"}</td>
         <td>${g.sessionTtlOverrideSecs ? humanTtl(g.sessionTtlOverrideSecs) : "default"}</td>
+        <td>${esc(g.useMode === "both" ? "site + Telegram" : g.useMode === "telegram" ? "Telegram only" : "site only")}</td>
         <td class="mono">${esc((g.grants || []).join(", ")) || "—"}</td>
         <td>${g.publishedVersion ? `<span class="published">published v${g.publishedVersion}</span>` : '<span class="draft">draft</span>'} ${g.enabled ? '<span class="badge enabled">enabled</span>' : ""} ${g.testLane ? '<span class="badge test">test lane</span>' : ""}</td>
         <td></td>`;
@@ -299,6 +299,18 @@ function renderApps(state) {
       tlc.id = `testlane-${app.applicationId}`;
       testLane.append(tlc, "Test lane (never authorises production sessions)");
       editor.append(testLane);
+      // Which surface this gate may authorize. A token policy is not a front door: the same
+      // threshold can be enforced on the website and deliberately not used for Telegram invites.
+      const scopeLabel = document.createElement("label");
+      scopeLabel.textContent = "Where this gate may be used";
+      const scope = document.createElement("select");
+      scope.id = `scope-${app.applicationId}`;
+      scope.innerHTML =
+        '<option value="website">Website only</option>' +
+        '<option value="telegram">Telegram membership only</option>' +
+        '<option value="both">Website and Telegram</option>';
+      scopeLabel.append(scope);
+      editor.append(scopeLabel);
       // Tier wiring: a checkbox per other gate in this application. Save writes the whole gate back
       // with the chosen grant set — an explicit, auditable action rather than a hidden side effect.
       const tiers = document.createElement("div");
@@ -426,6 +438,7 @@ async function addGate(app) {
     grants: $(`grants-${app.applicationId}`).value.split(",").map((x) => x.trim()).filter((id) => app.gates.some((g) => g.gateId === id)),
     enabled: !isDraft,
     testLane: $(`testlane-${app.applicationId}`).checked,
+    useMode: $(`scope-${app.applicationId}`).value,
     componentAddress: $(`gate-component-${app.applicationId}`).value.trim() || null,
   };
   const r = await api("/admin/api/gate/set", { mutating: true, body: JSON.stringify({ applicationId: app.applicationId, gate }) });
@@ -460,6 +473,7 @@ async function wireTiers(app, gateId, box) {
         grants,
         enabled: gate.enabled,
         testLane: gate.testLane,
+        useMode: gate.useMode || "website",
         componentAddress: gate.componentAddress || null,
       },
     }),

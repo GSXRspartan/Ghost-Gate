@@ -436,6 +436,7 @@ fn one_week_session_issue_use_expiry_and_revocation() {
         grants: vec![],
         enabled: true,
         test_lane: false,
+        use_mode: Default::default(),
         component_address: Some("component_m".into()),
     });
     app.validate().unwrap();
@@ -694,6 +695,7 @@ fn tamper_8_a_proof_against_another_gate_or_policy_cannot_verify() {
             symbol: "GHOST".into(), divisibility: 6, threshold_raw: 100,
             proof_mode: ProofMode::Consensus, challenge_domain: "app.localhost".into(),
             session_ttl_override: None, grants: vec![], enabled: true, test_lane: false,
+            use_mode: Default::default(),
             component_address: Some(format!("component_{id}")),
         });
     }
@@ -775,6 +777,7 @@ fn tamper_10_a_lower_tier_session_cannot_reach_a_higher_tier() {
         symbol: "G".into(), divisibility: 6, threshold_raw: 200, proof_mode: ProofMode::Consensus,
         challenge_domain: "t.localhost".into(), session_ttl_override: None,
         grants: vec!["bronze".into()], enabled: true, test_lane: false,
+        use_mode: Default::default(),
         component_address: Some("component_s".into()),
     };
     app.gates.push(silver);
@@ -782,7 +785,7 @@ fn tamper_10_a_lower_tier_session_cannot_reach_a_higher_tier() {
         gate_id: "bronze".into(), name: "b".into(), resource_address: "resource_x".into(),
         symbol: "G".into(), divisibility: 6, threshold_raw: 100, proof_mode: ProofMode::Consensus,
         challenge_domain: "t.localhost".into(), session_ttl_override: None,
-        grants: vec![], enabled: true, test_lane: false, component_address: Some("component_b".into()),
+        grants: vec![], enabled: true, test_lane: false, use_mode: Default::default(), component_address: Some("component_b".into()),
     });
     app.validate().unwrap();
     reg.applications.push(app);
@@ -829,7 +832,7 @@ fn tamper_11_client_side_expiry_extension_is_meaningless() {
         gate_id: "g".into(), name: "g".into(), resource_address: "resource_x".into(),
         symbol: "G".into(), divisibility: 6, threshold_raw: 100, proof_mode: ProofMode::Consensus,
         challenge_domain: "e.localhost".into(), session_ttl_override: None, grants: vec![],
-        enabled: true, test_lane: false, component_address: Some("component_g".into()),
+        enabled: true, test_lane: false, use_mode: Default::default(), component_address: Some("component_g".into()),
     });
     app.validate().unwrap();
     reg.applications.push(app);
@@ -1144,6 +1147,7 @@ fn measured_scalability_at_1_3_10_25_and_50_gates() {
                 grants: if i + 1 < count { vec![format!("gate-{}", i + 1)] } else { vec![] },
                 enabled: true,
                 test_lane: false,
+                use_mode: Default::default(),
                 component_address: Some(format!("component_{i:064x}")),
             });
         }
@@ -1211,4 +1215,63 @@ fn measured_scalability_at_1_3_10_25_and_50_gates() {
     }
     println!("\n== measured scalability (this machine, debug build) ==\n{report}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Use mode: a token policy is not a front door. The administrator records which
+// surfaces a gate may authorize, in the versioned policy, and both the bridge
+// and the Telegram bot read that one answer.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_gate_records_which_surfaces_it_may_authorize() {
+    use ghost_gate_core::policy::GateUseMode;
+
+    // The three scopes are exhaustive and mutually exclusive in meaning.
+    assert!(GateUseMode::Website.allows(false), "a website gate serves the website");
+    assert!(!GateUseMode::Website.allows(true), "a website-only gate does NOT serve Telegram");
+    assert!(GateUseMode::Telegram.allows(true));
+    assert!(!GateUseMode::Telegram.allows(false), "a Telegram-only gate does not serve the site");
+    assert!(GateUseMode::Both.allows(true) && GateUseMode::Both.allows(false));
+
+    // The default for a gate written before the field existed is the website: the conservative
+    // default, since the alternative would hand a new surface access by accident.
+    assert_eq!(GateUseMode::default(), GateUseMode::Website);
+
+    // It survives a round trip through the registry file, because the bridge reads it from there.
+    let mut policy = ghost_gate_core::policy::GatePolicy {
+        gate_id: "tg".into(),
+        name: "telegram gate".into(),
+        resource_address: "resource_x".into(),
+        symbol: "X".into(),
+        divisibility: 6,
+        threshold_raw: 10,
+        proof_mode: ghost_gate_core::policy::ProofMode::Consensus,
+        challenge_domain: "t.localhost".into(),
+        session_ttl_override: None,
+        grants: vec![],
+        enabled: true,
+        test_lane: false,
+        component_address: Some("component_t".into()),
+        use_mode: GateUseMode::Telegram,
+    };
+    // The gate lives inside an application here (validation is structural, app-level).
+    let app = ghost_gate_core::policy::Application {
+        application_id: "a".into(),
+        display_name: "A".into(),
+        owner_credential: "wallet:op".into(),
+        topology: ghost_gate_core::policy::GateTopology::Independent,
+        default_session_ttl: 3_600,
+        max_gates: 4,
+        gates: vec![policy.clone()],
+        revision: 1,
+        production: true,
+        network: ghost_gate_core::network::LOCALNET,
+        genesis_hash: GENESIS.into(),
+    };
+    app.validate().expect("a telegram-scoped gate is a valid gate");
+    let json = serde_json::to_string(&policy).unwrap();
+    assert!(json.contains("\"telegram\""), "the scope is in the stored policy: {json}");
+    let back: ghost_gate_core::policy::GatePolicy = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.use_mode, GateUseMode::Telegram, "and it round-trips");
 }

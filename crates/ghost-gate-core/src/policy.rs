@@ -162,6 +162,47 @@ pub struct GatePolicy {
     /// before this field existed still load.
     #[serde(default)]
     pub component_address: Option<String>,
+    /// Where this gate may be used. serde default so registries written before this field existed
+    /// still load, defaulting to the website (the ordinary case).
+    ///
+    /// A gate is a policy about a TOKEN, not about one front door. An administrator may want the
+    /// same threshold enforced on the website but NOT used to mint Telegram invites (or the other
+    /// way round); this is where that choice is recorded, in the versioned policy, so the bridge
+    /// and the bot read the same answer.
+    #[serde(default)]
+    pub use_mode: GateUseMode,
+}
+
+/// Which surfaces a gate is allowed to authorize. Not a hierarchy: `Both` means both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GateUseMode {
+    /// The website (the Privacy Lab and any relying site). The default.
+    #[default]
+    Website,
+    /// Telegram membership only.
+    Telegram,
+    /// Both surfaces.
+    Both,
+}
+
+impl GateUseMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GateUseMode::Website => "website",
+            GateUseMode::Telegram => "telegram",
+            GateUseMode::Both => "both",
+        }
+    }
+
+    /// Whether this gate may authorize the given surface.
+    pub fn allows(self, telegram: bool) -> bool {
+        match self {
+            GateUseMode::Website => !telegram,
+            GateUseMode::Telegram => telegram,
+            GateUseMode::Both => true,
+        }
+    }
 }
 
 impl GatePolicy {
@@ -648,6 +689,7 @@ mod tests {
             grants: vec![],
             enabled: true,
             test_lane: false,
+            use_mode: Default::default(),
             component_address: Some("component_abc".into()),
         }
     }

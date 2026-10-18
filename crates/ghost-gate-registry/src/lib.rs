@@ -455,6 +455,9 @@ pub struct GateBindingSnapshot {
     /// colliding address.
     pub network: u8,
     pub genesis_hash: String,
+    /// Which surfaces this gate may authorize (`website`, `telegram`, `both`). The Telegram bot
+    /// refuses a website-only gate; the Lab shows the scope rather than implying it.
+    pub use_mode: String,
 }
 
 /// Derive the snapshot from a validated registry: only enabled, activatable gates with a deployed
@@ -492,6 +495,7 @@ pub fn derive_bindings(reg: &Registry) -> Bindings {
                 test_lane: g.test_lane,
                 network: app.network,
                 genesis_hash: app.genesis_hash.clone(),
+                use_mode: g.use_mode.as_str().to_string(),
             });
         }
     }
@@ -702,6 +706,7 @@ mod tests {
             grants: vec![],
             enabled: true,
             test_lane: test,
+            use_mode: Default::default(),
             component_address: Some("component_abc".into()),
         }
     }

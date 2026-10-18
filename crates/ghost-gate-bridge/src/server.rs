@@ -346,6 +346,9 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                             continue; // test-lane gates never bind the production listener
                         }
                         let binding = crate::access::binding_from_snapshot(snap)?;
+                        // The scope comes from the same snapshot, so the Lab and the bot read the
+                        // same administrator decision rather than each inferring one.
+                        gates_registry.set_use_mode(&snap.gate_id, &snap.use_mode);
                         gates_registry
                             .register(snap.gate_id.clone(), binding)
                             .map_err(|e| format!("gate {}: {e}", snap.gate_id))?;
@@ -546,6 +549,8 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                 "proofMode": proof_mode,
                 "activatable": !matches!(meta.proof_kind, crate::gate_registry::ProofKind::MinotariXtm),
                 "sessionsAvailable": access_plane.is_some(),
+                // The scope the administrator assigned: a website-only gate is not a Telegram gate.
+                "useMode": self.gates.use_mode_of(id).unwrap_or_else(|| "website".into()),
             }));
         }
         Response::json(200, &serde_json::json!({ "gates": gates }))
@@ -836,6 +841,9 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
     /// The challenge bookkeeping is the same book Mode A uses, so a credential proof and a
     /// consensus proof compete for the same single-use challenges rather than each having a
     /// private supply an attacker could pace.
+    /// The credential route, which is the one the Telegram membership flow uses. It refuses a gate
+    /// the administrator scoped to the website: a token policy is not a front door, and the scope is
+    /// the administrator's decision, recorded in the published policy.
     async fn credential(&mut self, id: &str, request: &Request) -> Response {
         let Some(gate) = self.gates.get(id).cloned() else {
             return Response::error(404, "GG: no such gate");
@@ -857,7 +865,16 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                  Set GG_INDEXER_ENDPOINT to enable the credential mode.",
             );
         };
-
+        // The scope: a policy decision about the gate, which is not a function of the request body.
+        // It is checked AFTER the body parses (a malformed request is malformed whatever the gate)
+        // and AFTER the reader exists (a bridge with no reader has no credential mode at all).
+        let scope = self.gates.use_mode_of(id).unwrap_or_else(|| "website".into());
+        if !matches!(scope.as_str(), "telegram" | "both") {
+            return Response::error(
+                403,
+                "GG: this gate authorizes the website only; it is not a Telegram membership gate",
+            );
+        }
         // The same challenge validation Mode A passes: live, single-use, session-bound, and bound
         // to this gate's policy. A credential proof answers a challenge the bridge minted, never
         // one a page invented.
@@ -1605,6 +1622,9 @@ mod tests {
     fn credential_bridge(wallet: FakeWallet, chain: FakeChain) -> Bridge<FakeWallet, FakeChain> {
         let mut gates = GateRegistry::new();
         gates.register("g1", binding()).unwrap();
+        // The credential route is the Telegram membership path, so this fixture's gate is scoped
+        // for Telegram. The website-only refusal has its own test.
+        gates.set_use_mode("g1", "telegram");
         Bridge::with_chain_reader(
             gates,
             wallet,
@@ -2576,5 +2596,28 @@ mod tests {
         // /lab/simulate mints nothing: it returns a null session and records no grant (asserted above).
         // Reading a trace is a GET; a POST to it is not a route.
         assert_eq!(b.handle(&post("/lab/trace", serde_json::json!({}))).await.status, 404);
+    }
+
+    /// A gate the administrator scoped to the website cannot be used as a Telegram membership
+    /// gate: the credential route refuses it before it touches a wallet or a chain.
+    #[tokio::test]
+    async fn a_website_only_gate_cannot_authorize_telegram_membership() {
+        // This fixture HAS a chain reader, so the scope check is what the request actually meets.
+        let mut b = credential_bridge(FakeWallet::new(), FakeChain::with("utxo_x".into(), 1000, [7u8; 32]));
+        // The admin dashboard's fixture gate is telegram-scoped; take it back to the default.
+        b.gates.set_use_mode("g1", "website");
+        let req = post("/gate/g1/credential", serde_json::json!({
+            "gate_id": "g1", "challenge_nonce": "aa", "session_commitment": "bb",
+            "substate_id": "utxo_x",
+            "public_key": "00", "public_nonce": "00", "signature": "00",
+        }));
+        let r = b.handle(&req).await;
+        assert_eq!(r.status, 403, "a website-only gate is not a Telegram gate: {}", r.body);
+        assert!(r.body.contains("not a Telegram membership gate"), "{}", r.body);
+        // And with the scope restored, the request passes the scope check and reaches the real
+        // challenge validation (which refuses the invented nonce) — proof the gate was not at fault.
+        b.gates.set_use_mode("g1", "telegram");
+        let r2 = b.handle(&req).await;
+        assert_ne!(r2.status, 403, "a telegram-scoped gate passes the scope check");
     }
 }

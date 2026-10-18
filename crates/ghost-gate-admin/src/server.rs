@@ -739,6 +739,7 @@ fn admin_state(state: &SharedState, authority: &Authority) -> Response {
                 "grants": g.grants,
                 "enabled": g.enabled,
                 "testLane": g.test_lane,
+                "useMode": g.use_mode.as_str(),
                 "componentAddress": g.component_address,
                 "publishedVersion": version.map(|v| v.version),
                 "publishedHash": version.map(|v| v.policy_hash.clone()),
