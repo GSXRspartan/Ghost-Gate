@@ -121,7 +121,7 @@ real access session token minted by consensus.
 
 Run the visitor denial and the tamper check:
 
-- Open the game at `http://127.0.0.1:7799/game` without a proof — the doors stay closed.
+- Open the lab at `http://127.0.0.1:7799/lab` and press **Visitor without proof** — the trace shows the refusal.
 - Tamper with the registry file while the bridge is running — the bridge logs the corruption and
   continues on the last known good binding (fail closed).
 - Re-submit the same proof twice — the second submission is refused as a replay.

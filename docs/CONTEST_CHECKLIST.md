@@ -33,7 +33,7 @@ a checklist so nothing is claimed as done before it is.
 | Contest submission description | **DRAFTED** — `docs/CONTEST_SUBMISSION.md`. Leads with the required sentence; no "balance proof" or "anonymous". |
 | Demo script | **DRAFTED** — `docs/DEMO_SCRIPT.md`, for the Privacy Lab demo (runs offline, no localnet). |
 | Architecture diagram for the submission post | **DONE** — the ASCII diagram in `README.md` is the starting point; `docs/CONTEST_SUBMISSION.md` includes a refined version. |
-| Screenshot or recording | **NOT TAKEN.** Depends on a running demo. |
+| Screenshot or recording | **DONE** — `docs/screenshots/privacy-lab-simple.png` and `privacy-lab-technical.png` (the Lab's two views, committed at `0e92d96`). |
 
 ## Payments and announcements
 
