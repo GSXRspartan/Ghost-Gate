@@ -8,7 +8,7 @@
 //!   versions.
 //! - The **bridge** is a reader: it loads a derived bindings snapshot and re-reads it when the file
 //!   changes. It never takes policy from a browser.
-//! - Integrations (Haunted Vault, Telegram, third parties) consume the same registry through the
+//! - Integrations (the Privacy Lab site, Telegram, third parties) consume the same registry through the
 //!   bridge's access routes. No integration implements its own weaker authorization rules.
 //!
 //! # Fail-closed discipline

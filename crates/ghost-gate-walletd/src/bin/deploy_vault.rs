@@ -1,13 +1,13 @@
 //   Copyright 2026 Ghost Gate contributors
 //   SPDX-License-Identifier: MIT
 
-//! Deploys the Haunted Vault's templates, resource and gates to a running localnet, through
+//! Deploys Ghost Gate's templates, resource and gates to a running localnet, through
 //! Ghost Gate's own MVP-patched walletd.
 //!
 //! One command turns a fresh walletd + localnet into a playable game:
 //!
 //! ```text
-//! deploy_vault                                  # publish templates, mint the resource, deploy 3 gates
+//! deploy_vault                                  # publish templates, mint the resource, deploy the gates
 //! ```
 //!
 //! The steps mirror the `@ghost_gate` cucumber scenario exactly — the flow the localnet evidence
@@ -18,7 +18,7 @@
 //!    into stealth outputs owned by this wallet);
 //! 3. call `faucet.new(symbol, divisibility, supply, mint)` — which creates the stealth resource
 //!    and funds this wallet with it;
-//! 4. deploy three gates over that resource at the game's thresholds;
+//! 4. deploy the demo gates over that resource at their thresholds;
 //! 5. print the bridge configuration line, ready to paste.
 //!
 //! Everything is idempotent-friendly: existing templates are detected and reused, and each step is
@@ -39,12 +39,14 @@ use tari_engine_types::substate::{SubstateDiff, SubstateId};
 use tari_ootle_wallet_sdk::models::Account;
 
 const MAX_FEE_HEADROOM: u64 = 5_000_000;
-/// The gate's relying-site identifier and session binding for the Haunted Vault deployment.
+/// The gate's relying-site identifier and session binding for this deployment.
 const RELYING_SITE: &[u8] = b"vip.example";
 const SESSION: &[u8] = b"haunted-vault";
 const NETWORK: u8 = 0x10; // localnet
 
-/// The three doors, as the game's gate ids and raw thresholds.
+/// The demo gates this deployer creates: an id and its raw threshold. A production
+/// deployment takes these from the administrator's registry instead — the deployer only proves
+/// that the template, the resource and the component exist on chain.
 const DOORS: &[(&str, u64)] = &[("crypt", 100_000), ("vault", 500_000), ("abyss", 2_000_000)];
 
 /// The final gate: native Minotari L1 XTM, one million whole XTM. Configured in *base units*

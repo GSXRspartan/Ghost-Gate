@@ -158,7 +158,6 @@ impl<'a> Route<'a> {
             ("GET", ["js", "ghost", "test.js"]) => Route::Asset("js/ghost/test.js"),
             ("GET", ["vendor", "tari-connector.js"]) => Route::Asset("vendor/tari-connector.js"),
             ("GET", ["vendor", "tari-dapp.d.ts"]) => Route::Asset("vendor/tari-dapp.d.ts"),
-            // The Haunted Vault. Same fixed-name rule as every other asset.
             // The Telegram join flow, served same-origin so the credential flow works.
             ("GET", ["telegram", "join"]) => Route::Asset("telegram/join.html"),
             ("GET", ["telegram", "claim.js"]) => Route::Asset("telegram/claim.js"),
