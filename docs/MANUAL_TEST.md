@@ -119,9 +119,7 @@ variant where the wallet holds a qualifying output **of a different resource**: 
 nothing for the *gate's* resource and refuse the same way. Neither path may reach consensus, and
 neither may name a UTXO in its error.
 
-## The Haunted Vault (game) manual pass
-
-The contest application is the Privacy Lab. Manual verification below is for THAT page.
+## The Privacy Lab manual pass
 
 1. **Open the Lab** — `http://127.0.0.1:7799/lab` (hard-refresh). The gate card must show the
    threshold the administrator published, in the asset's own units, with the raw value beside it.
