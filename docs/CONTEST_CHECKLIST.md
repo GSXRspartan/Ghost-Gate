@@ -22,17 +22,17 @@ a checklist so nothing is claimed as done before it is.
 | Threshold enforced under consensus | **DONE** — `GhostGate::prove_access`, tested. |
 | MVP binding demonstrated | **DONE** — `docs/GATE1_RESULTS.md`. |
 | Adversarial test suite | **DONE** — unit, crypto and template tiers. |
-| Ordinary wallet E2E | **NOT DONE** — `docs/GATE3_RESULTS.md`. This is the gate that decides product viability. |
-| Runnable demo | **NOT STARTED** — blocked behind Gate 3, correctly. |
-| Self-hostable backend | **PARTIAL** — `ghost-gate-verifier` library exists; no HTTP service. |
+| Ordinary wallet E2E | **DONE** — `docs/GATE3_RESULTS.md` says GREEN; two scenarios committed by validators and replay refused. Re-measured 2026-10-07 at `5d92ae9`. |
+| Runnable demo | **PARTIAL** — the Privacy Lab (`http://127.0.0.1:7799/lab`) runs fully offline with no localnet and demonstrates the real decision flow, timing privacy and the refresh beacon. A full consensus demo still needs the localnet running. |
+| Self-hostable backend | **DONE** — `ghost-gate-bridge` is a real HTTP service (port 7799: challenge, prove, access, Privacy Lab; port 7811: admin plane). Registry-backed, fail-closed, tested. |
 
 ## Submission content still to write
 
 | Item | Status |
 |---|---|
-| Contest submission description | **NOT WRITTEN.** Draft should lead with: *"a user proved they controlled sufficient private Tari without revealing the amount"*, and must not say "balance proof" or "anonymous". |
-| Demo script | **NOT WRITTEN.** Depends on a running demo. |
-| Architecture diagram for the submission post | **NOT DRAWN.** The ASCII diagram in `README.md` will do as a starting point. |
+| Contest submission description | **DRAFTED** — `docs/CONTEST_SUBMISSION.md`. Leads with the required sentence; no "balance proof" or "anonymous". |
+| Demo script | **DRAFTED** — `docs/DEMO_SCRIPT.md`, for the Privacy Lab demo (runs offline, no localnet). |
+| Architecture diagram for the submission post | **DONE** — the ASCII diagram in `README.md` is the starting point; `docs/CONTEST_SUBMISSION.md` includes a refined version. |
 | Screenshot or recording | **NOT TAKEN.** Depends on a running demo. |
 
 ## Payments and announcements
