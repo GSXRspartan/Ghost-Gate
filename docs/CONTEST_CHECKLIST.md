@@ -45,8 +45,8 @@ a checklist so nothing is claimed as done before it is.
 
 ## Before submitting, verify
 
-1. `cargo test` passes on a clean checkout.
-2. `docs/GATE3_RESULTS.md` says GREEN, or the submission says plainly that it does not.
-3. No claim in the README or submission exceeds `docs/PRIVACY_MODEL.md`.
-4. No secrets, wallet databases or build outputs are committed (`git status --short` clean).
-5. Every "not done" above is either done or stated as a limitation in the submission itself.
+1. `cargo test` passes on a clean checkout. — **DONE 2026-10-18** at `801d9bc`: full workspace, 340 tests, 0 failures. Warnings are unused-import/variable cosmetics only.
+2. `docs/GATE3_RESULTS.md` says GREEN, or the submission says plainly that it does not. — **DONE**: GREEN verdict at line 149.
+3. No claim in the README or submission exceeds `docs/PRIVACY_MODEL.md`. — **DONE 2026-10-18**: grep for "anonymous"/"untraceable" returns nothing; "balance proof" appears only in engine-feature tables and the submission's explicit NOT-claimed list.
+4. No secrets, wallet databases or build outputs are committed (`git status --short` clean). — **DONE 2026-10-18**: clean.
+5. Every "not done" above is either done or stated as a limitation in the submission itself. — Remaining NOT DONEs (public repo URL, payment address, announcements) are all operator actions; the submission text states no false claims about them.
