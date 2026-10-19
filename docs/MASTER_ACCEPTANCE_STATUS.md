@@ -99,7 +99,8 @@ prevents; fixing them is the operator's restart decision, not a code change.
 
 | Area | Status |
 |---|---|
-| Matrix-style code rain, both sides of Privacy Lab | **DONE** — `web/lab/lab.js` `startMatrixEdges()` + `lab.css` `#matrix-edges`: deterministic falling glyph columns at both page edges, CSS-transform animated, `prefers-reduced-motion` respected. |
+| Matrix-style code rain, both sides of Privacy Lab | **DONE + VERIFIED on the LIVE bridge (2026-10-19)** — `web/lab/lab.js` `startMatrixEdges()` + `lab.css` `#matrix-edges`: deterministic falling glyph columns at both page edges, CSS-transform animated, `prefers-reduced-motion` respected. Served through `http://127.0.0.1:7799/lab` (bridge up, `asset_dir` resolution confirmed; the served JS/CSS carry the implementation). |
+| Demo bridge service | **RUNNING 2026-10-19** — `scripts/start_vault.sh` launched the existing binary on 127.0.0.1:7799, `/health` → gates `abyss,crypt,vault`, `/lab/gates` serving the evidence GHOST config (preview mode: `registry_backed: false`, no walletd). Re-run safety + binary reuse both exercised live. |
 | Privacy Lab polish (dashboard self-explaining, status pills, protocol inspector) | DONE in prior sessions (commit `f75f56b`, screenshots captured). |
 | Workspace regression suite | **RE-RUN 2026-10-19 after this session's edits: 338 passed, 0 failed, 0 ignored** (full `cargo test --workspace`; the recorded baseline at `813ed05` said 340 — a two-test count difference with zero failures either way). Doc-test tiers contribute 0 examples. |
 | Telegram identity binding / Cloudflare staging / Universe+Sapient browser paths / L1 XTM / Android+iOS | unchanged from prior status; XTM remains draft (no working implementation), wallet-provider detection is not a proof. |
@@ -114,3 +115,5 @@ prevents; fixing them is the operator's restart decision, not a code change.
    advances, fund the GhostGate wallet (or point the bridge at Swap Alice's walletd), deploy the
    vault, then the genuine proof is the first acceptance run.
 5. Independent work that needs no chain: docs, browser harness, weak-wallet scenarios.
+6. When the operator decides: lift the pause, deploy the vault (`deploy_vault` — now authenticated
+   and compiling), then the genuine proof is the first acceptance run.
