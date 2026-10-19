@@ -26,7 +26,7 @@ GG_BINDINGS_PATH='~/ghost-gate-admin' \
 GG_BRIDGE_NETWORK='localnet' \
 GG_BRIDGE_ORIGINS='http://127.0.0.1:7799' \
 GG_BRIDGE_BIND='127.0.0.1:7799' \
-GG_WALLETD_ENDPOINT='http://127.0.0.1:5100/walletd' \
+GG_WALLETD_ENDPOINT='http://127.0.0.1:5100/json_rpc' \
 GG_MAX_FEE=100000 GG_MAX_EPOCH=100 \
 cargo run -p ghost-gate-walletd --bin ghost-gate-bridge
 
@@ -38,7 +38,7 @@ The startup banner is the first thing to check. It must show a wallet line, not 
 connected" note:
 
 ```text
-  wallet daemon: http://127.0.0.1:5100/walletd (network byte 16)
+  wallet daemon: http://127.0.0.1:5100/json_rpc (network byte 16)
   wallet status: reachable=true default_account=true network=16 (localnet)
 ```
 

@@ -70,7 +70,7 @@ fn main() {
 }
 
 async fn run() -> i32 {
-    let endpoint = env_or("GG_WALLETD_ENDPOINT", "http://127.0.0.1:18130/walletd");
+    let endpoint = env_or("GG_WALLETD_ENDPOINT", "http://127.0.0.1:18130/json_rpc");
     let symbol = env_or("GG_VAULT_SYMBOL", "GHOST");
     let divisibility: u8 = env_or("GG_VAULT_DIVISIBILITY", "6").parse().unwrap_or(6);
     let supply: u64 = env_or("GG_VAULT_SUPPLY", "10_000_000".replace('_', "").as_str()).parse().unwrap_or(10_000_000);

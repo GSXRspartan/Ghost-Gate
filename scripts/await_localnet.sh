@@ -67,7 +67,7 @@ while true; do
     say "     (Flags verified against the built binary's --help; --authentication none is for the"
     say "      local fixture run only — use an API key once the bridge authenticates.)"
     say "  3. Point the bridge at it and restart:"
-    say "       GG_WALLETD_ENDPOINT='http://127.0.0.1:18130/walletd' scripts/start_vault.sh"
+    say "       GG_WALLETD_ENDPOINT='http://127.0.0.1:18130/json_rpc' scripts/start_vault.sh"
     say "  4. Deploy the game's gates through the new walletd (templates.publish_template +"
     say "     faucet.new + gate.new x3) — a script will be provided; see docs/CONTEST_README.md."
     say "  5. Fund the wallet (create_free_test_coins or the faucet template), then play."

@@ -141,7 +141,7 @@ The pinned toolchain/protoc/native-deps exports are inside the scripts — no ma
 
 1. (Now) Open <http://127.0.0.1:7799/lab> and run the offline simulation (§8).1).
 2. (When the monitor log announces the localnet) Start our walletd (§5), then:
-   `GG_WALLETD_ENDPOINT=http://127.0.0.1:18130/walletd GG_WALLETD_TOKEN=<key> deploy_vault` (it prints the bridge line),
+   `GG_WALLETD_ENDPOINT=http://127.0.0.1:18130/json_rpc GG_WALLETD_TOKEN=<key> deploy_vault` (it prints the bridge line),
    restart the bridge with that line + `GG_INDEXER_ENDPOINT=<their indexer>`,
    then prove a real threshold in the Privacy Lab and attempt the full manual flow (`docs/MANUAL_TEST.md`).
 3. (Any time) Install Sapient → the credential-mode cases; create the Telegram bot → `--with-telegram`.
