@@ -121,42 +121,31 @@ neither may name a UTXO in its error.
 
 ## The Privacy Lab manual pass
 
-1. **Open the Lab** — `http://127.0.0.1:7799/lab` (hard-refresh). The gate card must show the
-   threshold the administrator published, in the asset's own units, with the raw value beside it.
-2. **Choose a wallet** — the note must say whether it is usable, and why not if it is not.
-   three chapters in order:
-   - **Chapter I (Crypt of Lost Transactions):** hear all three witnesses, examine the stones, accuse
-     an innocent stone first (the game must explain WHY it checks out), then accuse the right one —
-     the dossier reward must reveal the 𝕶 mark.
-   - **Chapter II (Vault of Forked Epochs):** read the rules on screen, rotate the shelves, note that
-     a wrong alignment names its own violation, then rebuild heights 5→6→7 with no 𝕶-marked block.
-     The "Consult the ledger" hints reveal clues progressively, never the answer.
-   - **Chapter III (The Phantom Validator):** four stages. Pale flashes are lies (stage 2+), answer
-     in REVERSE (stage 3+). A mistake retries the SAME stage and says which rule was broken. One
-     click must count once — double-click during "Watch" should do nothing. The finale requires
-     Fragments I and II; without them the Phantom refuses the final audit.
-   - The ending plays as a staged sequence (not another card) and returns to the Sanctum.
-3. **Navigation** — repeatedly: Crypt → Sanctum → Vault → Sanctum → Abyss → Sanctum → Leave. Works
-   mid-puzzle, after failure, after success, after rewards.
-4. **Persistence** — fragments/whispers survive a reload (cosmetic); doors are sealed again after a
-   reload (an unlock is a session fact, never a stored one).
-5. **No-wallet path** — "Connect a wallet" with no walletd must land in the Sanctum with an honest
-   status line, and pressing a door must leave no uncloseable overlay.
-6. **No proof requests during preview** — DevTools Network: nothing hits `/gate/*/challenge`,
-   `/gate/*/prove` or `/gate/*/credential` during preview or any puzzle.
-7. **Real proof, consensus path** — with a standing localnet + walletd behind the bridge: pick the
-   Local walletd adapter, break a chapter's seal, approve in walletd, watch the door open. The
-   proof overlay's step list must match the actual flow; the failure case (wallet holds too
-   little) must land as a clean refusal with the gate's own reason.
-8. **Mobile** — 390×844: no horizontal overflow on the title or the Sanctum; all buttons reachable.
-9. **Foreign-origin join links** — a join link edited to point `claim=` at a non-loopback host
-   must be refused by the join page before any wallet is involved.
-10. **Telegram** — with the bot running: `/join` → open the link → approve twice in the wallet →
-    the bot grants a single-seat invite; wait out `GG_TG_ACCESS_TTL` (test with a short value) and
-    confirm revocation + the re-verification message; confirm a replayed join link refuses.
-
-Automated coverage of 1–6 and 8 lives in `scripts/browser_game_check.sh` (headless Edge via CDP;
-74 checks, three consecutive green runs at the time of writing).
+1. **Open the Lab** — `http://127.0.0.1:7799/lab` (hard-refresh: Ctrl+Shift+R).
+2. **Status strip (above the fold)** — six honest pills. BRIDGE must read `healthy`; NETWORK shows
+   the cohort (wallet-reported, else the registry byte); WALLETD reads `not reachable` when no
+   daemon is up — say it plainly, never "connecting"; INDEXER reads `not configured` or
+   `configured` (configuration, NOT a sync claim); MODES lists what can run with `XTM blocked`;
+   GATES counts the published gates.
+3. **Proof target card** — the gate picker lists gates sorted by threshold ascending. The card's
+   dominant number is `≥ <human> <symbol>`; raw units and divisibility sit beside it; the resource
+   truncates with a hover title and a COPY button that really copies; mode and session state are
+   badges. For an activatable gate the availability badge must be invisible.
+4. **Choose how you will prove** — with no walletd the note must be a short, warn-colored pill:
+   "Wallet daemon not reachable. Start walletd or choose another supported proof method."
+5. **Run the offline simulation** — the outcome says SIMULATED GRANT and grants nothing; switching
+   to TECHNICAL shows the inspector with the simulation banner and 11 events, each with a truthful
+   source label. PAUSE/COPY/EXPORT work; the filter narrows rows; PAUSE stops auto-scroll.
+6. **Inspector empty state** — before any attempt, the terminal shows the prompt plus the four
+   event categories (bridge/wallet/consensus/verifier) ghosted as LABELS — never fabricated logs.
+7. **Telegram section** — with no Telegram-scoped gate, the card is dimmed with a "NOT
+   CONFIGURED" chip and the button is disabled and relabelled. Scoping a gate to Telegram in the
+   dashboard and refreshing must re-enable it with the gate's name in the note.
+8. **Negative path** — press Prove access with no walletd: the bridge refuses; the outcome is a
+   clean denial with the bridge's own reason. Nothing may pretend a proof happened.
+9. **Responsive** — 390×844: no horizontal overflow, no sideways scroll, the two columns stack
+   with the proof target first. prefers-reduced-motion must suppress the edge animation entirely
+   (DevTools rendering emulation, then check `#matrix-edges` is empty or static).
 
 ## The question this test is really asking
 
