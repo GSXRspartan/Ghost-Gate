@@ -6,7 +6,9 @@
 # built/running. It never touches the pinned cohort tree and never runs `cargo clean`.
 #
 # Modes:
-#   ./scripts/start_vault.sh                # build + start bridge + print the game URL
+#   ./scripts/start_vault.sh                # reuse the built bridge + start it + print the game URL
+#   ./scripts/start_vault.sh --build        # force a rebuild, then start
+#   GG_FORCE_BUILD=1 ./scripts/start_vault.sh   # same, via env
 #   GG_TG_BOT_TOKEN=... GG_TG_CHAT_ID=... ./scripts/start_vault.sh --with-telegram
 #
 # Real proofs need a standing localnet (base node + validators + walletd) with three real gates
@@ -21,7 +23,17 @@ cd "$REPO_ROOT"
 
 # The pinned toolchain and protoc, same as every other script here.
 export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-1.97.1}"
-export PROTOC="${PROTOC:-/home/pdark/ootle-build/protoc/bin/protoc}"
+# The v0.42.0 build scripts need the ootel-cohort protoc with matching well-known types; a newer
+# system protoc in PATH breaks the build with "timestamp.proto not found" (fixed 2026-10-19 by
+# pinning this path). Fall back to PATH/usr only if the cohort binary is genuinely absent.
+if [ -z "${PROTOC:-}" ]; then
+  if [ -x /home/pdark/ootle-build/protoc/bin/protoc ]; then
+    PROTOC=/home/pdark/ootle-build/protoc/bin/protoc
+  else
+    PROTOC="$(command -v protoc || echo /usr/bin/protoc)"
+  fi
+fi
+export PROTOC
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-3}"
 
 # Native build deps the image lacks (idempotent; no sudo).
@@ -35,22 +47,33 @@ BRIDGE_BIN="$BIN_DIR/ghost-gate-bridge"
 TELEGRAM_BIN="$BIN_DIR/ghost-gate-telegram"
 BUILD_FLAG=""
 
-echo "== building (only what changed; the target dir is warm) =="
+echo "== bridge binary =="
+# A normal launch reuses the existing binary. Rebuilding is explicit: --build/GG_FORCE_BUILD forces
+# it, and it happens implicitly only when no binary exists or a source is newer than it.
 # A FAILED BUILD MUST NOT LAUNCH A STALE BINARY. Previously a compile error was swallowed here and
 # the script went on to announce "The Haunted Vault is up" while serving whatever binary happened
 # to exist from the last successful build — a silently outdated deployment reporting success.
 # Now: a build failure stops the launch unless --preview-only is given explicitly, and what runs
 # is always identified by its path and build time.
-if ! cargo build -p ghost-gate-walletd --bin ghost-gate-bridge; then
-  echo >&2 "==============================================================="
-  echo >&2 "BUILD FAILED — refusing to launch a possibly stale binary."
-  echo >&2 "Run with --preview-only to start the EXISTING binary anyway"
-  echo >&2 "(identified below by build time), or fix the build first."
-  echo >&2 "==============================================================="
-  if [ "${1:-}" != "--preview-only" ]; then
-    exit 1
+sources_newer() {
+  [ -e "$BRIDGE_BIN" ] || return 0
+  find crates -type f \( -name '*.rs' -o -name '*.html' -o -name '*.css' -o -name '*.js' -o -name '*.toml' \) -newer "$BRIDGE_BIN" -print -quit 2>/dev/null | grep -q .
+}
+if [ "${1:-}" = "--build" ] || [ -n "${GG_FORCE_BUILD:-}" ] || [ ! -x "$BRIDGE_BIN" ] || sources_newer; then
+  echo "  building (only what changed; the target dir is warm)"
+  if ! cargo build -p ghost-gate-walletd --bin ghost-gate-bridge; then
+    echo >&2 "==============================================================="
+    echo >&2 "BUILD FAILED — refusing to launch a possibly stale binary."
+    echo >&2 "Run with --preview-only to start the EXISTING binary anyway"
+    echo >&2 "(identified below by build time), or fix the build first."
+    echo >&2 "==============================================================="
+    if [ "${1:-}" != "--preview-only" ]; then
+      exit 1
+    fi
+    echo "  --preview-only: launching the existing binary at its own risk"
   fi
-  echo "  --preview-only: launching the existing binary at its own risk"
+else
+  echo "  reused (no source is newer; --build forces a rebuild)"
 fi
 BRIDGE_BINARY="$(ls -l "$BRIDGE_BIN" 2>/dev/null | awk '{print $6, $7, $8}')"
 echo "  bridge binary: $BRIDGE_BIN"

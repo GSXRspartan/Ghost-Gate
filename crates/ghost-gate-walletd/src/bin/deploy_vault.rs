@@ -25,10 +25,12 @@
 //! a separate transaction, so a failed step loses nothing but its own fee.
 
 use tari_ootle_transaction::{Epoch, TransactionBuilder, args};
+use tari_ootle_walletd_client::permissions::Permission;
 use tari_ootle_walletd_client::WalletDaemonClient;
 use tari_ootle_walletd_client::types::{
-    AccountsCreateStealthTransferStatementRequest, InputSelection, PublishTemplateRequest,
-    TransactionSubmitRequest, TransactionWaitResultRequest, TransferStatementRequest,
+    AccountsCreateStealthTransferStatementRequest, AuthCredentials, AuthLoginRequest,
+    InputSelection, PublishTemplateRequest, TransactionSubmitRequest, TransactionWaitResultRequest,
+    TransferStatementRequest,
 };
 use tari_ootle_wallet_sdk::apis::stealth_transfer::TransferOutput;
 use tari_ootle_wallet_sdk::crypto::pay_to::PayTo;
@@ -76,7 +78,11 @@ async fn run() -> i32 {
     let supply: u64 = env_or("GG_VAULT_SUPPLY", "10_000_000".replace('_', "").as_str()).parse().unwrap_or(10_000_000);
 
     // The deploy tool authenticates like the bridge: an API key when the wallet requires one.
-    let client = match WalletDaemonClient::connect(
+    // Without an operator-supplied token it bootstraps one from the daemon itself — the walletd
+    // answers `auth.request` (credentials `None`) with a JWT, which every account endpoint
+    // demands even when the daemon runs in `none` auth mode.
+    let supplied_token = std::env::var("GG_WALLETD_TOKEN").ok().filter(|t| !t.trim().is_empty()).is_some();
+    let mut client = match WalletDaemonClient::connect(
         &endpoint,
         std::env::var("GG_WALLETD_TOKEN").ok().filter(|t| !t.trim().is_empty()).map(zeroize::Zeroizing::new),
     ) {
@@ -86,6 +92,26 @@ async fn run() -> i32 {
             return 1;
         },
     };
+    if !supplied_token {
+        match client
+            .auth_request(&AuthLoginRequest {
+                permissions: vec![Permission::Admin],
+                credentials: AuthCredentials::None,
+            })
+            .await
+        {
+            Ok(resp) => {
+                client.set_auth_token(resp.token);
+            },
+            Err(e) => {
+                eprintln!(
+                    "deploy_vault: cannot authenticate against {endpoint} ({e}); \
+                     set GG_WALLETD_TOKEN to the wallet API key and try again"
+                );
+                return 1;
+            },
+        }
+    }
 
     let mut ctx = match bootstrap_account(client).await {
         Ok(c) => c,
