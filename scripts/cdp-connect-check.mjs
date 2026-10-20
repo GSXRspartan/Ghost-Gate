@@ -1,0 +1,196 @@
+/**
+ * CDP harness for the PRIVACY LAB wallet-connection UI (scripts/lab_connect_check.sh).
+ *
+ * Simulated-provider UI wiring test — NOT a physical wallet test. It injects a mock window.tari
+ * BEFORE the page loads (so startMatrixEdges/probe see a real-looking extension), drives the
+ * section-02 Connect-wallet ceremony, and asserts what a visitor would see. The physical Sapient
+ * prompt is the operator's milestone and stays theirs to confirm.
+ *
+ * Proven:
+ *   1. the wallet selector offers the Sapient option
+ *   2. the Connect wallet button is visible and enabled
+ *   3. clicking it with a mock extension that reports Esmeralda shows the connected state,
+ *      the real address, the network-mismatch verdict (gate 0x10 vs wallet 0x26), the
+ *      capability list, and the read-only ownership signature result
+ *   4. rejection (4001) surfaces as "you declined", not an error
+ *   5. no console errors
+ *
+ * Usage: node cdp-connect-check.mjs <cdp-port> <lab-url>
+ */
+
+const PORT = process.argv[2] || process.env.CDP_PORT;
+const LAB = process.argv[3] || "http://127.0.0.1:7799/lab";
+if (!PORT) throw new Error("usage: node cdp-connect-check.mjs <cdp-port> [lab-url]");
+
+let ws, nextId = 1;
+const pending = new Map();
+const consoleErrors = [];
+const passed = [], failed = [];
+
+function check(label, ok, detail = "") {
+  (ok ? passed : failed).push(label);
+  console.log(`  ${ok ? "ok  " : "FAIL"} ${label.padEnd(58)} ${detail}`);
+}
+
+function send(method, params = {}) {
+  const id = nextId++;
+  return new Promise((resolve, reject) => {
+    pending.set(id, { resolve, reject });
+    ws.send(JSON.stringify({ id, method, params }));
+  });
+}
+
+async function evaluate(expression, awaitPromise = false) {
+  const r = await send("Runtime.evaluate", {
+    expression, returnByValue: true, awaitPromise, userGesture: true,
+  });
+  if (r.exceptionDetails) {
+    throw new Error(`page threw: ${JSON.stringify(r.exceptionDetails).slice(0, 300)}`);
+  }
+  return r.result?.value;
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** A mock window.tari faithful to the pinned tari-dapp.d.ts contract. Reports Esmeralda so the
+ *  network-mismatch path (gate 0x10) is exercised for real. */
+const MOCK_TARI = `
+  window.tari = {
+    isTariWallet: true,
+    request(args) {
+      const m = args.method;
+      if (m === "tari_getCapabilities") {
+        return Promise.resolve({
+          privateSpend: true, minimumValuePromise: true, ownershipProof: true,
+          walletOwnershipProof: true, transactionResultLookup: true, transactionRequests: true,
+        });
+      }
+      if (m === "tari_requestAccounts") {
+        return Promise.resolve(["otl_esm_1rghzs3zkfrvajj39r7pm26q7uwne6dxrm2ztf29aq8y4zezpppjs95znmg2rgwr6rjgxq2p7xzrpy3h5nc8q22gnkudn9axgsruxjuqae5f2t"]);
+      }
+      if (m === "tari_getNetwork") return Promise.resolve("esmeralda");
+      if (m === "tari_signWalletOwnershipChallenge") {
+        return Promise.resolve({
+          walletAddress: "otl_esm_1rghzs3",
+          publicNonce: "ab".repeat(32),
+          signature: "cd".repeat(64),
+        });
+      }
+      return Promise.reject(Object.assign(new Error("mock: unsupported " + m), { code: 4200 }));
+    },
+  };
+  window.dispatchEvent(new Event("tari#initialized"));
+`;
+
+const MOCK_REJECTING = `
+  window.tari = {
+    isTariWallet: true,
+    request(args) {
+      if (args.method === "tari_getCapabilities") return Promise.resolve({});
+      return Promise.reject(Object.assign(new Error("user declined"), { code: 4001 }));
+    },
+  };
+  window.dispatchEvent(new Event("tari#initialized"));
+`;
+
+async function connect() {
+  const targets = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
+  const page = targets.find((t) => t.type === "page");
+  if (!page) throw new Error("no page target to drive");
+  ws = new WebSocket(page.webSocketDebuggerUrl);
+  await new Promise((resolve, reject) => {
+    ws.addEventListener("open", resolve, { once: true });
+    ws.addEventListener("error", reject, { once: true });
+  });
+  ws.addEventListener("message", (event) => {
+    const msg = JSON.parse(event.data);
+    if (msg.id && pending.has(msg.id)) {
+      const { resolve, reject } = pending.get(msg.id);
+      pending.delete(msg.id);
+      msg.error ? reject(new Error(JSON.stringify(msg.error))) : resolve(msg.result || {});
+      return;
+    }
+    if (msg.method === "Runtime.consoleAPICalled" && msg.params.type === "error") {
+      consoleErrors.push(msg.params.args.map((a) => a.value ?? a.description ?? "").join(" "));
+    }
+    if (msg.method === "Runtime.exceptionThrown") {
+      consoleErrors.push(msg.params.exceptionDetails?.exception?.description || "exception");
+    }
+  });
+  await send("Page.enable");
+  await send("Runtime.enable");
+}
+
+async function reloadWithMock(mock) {
+  // Inject the mock before any page script runs, then navigate.
+  await send("Page.addScriptToEvaluateOnNewDocument", { source: mock });
+  await send("Page.navigate", { url: LAB });
+  await sleep(2500);
+}
+
+async function main() {
+  await connect();
+
+  console.log("\n== 1. the selector offers Sapient and the connect button exists ==");
+  await reloadWithMock(MOCK_TARI);
+  const options = await evaluate(`[...document.querySelectorAll("#wallet-select option")].map(o => o.textContent)`);
+  check("wallet selector lists Sapient", options.some((t) => /Sapient/i.test(t)),
+    options.join(" | "));
+  const btn = await evaluate(`(() => { const b = document.getElementById("connect-wallet");
+    return b ? { hidden: b.hidden, disabled: b.disabled, label: b.textContent } : null; })()`);
+  check("Connect wallet button present and enabled", !!btn && !btn.hidden && !btn.disabled,
+    btn ? `${btn.label} (hidden=${btn.hidden} disabled=${btn.disabled})` : "absent");
+
+  console.log("\n== 2. select Sapient and press Connect ==");
+  await evaluate(`(() => { const s = document.getElementById("wallet-select");
+    s.value = [...s.options].find(o => /Sapient/i.test(o.textContent)).value;
+    s.dispatchEvent(new Event("change")); return s.value; })()`);
+  await sleep(300);
+  await evaluate(`document.getElementById("connect-wallet").click()`);
+  await sleep(1200);
+  const d = await evaluate(`(() => {
+    const rows = {};
+    for (const id of ["wd-status", "wd-address", "wd-network", "wd-caps", "wd-ownership"]) {
+      rows[id] = document.getElementById(id) ? document.getElementById(id).textContent : null;
+    }
+    return { hidden: document.getElementById("wallet-detail").hidden, rows };
+  })()`);
+  check("detail box opened", d.hidden === false);
+  check("status reports connected", /connected/i.test(d.rows["wd-status"] || ""), d.rows["wd-status"]);
+  check("real Esmeralda address shown (truncated, not hidden)",
+    d.rows["wd-address"].includes("otl_esm") && d.rows["wd-address"].includes("…"),
+    d.rows["wd-address"]);
+  check("network mismatch surfaced honestly",
+    /mismatch/i.test(d.rows["wd-network"] || "") && /blocked by the gate/i.test(d.rows["wd-network"] || ""),
+    d.rows["wd-network"]);
+  check("capabilities listed",
+    (d.rows["wd-caps"] || "").includes("privateSpend") && (d.rows["wd-caps"] || "").includes("ownershipProof"),
+    d.rows["wd-caps"]);
+  check("read-only ownership signature shown as possession-only",
+    /possession only/i.test(d.rows["wd-ownership"] || ""), d.rows["wd-ownership"]);
+
+  console.log("\n== 3. rejection (4001) is a decline, not an error ==") ;
+  await reloadWithMock(MOCK_REJECTING);
+  await evaluate(`(() => { const s = document.getElementById("wallet-select");
+    s.value = [...s.options].find(o => /Sapient/i.test(o.textContent)).value;
+    s.dispatchEvent(new Event("change")); return s.value; })()`);
+  await sleep(300);
+  await evaluate(`document.getElementById("connect-wallet").click()`);
+  await sleep(900);
+  const rej = await evaluate(`document.getElementById("wd-status").textContent`);
+  check("declined state is truthful", /declined/i.test(rej || ""), rej);
+
+  console.log("\n== console health ==");
+  check("no console errors", consoleErrors.length === 0, consoleErrors.slice(0, 3).join(" | "));
+
+  console.log(`\n${passed.length} passed, ${failed.length} failed`);
+  if (failed.length) { console.log(failed.map((f) => `  FAIL ${f}`).join("\n")); process.exitCode = 1; }
+  ws.close();
+  process.exit(process.exitCode || 0);
+}
+
+main().catch((e) => {
+  console.error("harness error:", e.message);
+  if (consoleErrors.length) console.error("console errors:", consoleErrors.join(" | "));
+  process.exit(2);
+});

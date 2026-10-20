@@ -138,6 +138,51 @@ export function networkMatches(reportedName, nameToByte, expectedByte) {
 }
 
 /**
+ * The Ootle cohort table, transcribed from the pinned v0.42.0 source (`ootle_network::Network`).
+ * The bridge's Rust side holds the same table (`ghost_gate_core::network`); this copy exists so the
+ * browser can render a network verdict without a server round trip. A name missing from this table
+ * maps to no byte, and a no-byte wallet can never satisfy a gate — fail closed.
+ *
+ * @type {Record<string, number>}
+ */
+export const NETWORK_NAME_TO_BYTE = {
+  mainnet: 0x00,
+  stagenet: 0x01,
+  nextnet: 0x02,
+  localnet: 0x10,
+  igor: 0x24,
+  esmeralda: 0x26,
+};
+
+/**
+ * The verdict a visitor reads after connecting: which network the wallet reports, which byte that
+ * name resolves to, and whether it matches the gate's byte.
+ *
+ * @param {string|null} reportedName the name from tari_getNetwork (null = wallet did not say)
+ * @param {number} expectedByte the gate's bound Ootle byte
+ * @returns {{ ok: boolean, reported: string|null, byte: number|null, expectedByte: number, verdict: string }}
+ */
+export function networkVerdict(reportedName, expectedByte) {
+  const reported = reportedName === null || reportedName === undefined ? null : String(reportedName).trim();
+  const { ok, byte } = networkMatches(reported, NETWORK_NAME_TO_BYTE, expectedByte);
+  if (!reported) {
+    return { ok: false, reported, byte, expectedByte,
+      verdict: "The wallet did not report a network, so the gate cannot be attempted on it." };
+  }
+  const expectedName = Object.entries(NETWORK_NAME_TO_BYTE).find(([, b]) => b === expectedByte)?.[0] ?? `byte ${expectedByte}`;
+  if (ok) {
+    return { ok: true, reported, byte, expectedByte,
+      verdict: `Wallet is on ${reported} — the gate's own network.` };
+  }
+  if (byte === null) {
+    return { ok: false, reported, byte, expectedByte,
+      verdict: `Wallet reports the network "${reported}", which is not a cohort this gate can bind to. Proofs on it would not be verifiable.` };
+  }
+  return { ok: false, reported, byte, expectedByte,
+    verdict: `Network mismatch: the wallet is on ${reported} (byte ${byte}) but this gate is bound to ${expectedName} (byte ${expectedByte}). Connecting for diagnostics is fine; proving here is blocked by the gate, not by your wallet.` };
+}
+
+/**
  * Amounts are strings or bigints, never JS numbers (they exceed MAX_SAFE_INTEGER). Returns a BigInt
  * or null; null means "not a usable amount", which the caller must treat as an error rather than 0.
  *

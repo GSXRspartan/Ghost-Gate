@@ -15,7 +15,7 @@
  */
 
 import { walletdProvider, sapientProvider, universeProvider, windowTariProvider } from "/js/ghost/provider.js";
-import { supportedProofModes, walletUsability, parseAmount, formatAmount } from "/js/ghost/capabilities.js";
+import { supportedProofModes, walletUsability, parseAmount, formatAmount, networkVerdict } from "/js/ghost/capabilities.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -202,10 +202,10 @@ async function renderWallets() {
     const options = [];
     // The consensus path needs a wallet daemon; the bridge knows whether one is there.
     if (gate.proofMode === "consensus") {
-        options.push({ id: "walletd", label: "Wallet daemon · consensus" });
+        options.push({ id: "walletd", label: "Wallet daemon · consensus (advanced)" });
     }
-    options.push({ id: "sapient", label: "Tari desktop wallet · credential" });
-    options.push({ id: "universe", label: "Universe · in-app wallet" });
+    options.push({ id: "sapient", label: "Sapient — Ootle L2 · credential" });
+    options.push({ id: "universe", label: "Tari Universe — in-app · credential" });
 
     for (const o of options) {
         const opt = document.createElement("option");
@@ -253,6 +253,146 @@ async function selectMode(id) {
         note.classList.add("bad");
         note.textContent = `This wallet cannot prove this gate: ${usable.reason || "unsupported"}`;
     }
+    renderConnectIntro();
+}
+
+// ---------------------------------------------------- connection-only ceremony
+// "Connect wallet" reads identity facts and nothing more: an address, the wallet's own network
+// name, the capability flags, and — only when the wallet offers it — a read-only signature over
+// a locally-generated nonce that proves the person holds the wallet. It deliberately does not
+// mint a bridge challenge, does not build a proof, and never authorizes a spend: per the
+// integration contract, a connection can never grant access by itself.
+async function connectWallet() {
+    const btn = $("connect-wallet");
+    const detail = $("wallet-detail");
+    const setRow = (id, cls, text) => {
+        const row = $(id).closest(".wd-row");
+        row.classList.remove("ok", "warn", "bad");
+        if (cls) row.classList.add(cls);
+        $(id).textContent = text;
+    };
+    detail.hidden = false;
+    $("wd-caps-row").hidden = true;
+    $("wd-ownership-row").hidden = true;
+    setRow("wd-status", null, "Connecting…");
+    $("wd-address").textContent = "—";
+    $("wd-network").textContent = "—";
+    btn.disabled = true;
+    const label = btn.textContent;
+    btn.textContent = "Connecting…";
+    try {
+        if (state.mode === "walletd") {
+            const res = await api("/wallet/status");
+            const b = res.body || {};
+            if (!res.ok || b.reachable !== true) {
+                setRow("wd-status", "bad", b.error || "The wallet daemon is not reachable.");
+            } else {
+                setRow("wd-status", "ok", "Wallet daemon reachable — the bridge's trusted-local proof path.");
+            }
+            $("wd-network").textContent = b.network_name
+                ? `${b.network_name} (byte ${b.network})` : "not reported";
+            $("wd-address").textContent = b.has_default_account
+                ? "default account present (held by the daemon, not this browser)" : "no default account";
+            return;
+        }
+
+        // window.tari may not exist at parse time: the extension injects at document_start, the
+        // connector on script load. Wait briefly (or for tari#initialized) so a slow-injecting
+        // wallet is not mistaken for "no wallet installed".
+        if (!window.tari) {
+            await new Promise((resolve) => {
+                let settled = false;
+                const done = () => { if (!settled) { settled = true; window.removeEventListener("tari#initialized", done); resolve(); } };
+                window.addEventListener("tari#initialized", done);
+                setTimeout(done, 1500);
+            });
+        }
+        const provider = state.mode === "universe" ? universeProvider() : sapientProvider();
+        const probe = await provider.probe();
+        if (!probe.available) {
+            setRow("wd-status", "bad", probe.unavailableReason || "No Tari wallet answered on this page.");
+            return;
+        }
+        const caps = probe.capabilities || {};
+
+        // 1) Accounts — the wallet's own approval prompt. Read-only: it shares the public
+        //    address and grants no spend authority.
+        let accounts;
+        try {
+            accounts = await provider.request("tari_requestAccounts");
+        } catch (e) {
+            if (e && e.code === 4001) {
+                setRow("wd-status", "warn", "You declined the connection request. Nothing was shared.");
+            } else {
+                setRow("wd-status", "bad", `The wallet refused the account request: ${e && e.message ? e.message : e}`);
+            }
+            return;
+        }
+        const address = Array.isArray(accounts) && accounts.length ? accounts[0] : null;
+        if (!address) {
+            setRow("wd-status", "bad", "The wallet returned no account address, so there is nothing to connect to.");
+            return;
+        }
+        $("wd-address").textContent = `${address.slice(0, 24)}…${address.slice(-10)} (${address.length} chars)`;
+        setRow("wd-status", "ok", `${provider.label} connected.`);
+
+        // 2) Network — compare the wallet's own report against the gate's Ootle byte.
+        let netName = null;
+        try { netName = await provider.request("tari_getNetwork"); } catch { /* optional */ }
+        const gate = state.gate;
+        if (gate) {
+            const v = networkVerdict(netName, gate.network);
+            setRow("wd-network", v.ok ? "ok" : "warn", v.verdict);
+        } else {
+            $("wd-network").textContent = netName ? `${netName} (no gate selected, so no verdict)` : "the wallet did not report a network";
+        }
+
+        // 3) Capabilities — the flags that decide which proof modes this account can offer.
+        const capNames = Object.entries(caps).filter(([, v]) => v === true).map(([k]) => k);
+        $("wd-caps-row").hidden = false;
+        $("wd-caps").textContent = capNames.length
+            ? capNames.join(", ")
+            : "the wallet reported no capabilities this gate can use";
+        if (!probe.modes.length) {
+            setRow("wd-status", "warn", `Connected, but this account supports none of Ghost Gate's proof modes.`);
+        }
+
+        // 4) Wallet-ownership signature — only when the wallet offers it, and only over a nonce
+        //    this page generated. It proves the person holds the wallet, not that the wallet
+        //    holds any asset, and it is never an eligibility proof.
+        if (caps.walletOwnershipProof === true) {
+            const nonce = Array.from(crypto.getRandomValues(new Uint8Array(16)),
+                (b) => b.toString(16).padStart(2, "0")).join("");
+            try {
+                const proof = await provider.request("tari_signWalletOwnershipChallenge", { challenge: nonce });
+                $("wd-ownership-row").hidden = false;
+                $("wd-ownership").textContent = proof && proof.signature
+                    ? `signed over nonce ${nonce.slice(0, 12)}… (signature ${proof.signature.slice(0, 14)}…) — proof of wallet possession only`
+                    : "the wallet returned no signature";
+            } catch (e) {
+                $("wd-ownership-row").hidden = false;
+                $("wd-ownership").textContent = e && e.code === 4001
+                    ? "you declined the signature request"
+                    : `signature step refused: ${e && e.message ? e.message : e}`;
+            }
+        } else {
+            $("wd-ownership-row").hidden = false;
+            $("wd-ownership").textContent = "this wallet does not offer a wallet-ownership signature";
+        }
+    } catch (e) {
+        setRow("wd-status", "bad", `Connection failed: ${e && e.message ? e.message : e}`);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = label;
+    }
+}
+
+/** One line under the connect button, refreshed whenever the mode changes. */
+function renderConnectIntro() {
+    const el = $("connect-wallet");
+    if (!el) return;
+    el.hidden = !state.gate;
+    el.textContent = state.mode === "walletd" ? "Check wallet daemon" : "Connect wallet";
 }
 
 // ---------------------------------------------------------------- steps + view
@@ -973,6 +1113,7 @@ function renderExport() {
     renderSteps();
     renderTerminalEmpty($("term-log"), null, true);
     startMatrixEdges();
+    $("connect-wallet").onclick = connectWallet;
     // The status strip is the first thing a judge reads; refresh it quietly so a walletd that
     // comes up (or dies) is reflected without a manual reload.
     await refreshStatus();

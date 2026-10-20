@@ -78,6 +78,18 @@
                     <h2><span class="n">02</span>Choose how you will prove it</h2>
                     <label for="wallet-select" class="sub">Wallet / proof method</label>
                     <select id="wallet-select" aria-label="Wallet or proof method"></select>
+                    <div class="wallet-connect">
+                        <button class="cta" id="connect-wallet">Connect wallet</button>
+                        <p class="sub">Connect only: reads your wallet's address, network and capabilities.
+                            It requests no spend and no balance, and it can never grant access by itself.</p>
+                    </div>
+                    <div class="wallet-detail" id="wallet-detail" hidden>
+                        <div class="wd-row"><span class="k">STATUS</span><span class="v" id="wd-status"></span></div>
+                        <div class="wd-row"><span class="k">ADDRESS</span><span class="v mono" id="wd-address"></span></div>
+                        <div class="wd-row"><span class="k">NETWORK</span><span class="v" id="wd-network"></span></div>
+                        <div class="wd-row" id="wd-caps-row"><span class="k">CAPABILITIES</span><span class="v mono" id="wd-caps"></span></div>
+                        <div class="wd-row" id="wd-ownership-row"><span class="k">OWNERSHIP</span><span class="v mono" id="wd-ownership"></span></div>
+                    </div>
                     <p class="wallet-pill" id="wallet-note" role="status"></p>
                 </section>
 

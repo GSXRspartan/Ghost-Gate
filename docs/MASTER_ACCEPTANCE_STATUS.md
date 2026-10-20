@@ -306,3 +306,47 @@ zero-value test transaction. The 10-tTARI shield/proof work happens only after b
 3. **Telegram protocol suite re-run** — 14/14 green (no code change; hygiene re-check).
 4. **Cloudflare staging** — webhook-based bot recommended for production (stateless,
    Cloudflare-compatible); long-polling retained for local development only.
+
+---
+
+## 12. Session log — 2026-10-20 (Sapient wired into the real Lab UI)
+
+**The operator's finding:** the physical Sapient extension injects `window.tari` into
+`http://127.0.0.1:7799/lab` (`sapientInjected: true, tariWalletFlag: true, requestAvailable: true`),
+but section 02 offered only "Wallet daemon · consensus" with no Sapient workflow.
+
+**Root cause:** `renderWallets()` hard-coded generic labels ("Tari desktop wallet · credential")
+and offered no connect action at all — the only wallet interaction was the prove button, which for
+the three consensus-mode demo gates drives the walletd path. A visitor could not connect a browser
+wallet for diagnostics without submitting a proof.
+
+**Fix (connection-only ceremony, section 02):**
+1. Selector labels are honest: "Sapient — Ootle L2 · credential" and
+   "Tari Universe — in-app · credential"; walletd marked "(advanced)".
+2. A real **Connect wallet** button performs a connection-only ceremony: waits for late
+   `window.tari` injection (1.5 s / `tari#initialized`), then `tari_requestAccounts` (the wallet's
+   own approval prompt), `tari_getNetwork`, capability read, and — only when
+   `walletOwnershipProof` is offered — `tari_signWalletOwnershipChallenge` over a locally
+   generated nonce, displayed as *proof of wallet possession only*. It never mints a bridge
+   challenge, never builds a proof, never authorizes a spend.
+3. A detail box shows the truncated real address, the network verdict, and the capability list.
+4. Network validation is byte-based (`networkVerdict` + the cohort table transcribed from
+   `ghost_gate_core::network`): an Esmeralda wallet (0x26) against localnet gates (0x10)
+   reads "Network mismatch … Connecting for diagnostics is fine; proving here is blocked by the
+   gate, not by your wallet." Cross-network qualification stays blocked by design.
+5. Rejection (4001) reads "You declined the connection request. Nothing was shared."
+
+**Verified (AUTOMATED TESTS ONLY — simulated provider, physical test pending):**
+- New `scripts/lab_connect_check.sh` + `scripts/cdp-connect-check.mjs`: **10/10 green** —
+  selector lists Sapient, button present/enabled, connected status, Esmeralda address shown,
+  mismatch verdict, capabilities, possession-only signature line, 4001 decline state, zero
+  console errors.
+- Existing suites unchanged and green: 19/19 JS adapter tests, 28/28 matrix/layout checks.
+- Bridge serves web/ from disk (md5-verified) — no rebuild or restart was needed.
+
+**Operator's physical milestone (the extension's genuine prompt):**
+Open the real Ghost Gate Privacy Lab at http://127.0.0.1:7799/lab with Sapient installed,
+select a gate, choose "Sapient — Ootle L2 · credential", press **Connect wallet**, and approve
+the extension's prompt. Expect: address shown, mismatch verdict (Esmeralda vs localnet —
+correct for these demo gates), capability list, and the optional read-only signature. Not
+labelled LIVE WALLET VERIFIED until the operator confirms the real prompt.

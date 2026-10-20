@@ -171,6 +171,14 @@ export function windowTariProvider(id, label, discover) {
         params: { resourceAddress: resource, substateId, challenge },
       });
     },
+    /**
+     * Low-level passthrough for the Lab's connection-only ceremony: account/network reads,
+     * capability discovery, and the read-only wallet-ownership signature. Nothing here moves
+     * funds, and nothing it returns is a proof — the bridge always re-checks facts server-side.
+     */
+    async request(method, params) {
+      return get().request({ method, params });
+    },
     async lookup(transactionId) {
       return get().request({ method: "tari_getTransactionResult", params: { transactionId } });
     },

@@ -286,6 +286,26 @@ select { text-overflow: ellipsis; }
 .wallet-pill.warn { color: var(--warn); border-color: rgba(224, 185, 106, 0.4); background: rgba(224, 185, 106, 0.05); }
 .wallet-pill.bad { color: var(--bad); border-color: rgba(224, 106, 106, 0.4); background: rgba(224, 106, 106, 0.05); }
 
+/* ---------- connect-wallet ceremony: connection only, never an authorization ---------- */
+.wallet-connect { margin-top: 0.8rem; display: flex; flex-direction: column; gap: 0.5rem; }
+.wallet-detail {
+    margin-top: 0.65rem;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    padding: 0.7rem 0.85rem;
+    display: grid;
+    gap: 0.45rem;
+    background: rgba(0, 0, 0, 0.25);
+}
+.wallet-detail[hidden] { display: none; }
+.wd-row { display: grid; grid-template-columns: 7.4rem 1fr; gap: 0.6rem; align-items: baseline; }
+.wd-row .k { font: 600 0.62rem var(--mono); letter-spacing: 0.14em; color: var(--dim); }
+.wd-row .v { font-size: 0.8rem; line-height: 1.5; word-break: break-all; }
+.wd-row .v.mono { font: 0.74rem var(--mono); }
+.wd-row.ok .v { color: var(--green); }
+.wd-row.warn .v { color: var(--warn); }
+.wd-row.bad .v { color: var(--bad); }
+
 /* ---------- steps head + actions ---------- */
 .steps-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.8rem; flex-wrap: wrap; }
 .steps-head h2 { margin: 0.1rem 0 0.2rem; }
