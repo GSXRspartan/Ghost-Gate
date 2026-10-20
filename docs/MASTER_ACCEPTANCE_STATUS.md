@@ -289,3 +289,20 @@ zero-value test transaction. The 10-tTARI shield/proof work happens only after b
   from §9 is still unverified by automated tests).
 - Review `docs/PAUSED_MINER_RECOVERY.md` before any resume attempt.
 - Provide a compatible wallet environment for the live wallet test.
+
+---
+
+## 11. Session log — 2026-10-20 (continuation: dedicated walletd restored, Sapient ready)
+
+1. **Dedicated walletd :18130 restored** — prior PID 8519 was alive but refusing RPC (stale
+   zombie). Force-killed and restarted with the exact verified profile (localnet, byte 16,
+   v0.42.0, base-path gg-wallet-ghostgate-live). Now healthy: `wallet.get_info` → 200,
+   `GhostGate` account component loaded, UTXO scan complete (zero stealth outputs, expected —
+   no funding yet).
+2. **Sapient connection adapter verified** — `sapientProvider()` implements the
+   `window.tari` contract (`isTariWallet` detection, `tari_getCapabilities` probe, Mode B
+   credential flow). Esmeralda network check remains byte-based via `networkMatches()` —
+   cross-network qualification is prevented by design.
+3. **Telegram protocol suite re-run** — 14/14 green (no code change; hygiene re-check).
+4. **Cloudflare staging** — webhook-based bot recommended for production (stateless,
+   Cloudflare-compatible); long-polling retained for local development only.
