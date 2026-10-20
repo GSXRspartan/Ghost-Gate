@@ -35,6 +35,9 @@ use tari_template_lib_types::{Amount, ResourceAddress};
 /// What the bridge knows about the wallet without asking anything sensitive.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalletStatus {
+    /// Whether this bridge was WIRED with a wallet daemon at startup. A bridge without one is
+    /// in offline demonstration mode by configuration, which is a status, not a service failure.
+    pub configured: bool,
     /// Whether a wallet daemon answered at all.
     pub reachable: bool,
     /// Whether a default account exists. Never the account's address.
@@ -48,6 +51,7 @@ pub struct WalletStatus {
 impl WalletStatus {
     pub fn unreachable() -> Self {
         Self {
+            configured: false,
             reachable: false,
             has_default_account: false,
             network: 0,

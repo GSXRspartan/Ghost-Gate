@@ -1474,6 +1474,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 status: WalletStatus {
+                    configured: true,
                     reachable: true,
                     has_default_account: true,
                     network: network::LOCALNET,
@@ -2368,6 +2369,22 @@ mod tests {
         let r = b.handle(&get("/wallet/status")).await;
         assert_eq!(r.status, 503);
         assert!(r.body.contains("not reachable"), "{}", r.body);
+    }
+
+    #[tokio::test]
+    async fn an_unconfigured_wallet_is_a_status_not_a_service_error() {
+        // The regression this locks: a bridge launched WITHOUT GG_WALLETD_ENDPOINT is in
+        // offline demonstration mode by configuration. That used to answer 503, which every
+        // browser logs as a repeating console error every poll interval. It is a status, so it
+        // answers 200 with configured=false and reachable=false — and a wallet that IS
+        // configured but fails to answer still 503s, per the test above.
+        let mut w = FakeWallet::new();
+        w.status = WalletStatus::unreachable();
+        let mut b = bridge(w);
+        let r = b.handle(&get("/wallet/status")).await;
+        assert_eq!(r.status, 200, "{}", r.body);
+        assert!(r.body.contains("\"configured\":false"), "{}", r.body);
+        assert!(r.body.contains("\"reachable\":false"), "{}", r.body);
     }
 
     #[tokio::test]

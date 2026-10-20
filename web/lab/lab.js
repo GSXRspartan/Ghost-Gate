@@ -32,6 +32,7 @@ const state = {
     paused: false,
     lastSeq: 0,
     gateListSig: null,   // signature of the last-rendered gate list (avoid rebuilding an open dropdown)
+    walletFailures: 0,   // consecutive polls where the wallet was absent or unreachable
 };
 
 // ---------------------------------------------------------------- formatting
@@ -224,8 +225,16 @@ async function selectMode(id) {
     let provider = id === "walletd" ? walletdProvider(location.origin) : id === "universe" ? universeProvider() : sapientProvider();
     let usable = { usable: false, reason: "not probed", modes: [] };
     try {
-        const caps = await provider.capabilities();
-        usable = walletUsability(caps, { canConsensusProof: id === "walletd" });
+        // The provider surface is probe() — the same discovery + capability read every adapter
+        // implements. (Calling a non-existent capabilities() here used to throw and report
+        // every wallet — including a reachable wallet daemon — as "not reachable".)
+        const probe = await provider.probe();
+        usable = walletUsability(probe.capabilities || {}, {
+            canConsensusProof: id === "walletd" && probe.available === true,
+        });
+        if (!probe.available) {
+            usable = { usable: false, reason: probe.unavailableReason || "this wallet is not reachable from this page", modes: [] };
+        }
     } catch (e) {
         usable = { usable: false, reason: "provider did not answer", modes: [] };
     }
@@ -367,8 +376,18 @@ async function prove() {
     }
     const { challenge_nonce, session_commitment } = ch.body;
 
-    // 2. Ask for the proof. The request names a gate and a nonce — nothing else.
+    // 2. Two proof paths, dispatched on the wallet the visitor chose — never on a guess.
+    //    walletd  → the consensus path: the bridge drives the local daemon (Mode A).
+    //    Sapient / Universe → the credential path: the wallet shields an output carrying the
+    //    gate's threshold as its PUBLIC minimum-value promise, then signs this attempt's
+    //    challenge over that one output; the bridge verifies both against chain state (Mode B).
+    //    The credential route is the Telegram membership flow, so it is offered only on gates
+    //    the administrator scoped to Telegram.
     advance("authorize"); advance("submit");
+    if (state.mode !== "walletd") {
+        await proveCredential(gate, challenge_nonce, session_commitment);
+        return;
+    }
     const asked = await api(`/gate/${gate.gateId}/prove`, {
         method: "POST",
         body: JSON.stringify({ gate_id: gate.gateId, challenge_nonce, session_commitment }),
@@ -404,6 +423,93 @@ async function prove() {
         showOutcome("denied", "ACCESS DENIED",
             "The required threshold was not proven. Your exact balance remains private.",
             { reason: terminal.reason || "the proof did not complete" });
+    }
+}
+
+/**
+ * Mode B — the credential path, driven through the browser wallet.
+ *
+ * The wallet shields a fresh output carrying the gate's threshold as its public
+ * minimum-value promise (the user approves this in the wallet's own UI, with the
+ * "permanent and public" warning the wallet itself shows), then signs this attempt's
+ * challenge over that one output. The bridge reads the output from chain state, checks
+ * floor ≥ threshold against the live policy, checks the signature against the output's
+ * own on-chain spend key, and grants the session. This page never sees a key, a balance,
+ * or a UTXO inventory: it relays four identifiers and a signature.
+ */
+async function proveCredential(gate, challenge_nonce, session_commitment) {
+    const scoped = gate.useMode === "telegram" || gate.useMode === "both";
+    if (!scoped) {
+        $("prove").disabled = false;
+        showOutcome("denied", "WRONG GATE SCOPE",
+            `This gate authorizes the website only. The credential proof mode is the Telegram membership flow; pick a Telegram-scoped gate or use the wallet daemon path.`);
+        return;
+    }
+    const provider = state.mode === "universe" ? universeProvider() : sapientProvider();
+    // Shield exactly the threshold: the promise is the floor, and the user's headroom above
+    // it is the user's choice, disclosed on the wallet's approval screen.
+    const threshold = String(gate.thresholdRaw);
+    let built;
+    try {
+        built = await provider.approveAndBuildProof("credential", {
+            gateId: gate.gateId,
+            resourceAddress: gate.resourceAddress,
+            amount: threshold,
+            minimumValuePromise: threshold,
+            maxFee: "50000",
+        });
+    } catch (e) {
+        $("prove").disabled = false;
+        showOutcome("denied", "WALLET REFUSED", String(e && e.message ? e.message : e));
+        return;
+    }
+    if (!built || !built.substateId) {
+        $("prove").disabled = false;
+        showOutcome("denied", "NO PROOF ARTIFACT", "The wallet produced no output to verify; there is nothing to check against chain state.");
+        return;
+    }
+    // The ownership signature over THIS bridge's challenge. The wallet re-derives the
+    // output's one-time key from the gate's resource; the bridge re-checks everything.
+    let signed;
+    try {
+        signed = await provider.signChallenge(built.substateId, challenge_nonce);
+    } catch (e) {
+        $("prove").disabled = false;
+        showOutcome("denied", "SIGNATURE REFUSED", String(e && e.message ? e.message : e));
+        return;
+    }
+    advance("consensus"); advance("verify");
+    const asked = await api(`/gate/${gate.gateId}/credential`, {
+        method: "POST",
+        body: JSON.stringify({
+            gate_id: gate.gateId,
+            challenge_nonce,
+            session_commitment,
+            substate_id: built.substateId,
+            // camelCase from the wallet, snake_case on the wire.
+            public_key: signed.publicKey || "",
+            public_nonce: signed.publicNonce,
+            signature: signed.signature,
+        }),
+    });
+    $("prove").disabled = false;
+    if (asked.ok && asked.body.state === "accepted") {
+        advance("grant"); advance("session");
+        const r = asked.body.receipt || {};
+        const sessionInfo = asked.body.access
+            ? ` A verified session was issued for ${Math.round((asked.body.access.expiresUnix - Date.now() / 1000) / 86400)} day(s); afterwards, a fresh proof is required.`
+            : "";
+        showOutcome("granted", "ACCESS GRANTED",
+            "Threshold proven on chain against a real output you own. The output's own public floor was checked, not your balance — the amount above the floor was never disclosed." + sessionInfo,
+            {
+                "attested floor": `${formatAmount(r.attested_minimum, gate.divisibility)} ${gate.symbol || ""}`.trim(),
+                "required": `${formatAmount(r.required_minimum, gate.divisibility)} ${gate.symbol || ""}`.trim(),
+                "output": built.substateId.slice(0, 18) + "…",
+            });
+    } else {
+        showOutcome("denied", "ACCESS DENIED",
+            "The required threshold was not proven. Your exact balance remains private.",
+            { reason: asked.body.refused || asked.body.error || "the proof did not complete" });
     }
 }
 
@@ -611,13 +717,19 @@ async function refreshStatus() {
 
     // Walletd reachability: probed for real, and the network name comes from the WALLET when it
     // answers (the operator's configured cohort), falling back to the gates' registry byte.
+    // Three honest states, never conflated: configured-and-answering, configured-but-failing
+    // (a real service error — the route says 503), and not configured at all (the bridge runs in
+    // offline demonstration mode, which is a configuration the operator chose).
     const ws = await api("/wallet/status").catch(() => null);
-    if (ws && ws.ok && ws.body.reachable) {
+    if (ws && ws.ok && ws.body.configured === false) {
+        setPill("pill-walletd", "warn", "not configured (offline demo)");
+        state.walletFailures++;
+    } else if (ws && ws.ok && ws.body.reachable) {
         setPill("pill-walletd", "ok", ws.body.has_default_account ? "reachable · account ready" : "reachable · no account");
-    } else if (ws && ws.status === 503) {
-        setPill("pill-walletd", "bad", "not reachable");
+        state.walletFailures = 0;
     } else {
-        setPill("pill-walletd", "bad", "unreachable");
+        setPill("pill-walletd", "bad", ws && ws.status === 503 ? "not reachable" : "unreachable");
+        state.walletFailures++;
     }
 
     // Capabilities + network from the registry. Sorted by threshold ascending: the first gate a
@@ -659,36 +771,101 @@ async function refreshStatus() {
 }
 
 // ---------------------------------------------------------------- matrix edges
-// Ambient, low-opacity code columns on the page edges. Generated once, CSS-animated only
-// (transform), behind the content, pointer-events none, and NOT STARTED at all when the visitor
-// prefers reduced motion.
+// A real digital rain: one small canvas per margin, drawn with requestAnimationFrame.
+// Each frame lays a translucent wash over the strip — that wash is what fades the
+// glyphs already on it into a trail — then drops the next glyph at each column's
+// head, brighter than the trail behind it. Decorative only: no wallet data, no
+// addresses, nothing that leaves this process. Paused when the tab is hidden and
+// never started under prefers-reduced-motion.
 function startMatrixEdges() {
     const host = document.getElementById("matrix-edges");
-    if (!host || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    if (!host) return;
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    // Halfwidth katakana + latin hex-ish set: the classic rain look, Tari green.
     const glyphs = "01ｱｲｳｴｵｶｷｸｹｺｻｼｽｾﾀﾁﾂﾃﾄﾅﾆﾈﾊﾋﾎﾏﾐﾑﾒﾓﾗﾘﾙﾚﾛABCDEF0123456789";
-    const positions = ["6px", "40px", "1fr", "40px", "6px"]; // two outer columns per side
-    const sides = ["left", "right"];
-    let seed = 0x9e3779b9;
-    const rnd = () => {
-        // deterministic xorshift: the ambient pattern is decorative, never security-relevant
-        seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5;
-        return Math.abs(seed % 1000) / 1000;
-    };
-    for (const side of sides) {
-        for (let c = 0; c < positions.length; c++) {
-            if (positions[c] === "1fr") continue; // never near the content's centre
-            const col = document.createElement("div");
-            col.className = "col";
-            col.style[side] = positions[c];
-            col.style.setProperty("--fall", `${16 + Math.floor(rnd() * 20)}s`);
-            col.style.setProperty("--delay", `${(-rnd() * 20).toFixed(1)}s`);
-            const lines = 120;
-            let text = "";
-            for (let i = 0; i < lines; i++) text += glyphs[Math.floor(rnd() * glyphs.length)] + "\n";
-            col.textContent = text;
-            col.style.animationDelay = `${(-rnd() * 24).toFixed(1)}s`;
-            host.append(col);
-        }
+    const SLOT = 16;          // px per glyph column
+    const FONT = "600 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+    const BG = "rgb(11, 15, 13)";        // --ink, matched to the page
+    const HEAD = "rgb(196, 255, 220)";   // brighter than the trail
+    const BODY = "rgb(41, 212, 124)";    // --green
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+    for (const side of ["left", "right"]) {
+        const canvas = document.createElement("canvas");
+        canvas.className = side;
+        host.append(canvas);
+        const ctx = canvas.getContext("2d", { alpha: false });
+        let w = 0, h = 0, drops = [], raf = 0;
+
+        const seedDrop = () => ({
+            slot: 0,
+            y: 0,
+            speed: 0.6 + Math.random() * 1.9,   // px/frame: visibly different speeds
+            trail: 8 + Math.floor(Math.random() * 22), // glyphs kept in the streak
+            next: Math.random() * 40,           // frames until the next reset
+        });
+
+        const resize = () => {
+            w = canvas.clientWidth || 112;
+            h = canvas.clientHeight || 600;
+            canvas.width = Math.max(1, Math.round(w * dpr));
+            canvas.height = Math.max(1, Math.round(h * dpr));
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            ctx.fillStyle = BG;
+            ctx.fillRect(0, 0, w, h);
+            const slots = Math.max(1, Math.floor(w / SLOT));
+            drops = Array.from({ length: slots }, () => seedDrop());
+            // Stagger the columns down the strip so they never fall in lockstep.
+            drops.forEach((d, i) => { d.y = (h / slots) * i + Math.random() * 40; });
+        };
+
+        const frame = () => {
+            // The fade wash: previous glyphs dim rather than vanish, which is the trail.
+            ctx.globalAlpha = 0.16;
+            ctx.fillStyle = BG;
+            ctx.fillRect(0, 0, w, h);
+            ctx.globalAlpha = 1;
+            ctx.font = FONT;
+            ctx.textBaseline = "top";
+            for (const d of drops) {
+                const x = d.slot * SLOT + 1;
+                const g = glyphs[(Math.random() * glyphs.length) | 0];
+                // Trail body first, then the head on top so the head reads bright.
+                ctx.fillStyle = BODY;
+                ctx.globalAlpha = 0.85;
+                for (let t = 1; t <= d.trail; t++) {
+                    const ty = d.y - t * 13;
+                    if (ty < -13) break;
+                    ctx.globalAlpha = 0.85 * (1 - t / (d.trail + 2));
+                    ctx.fillText(glyphs[(Math.random() * glyphs.length) | 0], x, ty);
+                }
+                ctx.globalAlpha = 1;
+                ctx.fillStyle = HEAD;
+                ctx.fillText(g, x, d.y);
+                d.y += d.speed;
+                if (d.y > h + 30 || --d.next <= 0) {
+                    d.y = -20 - Math.random() * 60;
+                    d.next = 40 + Math.random() * 260;
+                    d.speed = 0.6 + Math.random() * 1.9;
+                    d.trail = 8 + Math.floor(Math.random() * 22);
+                }
+            }
+            raf = requestAnimationFrame(frame);
+        };
+
+        resize();
+        window.addEventListener("resize", resize);
+        raf = requestAnimationFrame(frame);
+
+        // A hidden tab animates nobody: stop the loop, restart it on return.
+        document.addEventListener("visibilitychange", () => {
+            if (document.hidden) {
+                if (raf) cancelAnimationFrame(raf);
+                raf = 0;
+            } else if (!raf) {
+                raf = requestAnimationFrame(frame);
+            }
+        });
     }
 }
 
@@ -785,5 +962,17 @@ function renderExport() {
     await loadTelegramScope();
     const health = await api("/health").catch(() => ({ body: {} }));
     $("version-line").textContent = health.body.version ? ` bridge ${health.body.version}` : "";
-    setInterval(() => { refreshStatus().catch(() => {}); }, 20_000);
+    // Adaptive polling: 20s while the wallet answers, 60s after sustained unavailability. A
+    // repeating 503 in the console was the symptom; the fix is the honest 200-plus-JSON the
+    // bridge now answers for an unconfigured wallet, and this backoff covers the genuinely
+    // failing case so the page never hammers a dependency that is not coming back.
+    const NORMAL_POLL_MS = 20_000;
+    const DEGRADED_POLL_MS = 60_000;
+    const scheduleStatusPoll = () => {
+        setTimeout(async () => {
+            try { await refreshStatus(); } catch { /* offline stays offline */ }
+            scheduleStatusPoll();
+        }, state.walletFailures >= 3 ? DEGRADED_POLL_MS : NORMAL_POLL_MS);
+    };
+    scheduleStatusPoll();
 })();

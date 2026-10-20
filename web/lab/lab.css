@@ -42,39 +42,37 @@ body {
     overflow-x: hidden;
 }
 
-/* ---------- matrix edges: ambient, behind everything, cheap ---------- */
+/* ---------- matrix edges: canvas-rendered, behind everything ----------
+   The previous implementation stacked CSS-animated vertical-text columns with
+   `top: -110vh` and `writing-mode: vertical-rl`: on a real viewport the columns
+   were positioned and rendered outside the visible band, so nothing appeared
+   even with the parent's z-index forced. This is a canvas rain instead: two
+   fixed strips (left/right margin), one glyph column per slot, trails from a
+   translucent fade, a brighter head glyph. Cheap (one small canvas per side),
+   pausable, reduced-motion aware, pointer-events none, behind #lab-root. */
 #matrix-edges {
     position: fixed; inset: 0;
     pointer-events: none;
     overflow: hidden;
     z-index: 0;
 }
-#matrix-edges .col {
+#matrix-edges canvas {
     position: absolute;
-    top: -110vh;
-    bottom: auto;
-    width: 22px;
-    color: var(--green);
-    font: 600 11px/1.55 var(--mono);
-    letter-spacing: 2px;
-    white-space: pre;
-    text-align: center;
-    opacity: 0.11;
-    filter: saturate(0.7) brightness(1.4);
-    writing-mode: vertical-rl;
-    text-orientation: mixed;
-    will-change: transform;
-    animation: matrix-fall var(--fall, 22s) linear infinite;
-    animation-delay: var(--delay, 0s);
+    top: 0;
+    height: 100%;
+    width: 112px;
+    display: block;
 }
-#matrix-edges .col:nth-child(2n) { opacity: 0.07; --fall: 30s; }
-#matrix-edges .col:nth-child(3n) { opacity: 0.14; --fall: 17s; }
-@keyframes matrix-fall {
-    from { transform: translateY(-10%); }
-    to   { transform: translateY(120%); }
+#matrix-edges canvas.left { left: 0; }
+#matrix-edges canvas.right { right: 0; }
+@media (max-width: 900px) {
+    #matrix-edges canvas { width: 72px; }
+}
+@media (max-width: 480px) {
+    #matrix-edges canvas { width: 40px; }
 }
 @media (prefers-reduced-motion: reduce) {
-    #matrix-edges .col { animation: none; opacity: 0.05; }
+    #matrix-edges canvas { display: none; }
 }
 
 /* ---------- shell ---------- */

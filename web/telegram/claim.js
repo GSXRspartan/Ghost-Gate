@@ -68,6 +68,17 @@ async function main() {
   // Which wallet? A browser wallet — this flow is the credential mode. The bridge's own walletd
   // path is not reachable from a Telegram user's browser unless they also run the bridge; if no
   // browser wallet answers, say exactly that.
+  // window.tari may not exist at parse time: the extension injects at document_start, the
+  // connector on script load. Wait briefly for it (or the tari#initialized event) before probing,
+  // so a slow-injecting wallet isn't mistaken for "no wallet installed".
+  if (!window.tari) {
+    await new Promise((resolve) => {
+      let settled = false;
+      const done = () => { if (!settled) { settled = true; window.removeEventListener("tari#initialized", done); resolve(); } };
+      window.addEventListener("tari#initialized", done);
+      setTimeout(done, 1500);
+    });
+  }
   const candidates = [sapientProvider(), universeProvider()];
   let provider = null;
   for (const p of candidates) {

@@ -104,8 +104,45 @@ RES_ADDR="${GG_RES_ADDR:-resource_5161236c4a402a14303a92562737748f0cd122fa42e383
 GATES="${GG_BRIDGE_GATES:-crypt=$GATE_ADDR:$RES_ADDR:100000:6:GHOST,vault=$GATE_ADDR:$RES_ADDR:500000:6:GHOST,abyss=$GATE_ADDR:$RES_ADDR:2000000:6:GHOST}"
 BIND="${GG_BRIDGE_BIND:-127.0.0.1:7799}"
 ORIGINS="${GG_BRIDGE_ORIGINS:-http://127.0.0.1:7799}"
-WALLETD_ENDPOINT="${GG_WALLETD_ENDPOINT:-}"
-INDEXER_ENDPOINT="${GG_INDEXER_ENDPOINT:-}"
+
+# ---------------------------------------------------------------------------
+# Wallet daemon and indexer. Read-only probes decide the DEFAULT, an explicit
+# env var always wins, and a missing daemon is not an error: the bridge then
+# starts in offline demonstration mode and every proof route fails closed with
+# an honest message. The dedicated Ghost Gate walletd is preferred (port 18130,
+# the GhostGate account lives there); the shared localnet walletd is never
+# touched beyond a read-only probe and is not wired in by default.
+# ---------------------------------------------------------------------------
+walletd_probe() {
+  curl -sS -m 2 -X POST -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"wallet.get_info","params":{}}' \
+    "http://127.0.0.1:18130/json_rpc" 2>/dev/null | grep -q '"result"'
+}
+indexer_probe() {
+  curl -sS -m 2 "http://127.0.0.1:12007/health" 2>/dev/null | grep -q '"status":"ok"'
+}
+
+if [ -n "${GG_WALLETD_ENDPOINT:-}" ]; then
+  WALLETD_ENDPOINT="$GG_WALLETD_ENDPOINT"
+elif walletd_probe; then
+  WALLETD_ENDPOINT="http://127.0.0.1:18130/json_rpc"
+  echo "  wallet daemon found on 127.0.0.1:18130 (read-only probe)"
+else
+  WALLETD_ENDPOINT=""
+  echo "  note: no wallet daemon answered on 127.0.0.1:18130; starting in offline"
+  echo "        demonstration mode (set GG_WALLETD_ENDPOINT to override)"
+fi
+
+if [ -n "${GG_INDEXER_ENDPOINT:-}" ]; then
+  INDEXER_ENDPOINT="$GG_INDEXER_ENDPOINT"
+elif indexer_probe; then
+  INDEXER_ENDPOINT="http://127.0.0.1:12007"
+  echo "  indexer found on 127.0.0.1:12007 (read-only probe)"
+else
+  INDEXER_ENDPOINT=""
+  echo "  note: indexer did not answer on 127.0.0.1:12007; the credential proof mode"
+  echo "        stays disabled (set GG_INDEXER_ENDPOINT to override)"
+fi
 
 if [ ! -x "$BRIDGE_BIN" ]; then
   echo "bridge binary missing; the build failed" >&2

@@ -85,8 +85,28 @@ fn main() -> ExitCode {
                 fee_ceiling(),
                 max_epoch(),
             ) {
-                Ok(channel) => {
-                    println!("  wallet daemon: {endpoint} (network byte {network})");
+                Ok(mut channel) => {
+                    // A `none`-auth-mode walletd still demands a bearer token on account
+                    // endpoints. Bootstrap one from the daemon when the operator supplied none;
+                    // a daemon that requires real auth rejects this and every account call
+                    // then fails closed, so there is no silent bypass either way.
+                    let bootstrapped = tokio::runtime::Builder::new_multi_thread()
+                        .enable_all()
+                        .build()
+                        .map(|rt| rt.block_on(channel.bootstrap_local_auth()))
+                        .unwrap_or(false);
+                    let auth_note = if std::env::var("GG_WALLETD_TOKEN")
+                        .ok()
+                        .filter(|t| !t.trim().is_empty())
+                        .is_some()
+                    {
+                        "api token from GG_WALLETD_TOKEN"
+                    } else if bootstrapped {
+                        "local none-mode token bootstrapped"
+                    } else {
+                        "no token; a daemon requiring auth will refuse account calls"
+                    };
+                    println!("  wallet daemon: {endpoint} (network byte {network}, {auth_note})");
                     AnyWallet::Live(channel)
                 }
                 Err(e) => {
@@ -344,9 +364,12 @@ struct NoWallet;
 
 impl WalletChannel for NoWallet {
     async fn status(&mut self) -> Result<WalletStatus, WalletError> {
-        Err(WalletError::Unreachable(
-            "no wallet daemon is connected to this build".into(),
-        ))
+        // Not configured is a STATUS, not a failure: the bridge was launched without
+        // GG_WALLETD_ENDPOINT (offline demonstration mode), which is a configuration the
+        // operator chose. Answering 503 here turned a permanent, intentional state into a
+        // repeating service error in every browser's console. A wallet that IS configured but
+        // fails to answer still errors, and still 503s at the route — that case is unchanged.
+        Ok(WalletStatus::unreachable())
     }
     async fn build_statement(
         &mut self,

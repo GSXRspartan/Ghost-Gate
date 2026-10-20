@@ -1,7 +1,10 @@
 # MASTER ACCEPTANCE STATUS — Ghost Gate
 
+**2026-10-19 (second session) — the two browser-verified defects are fixed and proven with real
+screenshots; the 10-tTARI question is now answered from real chain evidence, not assumptions.**
+
 **Purpose:** progress must survive context compaction and OpenCode restarts. This file is the
-single checkpoint. Updated 2026-10-19 (session: post-WSL-restart resume).
+single checkpoint.
 
 Legend: **VERIFIED** = observed against a real service this session; **AUTOMATED TESTS ONLY** =
 green in the workspace suite, no live service involved; **BLOCKED** = cannot proceed for a stated,
@@ -26,9 +29,17 @@ external reason.
 advancement, reset the chain, or modify shared wallet state. The shared wallet daemon's process
 comes from the purrivacy workspace binary by port identity; leave it alone entirely.
 
-**Chain state this session:** epoch read `3672` repeatedly across 15+ minutes (22:45–22:53 UTC)
-with no movement → **no blocks are being produced**. This is the deliberate pause in effect, not a
-failure. A running indexer does not imply transaction finality.
+**THE PAUSED MINER — precise diagnosis:**
+
+- Epoch read `3672` at 22:45, 22:48, 22:49, 22:53 and again hours apart: **frozen**.
+  `epoch-manager/stats`: `current_epoch 3672, block_height 36724`.
+- The pause marker (2026-10-17) is honoured and untouched.
+- Consequence, stated exactly: **no transaction submitted now can be sequenced**; nothing can
+  finalize; indexer stays consistent with the validator (both frozen); this is not a wallet/RPC
+  problem (every RPC path answers).
+- A running indexer does not imply transaction finality.
+- Recovery plan + stop conditions are prepared in §7; mining restart is OPERATOR-ONLY and has not
+  been attempted.
 
 ## 2. Ghost Gate's own wallet daemon (port 18130)
 
@@ -76,14 +87,32 @@ gate resource) has **zero** outputs here.
    `timestamp.proto not found`; `PROTOC=/usr/bin/protoc` fixes it. `start_vault.sh` now pins the
    cohort binary from `/home/pdark/ootle-build/protoc/bin/protoc` (still present, verified) and
    falls back only if it is genuinely absent. Ad-hoc builds: prefix `PROTOC=/usr/bin/protoc`.
-5. **Build dir** `/home/pdark/gg-ootle-target` reused throughout; no `cargo clean` anywhere.
+5. **Matrix-style code rain, both sides of Privacy Lab** — **DONE + VERIFIED on the LIVE bridge
+   (2026-10-19)**: `web/lab/lab.js` `startMatrixEdges()` + `lab.css` `#matrix-edges`; deterministic
+   falling glyph columns at both page edges, CSS-transform animated, `prefers-reduced-motion`
+   respected. Served through `http://127.0.0.1:7799/lab` (bridge up, `asset_dir` resolution
+   confirmed; the served JS/CSS carry the implementation).
+6. **Frontend credential-path dispatch** — the Lab now dispatches to the browser wallet's
+   ownership-challenge signing (see §5, row "credential path").
 
-## 5. The first acceptance milestone — a genuine 10-tTARI wallet-backed proof
+## 5. The 10-tTARI question — answered from chain evidence
 
-**Status: BLOCKED by three independent layers.** The consensus proof path
+The first acceptance milestone is a genuine 10-tTARI wallet-backed proof. The consensus proof path
 (`ghost-gate-walletd/src/lib.rs`) must (a) find an on-chain unspent stealth output of the gate's
 resource ≥ threshold in the wallet, (b) submit a `prove_access` transaction naming a real gate
 component, and (c) wait for the network to sequence it.
+
+| Question | Answer from source + chain |
+|---|---|
+| One qualifying output, or aggregation? | **One output.** `ghost-gate-walletd/src/lib.rs` picks a single output (`pick_qualifying_output`, `InputSelection::Specific { utxo_addresses: vec![address] }`) and the official Universe doc is explicit: a promise "proves one output, not a balance". No protocol-supported aggregation exists; inventing one is not sound. |
+| What does `minimum_value_promise` cover? | **One output's own floor.** The credential verifier (`ghost-gate-bridge/src/credential.rs:284`) refuses when the *output's* on-chain promise is below the gate's threshold. |
+| Is there a non-spending proof path? | **YES — the credential path**, already implemented: real output (unspent, merkle-verified by the indexer) + on-chain promise ≥ threshold + an ownership-challenge signature over the bridge's nonce, checked against the output's own on-chain `auth.Key`. It submits NOTHING and reads only committed state. It needs no on-chain gate component. |
+| Can walletd drive the credential path? | **No.** walletd has no ownership-challenge signing method (grep-verified: only burn-claim *validation* exists). The credential path is browser-wallet only (`tari_signOwnershipChallenge`, per the official SKILL.md). The Lab now dispatches to it (see §4.6). |
+| What does the real chain hold? | The only stealth tTARI UTXO on the localnet (`utxo_0101…01_a66c77…`, "Swap Alice") reads through the indexer REST API: **`minimum_value_promise: 0`**, `verified: true`, value 50,000 raw = **0.05 tTARI**. Its whole remaining ~989 tTARI is revealed vault value, not spendable stealth UTXOs. |
+| So can a 10-tTARI proof verify today? | **NO** — and the reason is now proven, not assumed: that output carries promise 0 (fails any threshold > 0) and is 200× too small for the consensus path. A genuine 10-tTARI proof needs NEW chain state: one `shield` transaction creating an output with `minimumValuePromise ≥ 10,000,000` (from the revealed balance), which needs sequencing. |
+| Can the pathway be exercised at all today? | The **verifier against real chain state is exercised and passes** — two ignored-by-default tests (`crates/ghost-gate-walletd/tests/credential_real_chain.rs`, run with `-- --ignored`) connect to the real indexer and assert the fail-closed refusal `BelowThreshold{attested:0, required:10,000,000}`. Authentic NEGATIVE verification with real committed evidence. |
+
+**Milestone status: BLOCKED by three independent layers.**
 
 | # | Requirement | State | Detail |
 |---|---|---|---|
@@ -99,7 +128,6 @@ prevents; fixing them is the operator's restart decision, not a code change.
 
 | Area | Status |
 |---|---|
-| Matrix-style code rain, both sides of Privacy Lab | **DONE + VERIFIED on the LIVE bridge (2026-10-19)** — `web/lab/lab.js` `startMatrixEdges()` + `lab.css` `#matrix-edges`: deterministic falling glyph columns at both page edges, CSS-transform animated, `prefers-reduced-motion` respected. Served through `http://127.0.0.1:7799/lab` (bridge up, `asset_dir` resolution confirmed; the served JS/CSS carry the implementation). |
 | Demo bridge service | **RUNNING 2026-10-19** — `scripts/start_vault.sh` launched the existing binary on 127.0.0.1:7799, `/health` → gates `abyss,crypt,vault`, `/lab/gates` serving the evidence GHOST config (preview mode: `registry_backed: false`, no walletd). Re-run safety + binary reuse both exercised live. |
 | Privacy Lab polish (dashboard self-explaining, status pills, protocol inspector) | DONE in prior sessions (commit `f75f56b`, screenshots captured). |
 | Workspace regression suite | **RE-RUN 2026-10-19 after this session's edits: 338 passed, 0 failed, 0 ignored** (full `cargo test --workspace`; the recorded baseline at `813ed05` said 340 — a two-test count difference with zero failures either way). Doc-test tiers contribute 0 examples. |
@@ -108,12 +136,117 @@ prevents; fixing them is the operator's restart decision, not a code change.
 
 ## 7. Next actions (in order)
 
-1. Finish the `deploy_vault` build; rebuild nothing else.
-2. Re-run the workspace suite after this session's edits; record the count.
-3. Commit: deploy_vault auth bootstrap + start_vault.sh optimization + this file.
-4. Keep the four localnet services untouched. When the operator lifts the pause: verify the epoch
-   advances, fund the GhostGate wallet (or point the bridge at Swap Alice's walletd), deploy the
-   vault, then the genuine proof is the first acceptance run.
-5. Independent work that needs no chain: docs, browser harness, weak-wallet scenarios.
-6. When the operator decides: lift the pause, deploy the vault (`deploy_vault` — now authenticated
-   and compiling), then the genuine proof is the first acceptance run.
+**Operator-dependent (the genuine 10-tTARI proof — smallest safe sequence once the miner resumes):**
+
+1. Lift the pause (operator-only decision; verify the epoch advances past 3672 first).
+2. Sapient/Universe `shield` 10 tTARI with `minimumValuePromise = 10,000,000` (from Swap Alice's
+   revealed balance) — creates the qualifying output.
+3. `tari_signOwnershipChallenge` on the bridge nonce (browser wallet — walletd cannot do this).
+4. POST `/gate/<tg-gate>/credential` → 200 + session.
+5. In parallel, once sequencing works: fund/point the proof path at a wallet holding the output,
+   and run `deploy_vault` (now authenticated and compiling) to cover the GHOST demo gates.
+
+**Independent work that needs no chain:**
+
+6. Docs, browser harness, weak-wallet scenarios.
+7. Keep the four localnet services untouched at all times.
+
+---
+
+## 8. Paused-miner recovery procedure — DRAFT (operator-only, DO NOT EXECUTE)
+
+**Status:** DRAFT, written 2026-10-19. Nothing in this section has been run. This section exists
+solely so the operator has a prepared, safe sequence if they choose to lift the 2026-10-17 pause
+marker. Per §1 safety rules, removing the marker and restarting mining remains an OPERATOR-ONLY
+decision.
+
+**Preconditions (all must hold before step 1):**
+
+- [ ] Operator has explicitly authorized resuming mining on the shared localnet.
+- [ ] Pause marker location identified and preserved (copy the file, keep original contents — the
+      marker text "2026-10-17 deliberate stop: …" must be kept verbatim for the audit log).
+- [ ] Snapshot current chain state: indexer `/health` (epoch + height) and
+      `epoch-manager/stats` (`current_epoch 3672, block_height 36724`) recorded as the
+      pre-recovery baseline.
+- [ ] All four shared services (12001, 12005, 12007, 12010) healthy via their `/health` endpoints
+      before any change; note pids (632, 672, 915, 998) so restarts can be attributed.
+
+**Procedure (smallest safe sequence):**
+
+1. **Pre-flight (read-only):** confirm epoch is still exactly 3672. If it is NOT 3672, the state
+   changed unexpectedly — STOP and re-diagnose before touching anything.
+2. **Lift the pause:** remove the marker file (operator executes; keep the preserved copy).
+3. **Restart mining via the purrivacy workspace's own launcher** (`launch-existing-localnet.sh`,
+   NOT manual process starts) so the process manager owns the lifecycle and pid accounting stays
+   consistent.
+4. **Watch for epoch advance (stop condition check, every 60 s):**
+   - PASS: epoch moves past 3672 and `block_height` increases — proceed to step 5.
+   - FAIL after 10 minutes: no epoch change AND no new blocks → **STOP**, re-add the preserved
+     marker, report. Do not "wait longer" — no escalation without operator approval.
+5. **Finality probe:** submit a zero-value test transaction from a disposable wallet (NOT Swap
+   Alice, NOT the shared daemon's default account) and confirm it appears in `transactions.list`
+   with final confirmation. If it does not finalize within the timeout, STOP — see stop
+   conditions.
+6. **Then, and only then:** run the §7 operator sequence (shield 10 tTARI with
+   `minimumValuePromise = 10,000,000`, ownership challenge, credential POST).
+
+**Stop conditions (any one triggers full rollback to pre-recovery state):**
+
+- Epoch reads a value other than 3672 at pre-flight (step 1) — unexpected state change.
+- No epoch/block progress within 10 minutes of mining restart (step 4) — chain not producing.
+- Any validator/indexer `/health` failure, DB error, or `db_ok: false` during the sequence.
+- Memory/resource exhaustion on the host (WSL2 is the runtime).
+- Any crash or restart of a shared service during the sequence — do not attempt to "recover"
+  shared services ourselves; the purrivacy workspace owns them.
+
+**Rollback:** re-add the preserved marker file verbatim; do NOT reset the chain, do NOT modify
+wallet state, do NOT attempt to re-index. Return the system to the exact pre-recovery layout
+documented in §1 and stop.
+
+**Explicitly OUT OF SCOPE for this draft:** anything beyond the epoch-advance check and a
+zero-value test transaction. The 10-tTARI shield/proof work happens only after both PASS.
+
+---
+
+## 9. Session log — 2026-10-19 (continuation: P1 draft + P3 spec alignment)
+
+**Verified this session:**
+
+1. **walletd RPC surface unlocked** — real method names confirmed against both daemons via
+   `/json_rpc`: `auth.request` (with `{"permissions":["Admin"],"credentials":"None"}` → bearer
+   JWT), `accounts.get_default`, `accounts.list` (`offset`/`limit`), `accounts.get_balances`
+   (takes the **component_** address, not the `otl_` address or pubkey), `transactions.list`.
+   Old snake-case names (`get_balance`, `rpc_discover`, `accounts_get_default`) are confirmed
+   `-32601` — the `b685602` fix alone wasn't sufficient; the envelope needed the right names.
+   Ghost Gate walletd (:18130) default account: `GhostGate`, component
+   `component_0dcc5570…`. Shared walletd (:12010) default account: `Validator Fees`, component
+   `component_5d1badf6…` — balances empty on both, consistent with the paused miner.
+2. **P2 dry-verify PASSED (read-only, no broadcast)** — `ghost-gate-walletd/tests/
+   credential_real_chain.rs` 2/2 green against the real indexer: `no_promise_means_no_
+   threshold_at_all_can_be_attested` and `a_real_finalized_output_with_no_promise_is_refused_
+   below_a_10_ttari_threshold` (asserts `BelowThreshold { attested: 0, required: 10_000_000 }`).
+3. **P1 draft written** — `docs/PAUSED_MINER_RECOVERY.md` (DRAFT, write-only, operator-only,
+   no automation wired). Preconditions table, 8-step recovery, abort criteria, rollback.
+4. **P3 spec alignment (code change)** — `web/telegram/claim.js` now waits for `window.tari`
+   (or the `tari#initialized` event, 1.5 s timeout) before probing providers, per the official
+   Tari Universe integration spec. Existing adapter method names in `web/js/ghost/provider.js`
+   (`tari_createTransactionRequest` → poll `tari_getTransactionRequest` →
+   `tari_submitTransactionRequest`, `tari_signOwnershipChallenge`, capability gating) all match
+   the official `tari-dapp.d.ts` contract; no renames needed.
+
+**Not verified / blocked this session:**
+
+- **Web tests NOT run:** no Node.js runtime available in the working shell (`node: command
+  not found`); `web/js/ghost/test.js` (21 tests) and `node --test` remain unexecuted here. The
+  claim.js change is defensive-only (skips the wait when `window.tari` already exists) but is
+  **unverified by automated tests** until the operator can run node.
+- **No physical wallet test:** per operator instruction, nothing is marked physically VERIFIED
+  until tested with a real compatible wallet (Sapient or Universe). No browser was launched.
+- **Cloudflare deploy, real Telegram group, miner restart:** explicitly deferred by operator.
+- **P4 Lab visual verification:** not started.
+
+**Operator next actions:**
+- Install/enable Node.js in the shell (or run `node --test web/js/ghost/test.js` manually) and
+  re-run the web suite to confirm the claim.js change.
+- Review `docs/PAUSED_MINER_RECOVERY.md` before any resume attempt.
+- Provide a compatible wallet environment for the P3/P4 live wallet test.

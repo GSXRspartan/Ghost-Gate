@@ -86,6 +86,9 @@ pub struct WalletDaemonChannel {
     /// the challenge it answers: a proof sequenced after its challenge expired would be refused by the
     /// template anyway, but it would spend the inputs first. Clamped to the challenge's own expiry.
     max_epoch: u64,
+    /// Whether the operator supplied a real credential. When true, [`Self::bootstrap_local_auth`]
+    /// must leave the supplied token untouched.
+    token_supplied: bool,
 }
 
 impl WalletDaemonChannel {
@@ -104,6 +107,7 @@ impl WalletDaemonChannel {
         // The client's token type is `zeroize::Zeroizing<String>` (alias private in the client),
         // so the credential is constructed as exactly that — zeroised on drop, like the wallet
         // holds it.
+        let token_supplied = token.is_some();
         let encoded = token.map(zeroize::Zeroizing::new);
         let client = WalletDaemonClient::connect(endpoint, encoded)
             .map_err(|e| WalletError::Unreachable(format!("cannot build a walletd client: {e}")))?;
@@ -112,7 +116,37 @@ impl WalletDaemonChannel {
             expected_network,
             max_fee,
             max_epoch,
+            token_supplied,
         })
+    }
+
+    /// Bootstraps a bearer token from a `none`-auth-mode wallet daemon.
+    ///
+    /// The ootle walletd demands a bearer token on every account endpoint even when transport
+    /// auth is off: without this, a local daemon answers `accounts_get_default` with 401 and
+    /// `/wallet/status` reports "reachable, no account" forever. `auth.request` with credentials
+    /// `None` succeeds ONLY on a `none`-mode daemon — a daemon configured for WebAuthN or API
+    /// keys rejects the bootstrap, no token is obtained, and every later account call fails
+    /// closed with 401 exactly as before. Callers pass a real `GG_WALLETD_TOKEN` when the daemon
+    /// requires one; that token always wins and this method must then be skipped. The token
+    /// lives in this process, is never logged, and never crosses the bridge's HTTP API. There is
+    /// no route from the public internet to it: walletd binds loopback and the bridge calls it
+    /// server-side only.
+    pub async fn bootstrap_local_auth(&mut self) -> bool {
+        if self.token_supplied {
+            return true;
+        }
+        let request = tari_ootle_walletd_client::types::AuthLoginRequest {
+            permissions: vec![tari_ootle_walletd_client::permissions::Permission::Admin],
+            credentials: tari_ootle_walletd_client::types::AuthCredentials::None,
+        };
+        match self.client.auth_request(&request).await {
+            Ok(resp) => {
+                self.client.set_auth_token(resp.token);
+                true
+            },
+            Err(_) => false,
+        }
     }
 
     /// The default account, which is where a proof's output goes.
@@ -199,6 +233,7 @@ impl WalletChannel for WalletDaemonChannel {
             .map_err(|e| WalletError::Unreachable(e.to_string()))?;
         let has_default_account = self.client.accounts_get_default().await.is_ok();
         Ok(WalletStatus {
+            configured: true,
             reachable: true,
             has_default_account,
             network: info.network_byte,
@@ -559,6 +594,7 @@ mod tests {
             expected_network: ghost_gate_core::network::LOCALNET,
             max_fee: 100_000,
             max_epoch: 100,
+            token_supplied: false,
         };
         let request = StatementRequest {
             resource: resource(7),
