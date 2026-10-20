@@ -788,7 +788,19 @@ function startMatrixEdges() {
     const BG = "rgb(11, 15, 13)";        // --ink, matched to the page
     const HEAD = "rgb(196, 255, 220)";   // brighter than the trail
     const BODY = "rgb(41, 212, 124)";    // --green
+    const PAD = 10;          // keep the rain clear of the dashboard's own padding
+    const MIN_STRIP = 64;    // below this (narrow laptops) the gutter is too thin to bother
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+    // The dashboard is #lab-root: max-width 1180, centered. The gutter is whatever is left of
+    // that box, measured from its laid-out rect (correct under either box-sizing mode) on load
+    // and on resize — not a hard-coded strip.
+    const gutterWidth = () => {
+        const w = window.innerWidth || document.documentElement.clientWidth;
+        const root = document.getElementById("lab-root");
+        const content = root ? root.getBoundingClientRect().width : 1180;
+        return Math.max(0, Math.floor((w - content) / 2));
+    };
 
     for (const side of ["left", "right"]) {
         const canvas = document.createElement("canvas");
@@ -797,57 +809,62 @@ function startMatrixEdges() {
         const ctx = canvas.getContext("2d", { alpha: false });
         let w = 0, h = 0, drops = [], raf = 0;
 
-        const seedDrop = () => ({
-            slot: 0,
-            y: 0,
+        const seedDrop = (slot, count, stagger) => ({
+            slot,
+            y: stagger === undefined ? -20 - Math.random() * (h || 600) : stagger,
             speed: 0.6 + Math.random() * 1.9,   // px/frame: visibly different speeds
             trail: 8 + Math.floor(Math.random() * 22), // glyphs kept in the streak
-            next: Math.random() * 40,           // frames until the next reset
+            next: 40 + Math.floor(Math.random() * 260), // frames until the next reset
         });
 
         const resize = () => {
-            w = canvas.clientWidth || 112;
-            h = canvas.clientHeight || 600;
+            const g = gutterWidth();
+            const strip = Math.max(0, g - PAD);
+            canvas.style.display = strip < MIN_STRIP ? "none" : "block";
+            w = strip;
+            h = canvas.clientHeight || window.innerHeight || 600;
             canvas.width = Math.max(1, Math.round(w * dpr));
             canvas.height = Math.max(1, Math.round(h * dpr));
+            canvas.style.width = w + "px";
             ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
             ctx.fillStyle = BG;
-            ctx.fillRect(0, 0, w, h);
+            ctx.fillRect(0, 0, Math.max(1, w), h);
             const slots = Math.max(1, Math.floor(w / SLOT));
-            drops = Array.from({ length: slots }, () => seedDrop());
-            // Stagger the columns down the strip so they never fall in lockstep.
-            drops.forEach((d, i) => { d.y = (h / slots) * i + Math.random() * 40; });
+            // Scatter the drops across every slot and stagger them down the strip so the
+            // columns never fall in lockstep: many independent streams, not one line.
+            drops = Array.from({ length: slots }, (_, i) => seedDrop(i, slots, (h / slots) * i + Math.random() * 40));
         };
 
         const frame = () => {
-            // The fade wash: previous glyphs dim rather than vanish, which is the trail.
-            ctx.globalAlpha = 0.16;
-            ctx.fillStyle = BG;
-            ctx.fillRect(0, 0, w, h);
-            ctx.globalAlpha = 1;
-            ctx.font = FONT;
-            ctx.textBaseline = "top";
-            for (const d of drops) {
-                const x = d.slot * SLOT + 1;
-                const g = glyphs[(Math.random() * glyphs.length) | 0];
-                // Trail body first, then the head on top so the head reads bright.
-                ctx.fillStyle = BODY;
-                ctx.globalAlpha = 0.85;
-                for (let t = 1; t <= d.trail; t++) {
-                    const ty = d.y - t * 13;
-                    if (ty < -13) break;
-                    ctx.globalAlpha = 0.85 * (1 - t / (d.trail + 2));
-                    ctx.fillText(glyphs[(Math.random() * glyphs.length) | 0], x, ty);
-                }
+            if (w > 0) {
+                // The fade wash: previous glyphs dim rather than vanish, which is the trail.
+                ctx.globalAlpha = 0.16;
+                ctx.fillStyle = BG;
+                ctx.fillRect(0, 0, w, h);
                 ctx.globalAlpha = 1;
-                ctx.fillStyle = HEAD;
-                ctx.fillText(g, x, d.y);
-                d.y += d.speed;
-                if (d.y > h + 30 || --d.next <= 0) {
-                    d.y = -20 - Math.random() * 60;
-                    d.next = 40 + Math.random() * 260;
-                    d.speed = 0.6 + Math.random() * 1.9;
-                    d.trail = 8 + Math.floor(Math.random() * 22);
+                ctx.font = FONT;
+                ctx.textBaseline = "top";
+                for (const d of drops) {
+                    const x = d.slot * SLOT + 1;
+                    // Trail body first, then the head on top so the head reads bright.
+                    ctx.fillStyle = BODY;
+                    ctx.globalAlpha = 0.85;
+                    for (let t = 1; t <= d.trail; t++) {
+                        const ty = d.y - t * 13;
+                        if (ty < -13) break;
+                        ctx.globalAlpha = 0.85 * (1 - t / (d.trail + 2));
+                        ctx.fillText(glyphs[(Math.random() * glyphs.length) | 0], x, ty);
+                    }
+                    ctx.globalAlpha = 1;
+                    ctx.fillStyle = HEAD;
+                    ctx.fillText(glyphs[(Math.random() * glyphs.length) | 0], x, d.y);
+                    d.y += d.speed;
+                    if (d.y > h + 30 || --d.next <= 0) {
+                        d.y = -20 - Math.random() * 60;
+                        d.next = 40 + Math.random() * 260;
+                        d.speed = 0.6 + Math.random() * 1.9;
+                        d.trail = 8 + Math.floor(Math.random() * 22);
+                    }
                 }
             }
             raf = requestAnimationFrame(frame);

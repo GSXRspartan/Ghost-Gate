@@ -43,13 +43,15 @@ body {
 }
 
 /* ---------- matrix edges: canvas-rendered, behind everything ----------
-   The previous implementation stacked CSS-animated vertical-text columns with
-   `top: -110vh` and `writing-mode: vertical-rl`: on a real viewport the columns
-   were positioned and rendered outside the visible band, so nothing appeared
-   even with the parent's z-index forced. This is a canvas rain instead: two
-   fixed strips (left/right margin), one glyph column per slot, trails from a
-   translucent fade, a brighter head glyph. Cheap (one small canvas per side),
-   pausable, reduced-motion aware, pointer-events none, behind #lab-root. */
+   The previous implementations failed twice: CSS-animated vertical-text columns were
+   positioned outside the visible band entirely, and the canvas rewrite sized its
+   strips to a hard-coded 112px while seeding every drop at slot 0 — so all columns
+   stacked into one thin glyph line hugging the viewport edge, leaving the real
+   gutters (≈270px each at 1727×893) empty. This version sizes each canvas to the
+   actual gutter beside #lab-root (JS-measured on load/resize) and scatters drops
+   across every slot, so the margins read as living, multi-column code rain.
+   Paused when the tab is hidden, never started under prefers-reduced-motion,
+   pointer-events none, behind #lab-root. */
 #matrix-edges {
     position: fixed; inset: 0;
     pointer-events: none;
@@ -60,17 +62,10 @@ body {
     position: absolute;
     top: 0;
     height: 100%;
-    width: 112px;
     display: block;
 }
 #matrix-edges canvas.left { left: 0; }
 #matrix-edges canvas.right { right: 0; }
-@media (max-width: 900px) {
-    #matrix-edges canvas { width: 72px; }
-}
-@media (max-width: 480px) {
-    #matrix-edges canvas { width: 40px; }
-}
 @media (prefers-reduced-motion: reduce) {
     #matrix-edges canvas { display: none; }
 }
@@ -474,7 +469,6 @@ details.explain p { color: var(--dim); font-size: 0.8rem; line-height: 1.5; marg
     .terminal { height: 360px; font-size: 0.7rem; }
     .status-strip { gap: 0.35rem; padding: 0.5rem 0.6rem; }
     .pill { font-size: 0.62rem; padding: 0.25rem 0.5rem; }
-    #matrix-edges .col { display: none; }
 }
 @media (max-width: 360px) {
     .masthead h1 { letter-spacing: 0.08em; }

@@ -250,3 +250,42 @@ zero-value test transaction. The 10-tTARI shield/proof work happens only after b
   re-run the web suite to confirm the claim.js change.
 - Review `docs/PAUSED_MINER_RECOVERY.md` before any resume attempt.
 - Provide a compatible wallet environment for the P3/P4 live wallet test.
+
+---
+
+## 10. Session log — 2026-10-20 (Matrix rain rebuilt and proven; P4 closed)
+
+**Verified this session (browser-tested against the live bridge):**
+
+1. **Matrix rain rebuilt — the two-thin-strips defect is fixed.** Root causes were two: the CSS
+   pinned each canvas to a hard-coded 112px strip while the real gutter at 1727×893 is ~273px,
+   and the JS seeded every drop at `slot: 0` so all columns stacked into one glyph line. Now
+   `startMatrixEdges()` measures the actual gutter beside `#lab-root` from its laid-out rect on
+   load and on resize (correct under either box-sizing mode — the first fix double-counted
+   padding and wrongly hid the rain at 1366×768), sizes each canvas to the full gutter minus a
+   10px pad, and scatters one drop per 16px slot with per-column speed/trail stagger.
+   Canvases hide themselves below a 64px strip and at mobile widths the gutters are zero, so
+   the dashboard is alone — clean by design, not by luck.
+2. **Proven by a new CDP harness** — `scripts/lab_matrix_check.sh` +
+   `scripts/cdp-matrix-check.mjs` drive headless Edge over CDP (the same plumbing as the admin
+   check; the operator's own browser is never touched). **28 checks passed, 0 failed**:
+   - 1727×893 → both canvases 263px, 16 glyph columns each (brief: 10–15, "approx" — within band)
+   - 1920×1080 → 360px, 22 columns; 1366×768 → 83px, 5 columns; 390×844 → rain off
+   - animation proven by pixel-hash sampling 1.2s apart (every desktop size repaints)
+   - no canvas ever covers the dashboard; `prefers-reduced-motion` keeps every canvas inert
+   - zero console errors, zero failed network requests
+3. **Screenshot evidence** — 8 frames (`matrix-<size>-{a,b}.png`) plus
+   `matrix-reduced-motion.png` captured into `docs/screenshots/`; the stale Oct-19 shots of the
+   broken implementation were removed so the record only carries what is true now.
+4. **Bridge serves from disk** (`asset_dir`, verified by identical md5 of served vs on-disk
+   `lab.js`) — no rebuild or bridge restart was needed; the fix went live on reload.
+
+**Not verified / unchanged this session:**
+- No wallet, Telegram, or Cloudflare work — this session was the cosmetic deliverable only.
+- The 10-tTARI proof remains BLOCKED exactly as §5 states (paused miner, no qualifying output).
+
+**Operator next actions (unchanged from §9):**
+- Run `node --test web/js/ghost/test.js` when a Node runtime is available (claim.js change
+  from §9 is still unverified by automated tests).
+- Review `docs/PAUSED_MINER_RECOVERY.md` before any resume attempt.
+- Provide a compatible wallet environment for the live wallet test.
