@@ -1543,7 +1543,7 @@ mod tests {
 
     fn binding() -> GateBinding {
         GateBinding::ootle(
-            ComponentAddress::new(ObjectKey::from_array([1u8; 32])),
+            Some(ComponentAddress::new(ObjectKey::from_array([1u8; 32]))),
             ResourceAddress::new(ObjectKey::from_array([7u8; 32])),
             10_000,
             network::LOCALNET,

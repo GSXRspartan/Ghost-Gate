@@ -130,7 +130,7 @@ pub fn binding_from_snapshot(
     snap: &GateBindingSnapshot,
 ) -> Result<crate::gate_registry::GateBinding, String> {
     use ghost_gate_core::network;
-    use tari_template_lib_types::{ComponentAddress, ResourceAddress};
+    use tari_template_lib_types::ResourceAddress;
     // The cohort and genesis identity come from the registry, never from this process's defaults:
     // a bridge that silently served a localnet gate as if it were a mainnet one would be the one
     // bug that makes every other check meaningless. An unknown cohort or a missing genesis is
@@ -151,7 +151,13 @@ pub fn binding_from_snapshot(
             ));
         }
     }
-    let component: ComponentAddress = try_parse_address(&snap.component_address, "component")?;
+    // An empty component address means the snapshot declares a credential-only gate: no on-chain
+    // component exists, so nothing is bound. Anything else must parse as a real address.
+    let component = if snap.component_address.trim().is_empty() {
+        None
+    } else {
+        Some(try_parse_address(&snap.component_address, "component")?)
+    };
     let resource: ResourceAddress = try_parse_address(&snap.resource_address, "resource")?;
     Ok(crate::gate_registry::GateBinding::ootle(
         component,

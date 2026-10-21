@@ -141,11 +141,16 @@ pub fn validate_prove_request(
         _ => return Err(ProofRefusal::KindMismatch),
     }
 
-    if issued.ootle_gate() != gate.component().copied() {
-        return Err(ProofRefusal::GateMismatch);
-    }
-    if issued.ootle_resource() != gate.resource().copied() {
-        return Err(ProofRefusal::ResourceMismatch);
+    // Ootle-only bindings. A credential-only gate has no component to compare, so the challenge's
+    // gate address is checked against the zero sentinel instead: the same deterministic value the
+    // challenge minted, so the binding holds without an on-chain component.
+    if issued.ootle().is_some() {
+        if issued.ootle_gate() != Some(gate.component().copied().unwrap_or(crate::gate_registry::NO_COMPONENT)) {
+            return Err(ProofRefusal::GateMismatch);
+        }
+        if issued.ootle_resource() != gate.resource().copied() {
+            return Err(ProofRefusal::ResourceMismatch);
+        }
     }
     if issued.threshold() != gate.threshold() {
         return Err(ProofRefusal::ThresholdMismatch);
@@ -187,7 +192,7 @@ mod tests {
 
     fn binding() -> GateBinding {
         GateBinding::ootle(
-            ComponentAddress::new(ObjectKey::from_array([1u8; 32])),
+            Some(ComponentAddress::new(ObjectKey::from_array([1u8; 32]))),
             ResourceAddress::new(ObjectKey::from_array([7u8; 32])),
             10_000,
             NETWORK,
@@ -281,7 +286,7 @@ mod tests {
         let base = binding();
         let mut gate = base.clone();
         gate.condition = crate::gate_registry::GateCondition::Ootle {
-            component: ComponentAddress::new(ObjectKey::from_array([2u8; 32])),
+            component: Some(ComponentAddress::new(ObjectKey::from_array([2u8; 32]))),
             resource: *base.resource().unwrap(),
             threshold: base.threshold(),
         };
@@ -292,7 +297,7 @@ mod tests {
 
         let mut gate = base.clone();
         gate.condition = crate::gate_registry::GateCondition::Ootle {
-            component: *base.component().unwrap(),
+            component: Some(*base.component().unwrap()),
             resource: ResourceAddress::new(ObjectKey::from_array([8u8; 32])),
             threshold: base.threshold(),
         };
@@ -303,7 +308,7 @@ mod tests {
 
         let mut gate = base.clone();
         gate.condition = crate::gate_registry::GateCondition::Ootle {
-            component: *base.component().unwrap(),
+            component: Some(*base.component().unwrap()),
             resource: *base.resource().unwrap(),
             threshold: 1,
         };
@@ -365,6 +370,103 @@ mod tests {
         assert_eq!(
             validate_prove_request(&binding(), &xtm_book, &request(1), None).unwrap_err(),
             ProofRefusal::KindMismatch
+        );
+    }
+
+    /// The credential-only case the refactor exists for: a gate with no on-chain component binds
+    /// its challenge to the zero sentinel, and a proof answering that challenge validates. The
+    /// resource, threshold, network, relying site and session must still be enforced — dropping
+    /// the component must not drop any other binding.
+    #[test]
+    fn a_component_free_credential_gate_accepts_its_own_zero_sentinel_challenge() {
+        let credential_gate = {
+            let mut g = binding();
+            g.condition = crate::gate_registry::GateCondition::Ootle {
+                component: None,
+                resource: *binding().resource().unwrap(),
+                threshold: binding().threshold(),
+            };
+            g
+        };
+        // A credential-only book holds the zero-sentinel challenge this gate mints.
+        const ZERO: ComponentAddress = ComponentAddress::new(ObjectKey::from_array([0u8; 32]));
+        let mut zero_book = ChallengeBook::new();
+        zero_book
+            .insert(
+                crate::session::AnyChallenge::Ootle(ghost_gate_core::Challenge {
+                    gate: ZERO,
+                    resource: *credential_gate.resource().unwrap(),
+                    threshold: credential_gate.threshold(),
+                    network: NETWORK,
+                    nonce: Hash32::from_array([1u8; 32]),
+                    expires_epoch: 1_000,
+                    relying_site: credential_gate.relying_site.clone(),
+                    session_commitment: MaxBytes::new_checked(b"aa".to_vec()).unwrap(),
+                }),
+                Duration::from_secs(60),
+                None,
+            )
+            .unwrap();
+        // The whole policy must still bind: every field matches, so the credential proof proceeds.
+        assert_eq!(
+            validate_prove_request(&credential_gate, &zero_book, &request(1), None),
+            Ok(crate::session::AnyChallenge::Ootle(ghost_gate_core::Challenge {
+                gate: ZERO,
+                resource: *credential_gate.resource().unwrap(),
+                threshold: credential_gate.threshold(),
+                network: NETWORK,
+                nonce: Hash32::from_array([1u8; 32]),
+                expires_epoch: 1_000,
+                relying_site: credential_gate.relying_site.clone(),
+                session_commitment: MaxBytes::new_checked(b"aa".to_vec()).unwrap(),
+            }))
+        );
+    }
+
+    /// The sentinel collision guard: the zero "no component" address must never let a
+    /// credential-only challenge authorize a component-bound gate, or vice versa. The sentinel is
+    /// deterministic, so if either direction accepted, a credential proof would silently mint
+    /// access to a consensus gate (or the reverse) with no on-chain evidence at all.
+    #[test]
+    fn the_zero_sentinel_cannot_substitute_for_a_real_component_gate() {
+        const ZERO: ComponentAddress = ComponentAddress::new(ObjectKey::from_array([0u8; 32]));
+        // Direction 1: a credential-only gate's zero-sentinel challenge presented to a
+        // component-bound gate. The real component differs from the sentinel -> GateMismatch.
+        let mut sentinel_book = ChallengeBook::new();
+        sentinel_book
+            .insert(
+                crate::session::AnyChallenge::Ootle(ghost_gate_core::Challenge {
+                    gate: ZERO,
+                    resource: *binding().resource().unwrap(),
+                    threshold: binding().threshold(),
+                    network: NETWORK,
+                    nonce: Hash32::from_array([1u8; 32]),
+                    expires_epoch: 1_000,
+                    relying_site: binding().relying_site.clone(),
+                    session_commitment: MaxBytes::new_checked(b"aa".to_vec()).unwrap(),
+                }),
+                Duration::from_secs(60),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            validate_prove_request(&binding(), &sentinel_book, &request(1), None).unwrap_err(),
+            ProofRefusal::GateMismatch
+        );
+        // Direction 2: a component-bound challenge presented to a credential-only gate. The
+        // credential gate binds nothing, so the real component address also mismatches.
+        let credential_gate = {
+            let mut g = binding();
+            g.condition = crate::gate_registry::GateCondition::Ootle {
+                component: None,
+                resource: *binding().resource().unwrap(),
+                threshold: binding().threshold(),
+            };
+            g
+        };
+        assert_eq!(
+            validate_prove_request(&credential_gate, &book(1), &request(1), None).unwrap_err(),
+            ProofRefusal::GateMismatch
         );
     }
 

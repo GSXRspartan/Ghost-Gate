@@ -599,7 +599,7 @@ fn parse_gate(entry: &str) -> Result<(String, GateBinding), String> {
     Ok((
         id.to_string(),
         GateBinding::ootle(
-            parts[0].parse().map_err(|e| format!("gate address: {e}"))?,
+            Some(parts[0].parse().map_err(|e| format!("gate address: {e}"))?),
             parts[1].parse().map_err(|e| format!("resource address: {e}"))?,
             parts[2].parse().map_err(|e| format!("threshold: {e}"))?,
             std::env::var("GG_OOTLE_NETWORK")

@@ -22,7 +22,7 @@
 
 use ghost_gate_core::xtm::XtmChallenge;
 use ghost_gate_core::network;
-use tari_template_lib_types::{ComponentAddress, Hash32 as TemplateHash32, MaxBytes, ResourceAddress};
+use tari_template_lib_types::{ComponentAddress, Hash32 as TemplateHash32, MaxBytes, ObjectKey, ResourceAddress};
 
 use crate::session::{AnyChallenge, ChallengeBook, IssuedChallenge};
 
@@ -51,9 +51,16 @@ pub enum ProofKind {
 /// prevent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GateCondition {
+    /// An Ootle gate. `component` is the on-chain gate template the **consensus** path executes
+    /// `prove_access` against; the **credential** path never calls it, so credential-only gates
+    /// may register with `component: None` — the challenge then binds to the zero component
+    /// address ([`NO_COMPONENT`]) as an explicit "no component exists" sentinel, and the
+    /// resource, threshold and network remain the authoritative policy. A `Some` component means
+    /// the consensus path may also run against it; it does not mean the component is deployed on
+    /// the gate's network.
     Ootle {
-        /// The gate component's address on chain.
-        component: ComponentAddress,
+        /// The on-chain gate component, when the consensus path is intended.
+        component: Option<ComponentAddress>,
         /// The resource the threshold is denominated in. Authority.
         resource: ResourceAddress,
         /// The raw threshold, in the resource's smallest unit.
@@ -64,6 +71,16 @@ pub enum GateCondition {
         threshold_micro: u64,
     },
 }
+
+/// The challenge-gate sentinel for a credential-only Ootle gate: the all-zero component address.
+///
+/// Credential-only gates have no on-chain component to execute, but the core `Challenge` type
+/// always carries a gate address because the consensus path compares it against the executing
+/// component. Binding the sentinel keeps that type honest: it is deterministic (both minter and
+/// validator map "no component" to the same bytes), and it can only be minted by a
+/// credential-only bridge gate — a real component gate carries its own address, so a sentinel
+/// challenge can never authorize a component gate and vice versa.
+pub const NO_COMPONENT: ComponentAddress = ComponentAddress::new(ObjectKey::from_array([0u8; 32]));
 
 impl GateCondition {
     pub fn threshold(&self) -> u64 {
@@ -103,7 +120,7 @@ pub struct GateBinding {
 impl GateBinding {
     /// An Ootle gate, the original shape.
     pub fn ootle(
-        address: ComponentAddress,
+        component: Option<ComponentAddress>,
         resource: ResourceAddress,
         threshold: u64,
         network: u8,
@@ -112,7 +129,7 @@ impl GateBinding {
         symbol: String,
     ) -> Self {
         Self {
-            condition: GateCondition::Ootle { component: address, resource, threshold },
+            condition: GateCondition::Ootle { component, resource, threshold },
             network,
             relying_site,
             divisibility,
@@ -141,9 +158,10 @@ impl GateBinding {
     }
 
     /// The gate component's address, for the Ootle kinds. `None` on L1, which has no component.
+    /// For an Ootle credential-only gate this is `None` too: no component was bound.
     pub fn component(&self) -> Option<&ComponentAddress> {
         match &self.condition {
-            GateCondition::Ootle { component, .. } => Some(component),
+            GateCondition::Ootle { component, .. } => component.as_ref(),
             GateCondition::MinotariXtm { .. } => None,
         }
     }
@@ -282,8 +300,15 @@ impl GateRegistry {
         let now = std::time::SystemTime::now();
         let challenge = match &gate.condition {
             crate::gate_registry::GateCondition::Ootle { component, resource, threshold } => {
+                // The core Challenge always carries a gate address because the consensus path
+                // compares it against the executing component. A credential-only gate has no
+                // component to execute, so the challenge binds to the zero address instead:
+                // an explicit, deterministic "no component" sentinel. The resource, threshold,
+                // network and nonce still bind the signature to this gate's policy, and the
+                // zero sentinel can only be minted by a credential-only bridge gate — a real
+                // component gate carries its own address, so the two never collide.
                 AnyChallenge::Ootle(ghost_gate_core::Challenge {
-                    gate: *component,
+                    gate: component.unwrap_or(NO_COMPONENT),
                     resource: *resource,
                     threshold: *threshold,
                     network: gate.network,
@@ -361,7 +386,7 @@ mod tests {
 
     fn binding() -> GateBinding {
         GateBinding::ootle(
-            ComponentAddress::new(ObjectKey::from_array([1u8; 32])),
+            Some(ComponentAddress::new(ObjectKey::from_array([1u8; 32]))),
             ResourceAddress::new(ObjectKey::from_array([7u8; 32])),
             1_000_000,
             NETWORK,
@@ -418,7 +443,7 @@ mod tests {
     fn a_zero_threshold_gate_is_refused() {
         let mut r = GateRegistry::new();
         let b = GateBinding::ootle(
-            *binding().component().unwrap(),
+            Some(*binding().component().unwrap()),
             *binding().resource().unwrap(),
             0,
             NETWORK,
