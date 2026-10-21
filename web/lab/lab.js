@@ -15,7 +15,7 @@
  */
 
 import { walletdProvider, sapientProvider, universeProvider, windowTariProvider } from "/js/ghost/provider.js";
-import { supportedProofModes, walletUsability, parseAmount, formatAmount, networkVerdict } from "/js/ghost/capabilities.js";
+import { supportedProofModes, walletUsability, parseAmount, formatAmount, networkVerdict, describeProviderError } from "/js/ghost/capabilities.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -234,6 +234,12 @@ async function selectMode(id) {
         });
         if (!probe.available) {
             usable = { usable: false, reason: probe.unavailableReason || "this wallet is not reachable from this page", modes: [] };
+        } else if (!probe.capabilities) {
+            // The extension is present but this site is not authorized yet (the real Sapient
+            // answers 4100 for capability reads before the account request). The wallet exists —
+            // say so, and point at the Connect button instead of declaring it unusable.
+            usable = { usable: false, reason: null, modes: [] };
+            usable.notConnectedReason = probe.unusableReason || "the wallet is not connected to this site yet";
         }
     } catch (e) {
         usable = { usable: false, reason: "provider did not answer", modes: [] };
@@ -249,6 +255,9 @@ async function selectMode(id) {
     } else if (usable.usable) {
         note.classList.add("ok");
         note.textContent = "This wallet can build the credential statement this gate accepts.";
+    } else if (usable.notConnectedReason) {
+        note.classList.add("warn");
+        note.textContent = "Sapient detected — press Connect wallet to authorize this site.";
     } else {
         note.classList.add("bad");
         note.textContent = `This wallet cannot prove this gate: ${usable.reason || "unsupported"}`;
@@ -308,24 +317,19 @@ async function connectWallet() {
             });
         }
         const provider = state.mode === "universe" ? universeProvider() : sapientProvider();
-        const probe = await provider.probe();
-        if (!probe.available) {
-            setRow("wd-status", "bad", probe.unavailableReason || "No Tari wallet answered on this page.");
-            return;
-        }
-        const caps = probe.capabilities || {};
 
-        // 1) Accounts — the wallet's own approval prompt. Read-only: it shares the public
-        //    address and grants no spend authority.
+        // 1) Accounts — FIRST, and the only wallet call this button makes that can prompt. The
+        //    real Sapient answers 4100 (not connected) for any capability read that arrives
+        //    before an authorized account request — authorization must precede every other
+        //    call. Read-only: it shares the public address and grants no spend authority. The
+        //    request fires exactly once per click; nothing here retries approval-triggering
+        //    calls, so a declined prompt is never re-asked by accident.
         let accounts;
         try {
             accounts = await provider.request("tari_requestAccounts");
         } catch (e) {
-            if (e && e.code === 4001) {
-                setRow("wd-status", "warn", "You declined the connection request. Nothing was shared.");
-            } else {
-                setRow("wd-status", "bad", `The wallet refused the account request: ${e && e.message ? e.message : e}`);
-            }
+            const d = describeProviderError(e);
+            setRow("wd-status", d.cls, d.text);
             return;
         }
         const address = Array.isArray(accounts) && accounts.length ? accounts[0] : null;
@@ -336,7 +340,18 @@ async function connectWallet() {
         $("wd-address").textContent = `${address.slice(0, 24)}…${address.slice(-10)} (${address.length} chars)`;
         setRow("wd-status", "ok", `${provider.label} connected.`);
 
-        // 2) Network — compare the wallet's own report against the gate's Ootle byte.
+        // 2) Capabilities — only after an authorized connection, or the real wallet refuses
+        //    them with 4100. A refusal here is a warning, never a hard stop: the connection
+        //    itself already succeeded.
+        let caps = null;
+        try {
+            caps = await provider.request("tari_getCapabilities");
+        } catch (e) {
+            const d = describeProviderError(e);
+            setRow("wd-network", d.cls, d.text);
+        }
+
+        // 3) Network — compare the wallet's own report against the gate's Ootle byte.
         let netName = null;
         try { netName = await provider.request("tari_getNetwork"); } catch { /* optional */ }
         const gate = state.gate;
@@ -347,20 +362,21 @@ async function connectWallet() {
             $("wd-network").textContent = netName ? `${netName} (no gate selected, so no verdict)` : "the wallet did not report a network";
         }
 
-        // 3) Capabilities — the flags that decide which proof modes this account can offer.
-        const capNames = Object.entries(caps).filter(([, v]) => v === true).map(([k]) => k);
+        // 4) Capabilities — the flags that decide which proof modes this account can offer.
+        const capNames = caps ? Object.entries(caps).filter(([, v]) => v === true).map(([k]) => k) : [];
         $("wd-caps-row").hidden = false;
         $("wd-caps").textContent = capNames.length
             ? capNames.join(", ")
-            : "the wallet reported no capabilities this gate can use";
-        if (!probe.modes.length) {
-            setRow("wd-status", "warn", `Connected, but this account supports none of Ghost Gate's proof modes.`);
+            : "the wallet did not report capabilities, so no proof mode can be assessed yet";
+        const credOk = caps && caps.privateSpend === true && caps.minimumValuePromise === true && caps.ownershipProof === true;
+        if (!credOk) {
+            setRow("wd-status", "warn", "Connected, but this account cannot offer the credential proof this gate's mode needs.");
         }
 
-        // 4) Wallet-ownership signature — only when the wallet offers it, and only over a nonce
+        // 5) Wallet-ownership signature — only when the wallet offers it, and only over a nonce
         //    this page generated. It proves the person holds the wallet, not that the wallet
         //    holds any asset, and it is never an eligibility proof.
-        if (caps.walletOwnershipProof === true) {
+        if (caps && caps.walletOwnershipProof === true) {
             const nonce = Array.from(crypto.getRandomValues(new Uint8Array(16)),
                 (b) => b.toString(16).padStart(2, "0")).join("");
             try {

@@ -12,7 +12,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { PROOF_MODES, supportedProofModes, walletUsability, networkMatches, parseAmount, formatAmount } from "./capabilities.js";
+import { PROOF_MODES, supportedProofModes, walletUsability, networkMatches, parseAmount, formatAmount, networkVerdict, describeProviderError } from "./capabilities.js";
 import { sapientProvider, universeProvider, walletdProvider } from "./provider.js";
 
 /** Installs a minimal fake window with a provider object, returns an uninstaller. */
@@ -74,6 +74,80 @@ test("the network check compares Ootle bytes, tolerating name case", () => {
   // The Universe trap: tari_getNetwork returns the Ootle network, never the L1 one. A gate bound
   // to the Ootle byte must not be "verified" against an L1 network name.
   assert.equal(networkMatches("esmeralda", names, 0x10).ok, false);
+});
+
+test("networkVerdict names the mismatch and keeps the gate as the blocker", () => {
+  const v = networkVerdict("esmeralda", 0x10);
+  assert.equal(v.ok, false);
+  assert.equal(v.byte, 0x26);
+  assert.match(v.verdict, /mismatch/i);
+  assert.match(v.verdict, /blocked by the gate/);
+  assert.match(networkVerdict("esmeralda", 0x26).verdict, /the gate's own network/i);
+  assert.match(networkVerdict(null, 0x10).verdict, /did not report a network/i);
+  assert.match(networkVerdict("moonnet", 0x10).verdict, /not a cohort this gate can bind to/i);
+});
+
+test("probe with the real Sapient's 4100: the wallet is available, just not connected", () => {
+  // The physical Sapient refuses capability reads before an authorized account request. The
+  // mock ones answered freely, which is exactly why 4100 only showed up in physical testing.
+  const strict = {
+    isTariWallet: true,
+    request(args) {
+      if (args.method === "tari_getCapabilities") {
+        return Promise.reject(Object.assign(new Error("not connected"), { code: 4100 }));
+      }
+      return Promise.resolve([]);
+    },
+  };
+  const undo = withWindow(strict);
+  try {
+    const probe = sapientProvider().probe().then((p) => {
+      assert.equal(p.available, true, "the extension is present — it must not read as 'no wallet'");
+      assert.equal(p.capabilities, null);
+      assert.equal(p.modes.length, 0);
+      assert.match(p.unusableReason, /not connected/i);
+      assert.match(p.unusableReason, /Connect wallet/i);
+    });
+    return probe;
+  } finally {
+    undo();
+  }
+});
+
+test("no provider on the page: unavailable with the honest install reason", () => {
+  const undo = withWindow(null);
+  try {
+    return sapientProvider().probe().then((p) => {
+      assert.equal(p.available, false);
+      assert.match(p.unavailableReason, /No Tari wallet answered/i);
+    });
+  } finally {
+    undo();
+  }
+});
+
+test("describeProviderError names 4001, 4100, 4200, locked and generic distinctly", () => {
+  const rejected = describeProviderError({ code: 4001, message: "user rejected" });
+  assert.equal(rejected.cls, "warn");
+  assert.match(rejected.text, /declined/i);
+
+  const unauthorized = describeProviderError({ code: 4100, message: "not connected" });
+  assert.equal(unauthorized.cls, "bad");
+  assert.match(unauthorized.text, /not connected/i);
+  assert.match(unauthorized.text, /Connect or reconnect/i);
+  assert.doesNotMatch(unauthorized.text, /capabilities/i, "4100 must never claim missing capabilities");
+
+  const unsupported = describeProviderError({ code: 4200, message: "unsupported" });
+  assert.equal(unsupported.cls, "bad");
+  assert.match(unsupported.text, /does not support/i);
+
+  const locked = describeProviderError({ message: "wallet is locked" });
+  assert.equal(locked.cls, "warn");
+  assert.match(locked.text, /locked/i);
+
+  const generic = describeProviderError({ message: "something odd" });
+  assert.equal(generic.cls, "bad");
+  assert.match(generic.text, /something odd/);
 });
 
 test("amounts parse as strings or bigints and never as floats", () => {

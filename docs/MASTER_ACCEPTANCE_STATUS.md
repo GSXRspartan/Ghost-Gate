@@ -350,3 +350,42 @@ select a gate, choose "Sapient — Ootle L2 · credential", press **Connect wall
 the extension's prompt. Expect: address shown, mismatch verdict (Esmeralda vs localnet —
 correct for these demo gates), capability list, and the optional read-only signature. Not
 labelled LIVE WALLET VERIFIED until the operator confirms the real prompt.
+
+---
+
+## 13. Session log — 2026-10-20 (physical 4100 fixed: authorization now precedes every read)
+
+**The physical evidence:** the operator's real Sapient answered `tari_getCapabilities` with
+**4100 (not connected)** because the Connect handler probed capabilities *before* asking for
+accounts. The mock providers accepted caps freely — which is exactly why the failure only
+showed in physical testing.
+
+**Fix — the actual authorization sequence, not the error text:**
+1. `connectWallet()` now calls `tari_requestAccounts` FIRST and only once per click (no
+   automatic retries of approval-triggering calls). Only after an authorized account request
+   does it read `tari_getCapabilities`, then `tari_getNetwork`, then the verdict and the
+   read-only wallet-ownership signature.
+2. `describeProviderError()` (capabilities.js) gives every caller one distinct taxonomy:
+   4001 declined (warn) · 4100 not connected (bad, actionable: "Connect or reconnect Sapient…
+   then press Connect wallet again") · 4200 unsupported · locked-wallet wording · generic
+   message passthrough. 4100 never claims missing capabilities.
+3. `probe()` no longer treats 4100 as "no wallet": the extension is reported `available` with
+   `capabilities: null` and a pointer at the Connect button. The passive note under the
+   selector reads "Sapient detected — press Connect wallet to authorize this site."
+4. `claim.js` says the honest thing for a detected-but-not-connected wallet instead of
+   "No Tari browser wallet answered".
+
+**Verified (AUTOMATED TESTS ONLY):**
+- JS suite now **23/23** (4 new regression tests: 4100 probe shape; the error taxonomy; the
+  mismatch verdict wording; the no-provider state).
+- `scripts/lab_connect_check.sh` now **14/14**, including a NEW strict-order mock that
+  reproduces the physical failure mode (caps → 4100 before accounts) and proves the fix in a
+  real headless Edge: accounts-first connects, address shown, mismatch verdict shown, passive
+  state points at Connect.
+- Bridge serves from disk; no rebuild or restart was needed.
+
+**Operator's physical milestone (awaiting your result):** open http://127.0.0.1:7799/lab,
+select a gate, choose "Sapient — Ootle L2 · credential", press **Connect wallet**, approve the
+extension's prompt. Expect the real address, the Esmeralda/Localnet mismatch verdict, the
+capability list, and the optional possession-only signature — with no spend request. Not
+LIVE WALLET VERIFIED until you confirm it.

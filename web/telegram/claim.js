@@ -81,6 +81,7 @@ async function main() {
   }
   const candidates = [sapientProvider(), universeProvider()];
   let provider = null;
+  let detectedButDisconnected = false;
   for (const p of candidates) {
     try {
       const probe = await p.probe();
@@ -88,7 +89,17 @@ async function main() {
         provider = p;
         break;
       }
+      // The extension is present but this site is not authorized yet (4100): a real wallet is
+      // sitting right there, so "no wallet answered" would be a lie. Name the actual state.
+      if (probe.available && !probe.capabilities) detectedButDisconnected = true;
     } catch { /* try the next */ }
+  }
+  if (!provider && detectedButDisconnected) {
+    return fail(
+      "A Tari wallet (Sapient or Universe) is installed but this page is not connected to it " +
+      "yet. Open the Privacy Lab, press Connect wallet to authorize this site, then retry the " +
+      "join link.",
+    );
   }
   if (!provider) {
     return fail(

@@ -183,6 +183,35 @@ export function networkVerdict(reportedName, expectedByte) {
 }
 
 /**
+ * One place that knows the provider error taxonomy, so every caller reports the same distinct
+ * states instead of a generic failure. Codes follow the provider convention carried in
+ * `tari-dapp.d.ts`: 4001 rejected · 4100 not connected · 4200 unsupported · -32603 internal.
+ * 4100 is an actionable authorization state — never evidence that the wallet lacks capabilities.
+ *
+ * @param {{ code?: number, message?: string }|string} e
+ * @returns {{ cls: "warn"|"bad", text: string }}
+ */
+export function describeProviderError(e) {
+  const code = e && typeof e === "object" ? e.code : undefined;
+  const message = e && typeof e === "object" ? String(e.message || e) : String(e || "unknown error");
+  if (code === 4001) {
+    return { cls: "warn", text: "You declined the request in your wallet. Nothing was shared." };
+  }
+  if (code === 4100) {
+    return { cls: "bad", text:
+      "This site is not connected to your wallet yet. Connect or reconnect Sapient — unlock the " +
+      "wallet, approve this site if it asks — then press Connect wallet again." };
+  }
+  if (code === 4200) {
+    return { cls: "bad", text: "This wallet does not support that call." };
+  }
+  if (/lock/i.test(message)) {
+    return { cls: "warn", text: "The wallet appears to be locked. Unlock Sapient, then press Connect wallet again." };
+  }
+  return { cls: "bad", text: `The wallet refused the request: ${message}` };
+}
+
+/**
  * Amounts are strings or bigints, never JS numbers (they exceed MAX_SAFE_INTEGER). Returns a BigInt
  * or null; null means "not a usable amount", which the caller must treat as an error rather than 0.
  *

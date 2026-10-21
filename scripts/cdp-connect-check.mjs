@@ -93,6 +93,41 @@ const MOCK_REJECTING = `
   window.dispatchEvent(new Event("tari#initialized"));
 `;
 
+/** The physical Sapient's behavior: capability reads BEFORE an authorized account request
+ *  answer 4100 (not connected). A mock that accepted caps freely is what let the old call
+ *  order look fine in simulation and fail only on the real wallet — this mock is strict so the
+ *  harness reproduces the physical failure mode and proves the fix, not just the display. */
+const MOCK_STRICT_ORDER = `
+  window.tari = (() => {
+    let connected = false;
+    return {
+      isTariWallet: true,
+      request(args) {
+        const m = args.method;
+        if (!connected && m !== "tari_requestAccounts" && m !== "tari_getAccounts") {
+          return Promise.reject(Object.assign(new Error("not connected"), { code: 4100 }));
+        }
+        if (m === "tari_requestAccounts") {
+          connected = true;
+          return Promise.resolve(["otl_esm_1rghzs3zkfrvajj39r7pm26q7uwne6dxrm2ztf29aq8y4zezpppjs95znmg2rgwr6rjgxq2p7xzrpy3h5nc8q22gnkudn9axgsruxjuqae5f2t"]);
+        }
+        if (m === "tari_getCapabilities") {
+          return Promise.resolve({
+            privateSpend: true, minimumValuePromise: true, ownershipProof: true,
+            walletOwnershipProof: true, transactionResultLookup: true, transactionRequests: true,
+          });
+        }
+        if (m === "tari_getNetwork") return Promise.resolve("esmeralda");
+        if (m === "tari_signWalletOwnershipChallenge") {
+          return Promise.resolve({ walletAddress: "otl_esm_1rghzs3", publicNonce: "ab".repeat(32), signature: "cd".repeat(64) });
+        }
+        return Promise.reject(Object.assign(new Error("mock: unsupported " + m), { code: 4200 }));
+      },
+    };
+  })();
+  window.dispatchEvent(new Event("tari#initialized"));
+`;
+
 async function connect() {
   const targets = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
   const page = targets.find((t) => t.type === "page");
@@ -179,6 +214,32 @@ async function main() {
   await sleep(900);
   const rej = await evaluate(`document.getElementById("wd-status").textContent`);
   check("declined state is truthful", /declined/i.test(rej || ""), rej);
+
+  console.log("\n== 4. strict-order mock: caps 4100 before accounts (the physical failure mode) ==");
+  await reloadWithMock(MOCK_STRICT_ORDER);
+  await evaluate(`(() => { const s = document.getElementById("wallet-select");
+    s.value = [...s.options].find(o => /Sapient/i.test(o.textContent)).value;
+    s.dispatchEvent(new Event("change")); return s.value; })()`);
+  await sleep(300);
+  // The passive note must say the wallet was detected and needs connecting — not "cannot prove".
+  const passive = await evaluate(`document.getElementById("wallet-note").textContent`);
+  check("passive state points at Connect, not 'cannot prove'",
+    /Connect wallet/i.test(passive || "") && !/cannot prove/i.test(passive || ""), passive);
+  await evaluate(`document.getElementById("connect-wallet").click()`);
+  await sleep(1200);
+  const strict = await evaluate(`(() => {
+    const rows = {};
+    for (const id of ["wd-status", "wd-address", "wd-network"]) {
+      rows[id] = document.getElementById(id) ? document.getElementById(id).textContent : null;
+    }
+    return rows;
+  })()`);
+  check("accounts-first ordering connects the strict wallet",
+    /connected/i.test(strict["wd-status"] || ""), strict["wd-status"]);
+  check("strict wallet's Esmeralda address shown",
+    (strict["wd-address"] || "").includes("otl_esm"), strict["wd-address"]);
+  check("strict wallet's mismatch verdict shown",
+    /mismatch/i.test(strict["wd-network"] || ""), strict["wd-network"]);
 
   console.log("\n== console health ==");
   check("no console errors", consoleErrors.length === 0, consoleErrors.slice(0, 3).join(" | "));

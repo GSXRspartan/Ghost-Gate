@@ -86,6 +86,21 @@ export function windowTariProvider(id, label, discover) {
       try {
         caps = await found.provider.request({ method: "tari_getCapabilities" });
       } catch (e) {
+        if (e && e.code === 4100) {
+          // The extension is present but this site is not authorized yet: the real Sapient
+          // refuses capability reads before tari_requestAccounts (the mock ones answered
+          // freely, which is exactly why 4100 only showed up in physical testing). The wallet
+          // is AVAILABLE — it just needs the user's connect click. Never treat this as a
+          // missing wallet or as a missing capability.
+          return {
+            id, label,
+            available: true,
+            unavailableReason: null,
+            capabilities: null,
+            modes: [],
+            unusableReason: "the wallet is not connected to this site yet — press Connect wallet to authorize it",
+          };
+        }
         return {
           id, label,
           available: false,
