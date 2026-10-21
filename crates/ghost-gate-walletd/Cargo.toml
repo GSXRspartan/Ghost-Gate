@@ -33,6 +33,10 @@ zeroize = "1.8"
 rand = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
+# Raw JSON chain reads for cohorts the pinned client cannot parse (Esmeralda runs indexer 0.47.0,
+# whose REST renamed `substate` to `state`). Same reqwest line the workspace already pins.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 tari_ootle_transaction = { workspace = true }

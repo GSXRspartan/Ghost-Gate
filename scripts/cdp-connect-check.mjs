@@ -198,6 +198,10 @@ async function main() {
   check("network mismatch surfaced honestly",
     /mismatch/i.test(d.rows["wd-network"] || "") && /blocked by the gate/i.test(d.rows["wd-network"] || ""),
     d.rows["wd-network"]);
+  const noteAfter = await evaluate(`document.getElementById("wallet-note").textContent`);
+  check("stale 'press Connect' note replaced after real connection",
+    /connected/i.test(noteAfter || "") && !/press Connect wallet/i.test(noteAfter || ""),
+    noteAfter);
   check("capabilities listed",
     (d.rows["wd-caps"] || "").includes("privateSpend") && (d.rows["wd-caps"] || "").includes("ownershipProof"),
     d.rows["wd-caps"]);

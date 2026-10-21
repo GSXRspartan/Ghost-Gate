@@ -26,7 +26,7 @@ use ghost_gate_bridge::wallet::{
 };
 use ghost_gate_bridge::xtm::{XtmChannel, XtmProofArtifact, XtmProofRequest, XtmWalletStatus};
 use ghost_gate_bridge::{GateBinding, GateRegistry, OriginPolicy};
-use ghost_gate_walletd::IndexerChainReader;
+use ghost_gate_walletd::{IndexerChainReader, JsonChainReader};
 use tari_template_lib_types::stealth::StealthTransferStatement;
 
 fn main() -> ExitCode {
@@ -43,6 +43,12 @@ fn main() -> ExitCode {
         if let Err(e) = registry.register(id.clone(), binding.clone()) {
             eprintln!("ghost-gate-bridge: gate {id}: {e}");
             return ExitCode::FAILURE;
+        }
+        // Apply the per-gate scope here too: Config::build() records it on its own throwaway
+        // registry, but the bridge's runtime registry is built in this loop, so the scope must
+        // land here or the env setting silently never reaches the credential route.
+        if let Ok(mode) = std::env::var(format!("GG_GATE_USE_{}", id.to_uppercase().replace('-', "_"))) {
+            registry.set_use_mode(id, &mode);
         }
     }
 
@@ -242,19 +248,68 @@ fn main() -> ExitCode {
         .ok()
         .filter(|v| !v.trim().is_empty());
     let outcome = match indexer {
-        Some(endpoint) => match IndexerChainReader::connect(&endpoint) {
-            Ok(reader) => {
-                println!("  indexer: {endpoint} (credential mode enabled)");
-                let mut bridge = Bridge::assemble_full(registry, wallet, config.origins, reader, xtm_channel, xtm_chain);
-                if let Err(e) = attach_access_plane(&mut bridge) {
-                    eprintln!("ghost-gate-bridge: {e}");
-                    return ExitCode::FAILURE;
+        Some(endpoint) => {
+            // Which reader? Detect the cohort from the indexer's own /health version: 0.47+
+            // answers `state` (the pinned 0.42 client cannot parse that), anything older parses
+            // through the pinned client. Wrong-version reads are refused, never degraded.
+            let version = runtime
+                .block_on(async {
+                    reqwest::get(format!("{}/health", endpoint.trim_end_matches('/')))
+                        .await
+                        .ok()?
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()?
+                        .get("version")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_default();
+            // Versions are "MAJOR.MINOR..." — e.g. "0.47.0" — so the minor carries the cohort
+            // bump here (0.x series). Parse the SECOND component, not the first.
+            let minor = version
+                .split('.')
+                .nth(1)
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(0);
+            let json_reader =
+                std::env::var("GG_INDEXER_JSON").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false)
+                    || minor >= 47;
+            if json_reader {
+                match JsonChainReader::connect(&endpoint) {
+                    Ok(reader) => {
+                        println!(
+                            "  indexer: {endpoint} (credential mode enabled, dual-shape JSON reader{}",
+                            if version.is_empty() { String::new() } else { format!(", indexer {version}") }
+                        );
+                        let mut bridge = Bridge::assemble_full(registry, wallet, config.origins, reader, xtm_channel, xtm_chain);
+                        if let Err(e) = attach_access_plane(&mut bridge) {
+                            eprintln!("ghost-gate-bridge: {e}");
+                            return ExitCode::FAILURE;
+                        }
+                        runtime.block_on(ghost_gate_bridge::server::serve(&config.bind, bridge))
+                    }
+                    Err(e) => {
+                        eprintln!("ghost-gate-bridge: cannot connect to the indexer at {endpoint}: {e}");
+                        return ExitCode::FAILURE;
+                    }
                 }
-                runtime.block_on(ghost_gate_bridge::server::serve(&config.bind, bridge))
-            }
-            Err(e) => {
-                eprintln!("ghost-gate-bridge: cannot connect to the indexer at {endpoint}: {e}");
-                return ExitCode::FAILURE;
+            } else {
+                match IndexerChainReader::connect(&endpoint) {
+                    Ok(reader) => {
+                        println!("  indexer: {endpoint} (credential mode enabled)");
+                        let mut bridge = Bridge::assemble_full(registry, wallet, config.origins, reader, xtm_channel, xtm_chain);
+                        if let Err(e) = attach_access_plane(&mut bridge) {
+                            eprintln!("ghost-gate-bridge: {e}");
+                            return ExitCode::FAILURE;
+                        }
+                        runtime.block_on(ghost_gate_bridge::server::serve(&config.bind, bridge))
+                    }
+                    Err(e) => {
+                        eprintln!("ghost-gate-bridge: cannot connect to the indexer at {endpoint}: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
             }
         },
         None => {
@@ -468,6 +523,12 @@ impl Config {
             registry
                 .register(id.clone(), binding.clone())
                 .map_err(|e| format!("gate {id}: {e}"))?;
+            // Per-gate scope: the credential mode (browser wallets + Telegram) only answers for
+            // gates the operator explicitly scopes to it. Env form: GG_GATE_USE_<ID>=telegram.
+            // Unset means "website" — the safe default that never grants Telegram membership.
+            if let Ok(mode) = std::env::var(format!("GG_GATE_USE_{}", id.to_uppercase().replace('-', "_"))) {
+                registry.set_use_mode(id, &mode);
+            }
         }
 
         Ok(Self {
@@ -541,7 +602,10 @@ fn parse_gate(entry: &str) -> Result<(String, GateBinding), String> {
             parts[0].parse().map_err(|e| format!("gate address: {e}"))?,
             parts[1].parse().map_err(|e| format!("resource address: {e}"))?,
             parts[2].parse().map_err(|e| format!("threshold: {e}"))?,
-            ghost_gate_core::network::LOCALNET,
+            std::env::var("GG_OOTLE_NETWORK")
+                .ok()
+                .and_then(|v| u8::from_str_radix(v.trim_start_matches("0x"), 16).ok())
+                .unwrap_or(ghost_gate_core::network::LOCALNET),
             tari_template_lib_types::MaxBytes::new_checked(b"vip.example".to_vec()).expect("short"),
             parts[3].parse().map_err(|e| format!("divisibility: {e}"))?,
             parts[4..].join(":"),

@@ -339,6 +339,13 @@ async function connectWallet() {
         }
         $("wd-address").textContent = `${address.slice(0, 24)}…${address.slice(-10)} (${address.length} chars)`;
         setRow("wd-status", "ok", `${provider.label} connected.`);
+        // The passive note under the selector must not keep last session's "press Connect" text:
+        // once the wallet has actually answered, it reports the connected state and — once the
+        // network verdict is in — whether the selected gate is even attemptable from here.
+        const note = $("wallet-note");
+        note.classList.remove("ok", "warn", "bad");
+        note.classList.add("ok");
+        note.textContent = `${provider.label} connected. Connecting is diagnostic only — this grants nothing.`;
 
         // 2) Capabilities — only after an authorized connection, or the real wallet refuses
         //    them with 4100. A refusal here is a warning, never a hard stop: the connection
@@ -358,6 +365,15 @@ async function connectWallet() {
         if (gate) {
             const v = networkVerdict(netName, gate.network);
             setRow("wd-network", v.ok ? "ok" : "warn", v.verdict);
+            // The note now carries the compatibility verdict: the connected state plus whether
+            // the selected gate can be attempted from this wallet, in one honest sentence.
+            if (!v.ok) {
+                note.classList.remove("ok");
+                note.classList.add("warn");
+                note.textContent = `${provider.label} connected — but this gate is on a different network, so proving is blocked here. Connecting for diagnostics is fine.`;
+            } else {
+                note.textContent = `${provider.label} connected and on the gate's network — this account may prove the gate.`;
+            }
         } else {
             $("wd-network").textContent = netName ? `${netName} (no gate selected, so no verdict)` : "the wallet did not report a network";
         }

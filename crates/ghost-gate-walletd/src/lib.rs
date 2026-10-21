@@ -49,8 +49,10 @@
 //! [`submit_transaction`]: tari_ootle_walletd_client::WalletDaemonClient::submit_transaction
 //! [`wait_transaction_result`]: tari_ootle_walletd_client::WalletDaemonClient::wait_transaction_result
 
+mod esmeralda;
 mod indexer;
 
+pub use esmeralda::JsonChainReader;
 pub use indexer::IndexerChainReader;
 
 use std::time::Duration;
