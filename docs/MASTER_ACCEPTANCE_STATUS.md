@@ -404,3 +404,67 @@ LIVE WALLET VERIFIED until you confirm it.
   (empty component, threshold 10_000_000, network 38, tTARI, useMode both).
   parse_gate accepts an empty component; the banner prints
   `<credential-only: no component>` (the previous version panicked on unwrap(None)).
+
+## 14. Session log — 2026-10-21 (wrong-mode advertisement fixed; RESUME EXISTING PROOF wired)
+
+**What the physical test exposed.** The operator's real shield (tx `961341ef…`) succeeded and
+left a qualifying output — `utxo_0101…0101_5ad3313f43e35ac5d89c7e5819ad12852aacc6534a21ddbf6b2
+37b7fc5be8c6f`, `minimum_value_promise = 10_000_000`, indexer `verified:true`, unspent — but
+the Lab then steered the attempt into the wrong flow: `/lab/gates` advertised EVERY Ootle gate
+as `proofMode: "consensus"`, the picker defaulted to the cheapest gate (`esm-diag`, threshold
+1_000) with the wallet daemon auto-selected, and the walletd-dependent `/prove` route answered
+`"The wallet could not be reached; no proof was built."` (attempt `7f66da18…`). The operator
+then shielded anyway; the site stalled after the signature because the final credential POST
+had no error handling.
+
+**Root causes fixed (this commit):**
+1. `lab_gates` / `lab_simulate` / the challenge trace event all map proof mode through one
+   `proof_mode_label(kind, component)`: an Ootle gate with NO component is advertised
+   **`credential`**, never `consensus`. The credential-only simulation no longer invents a
+   `consensus.observed` step.
+2. `/gate/{id}/prove` refuses a credential-only gate with **HTTP 409** and an explicit
+   "credential-only … use the credential flow" message BEFORE parsing the body or touching a
+   wallet; the challenge is not consumed.
+3. Lab frontend: a credential gate offers only Sapient / Tari Universe (walletd is not
+   offered); default gate selection prefers an explicit `?gate=` URL param, then a remembered
+   explicit choice (localStorage `gg-lab-gate`), then the first credential-mode gate, then the
+   cheapest; an explicit choice always sticks. `prove()` refuses a credential-gate × walletd
+   pairing up front.
+4. RESUME EXISTING PROOF: a credential gate shows a substate-id input; the flow mints a FRESH
+   challenge, signs it over the existing output (the gate's resource is passed explicitly —
+   `signChallenge(substateId, challenge, resourceAddress)` in provider.js, so no shield needs
+   to have run this session), and POSTs the same `/gate/{id}/credential` request. Successful
+   builds/resumes remember the output id (localStorage `gg-last-output`) and prefill it.
+5. The credential POST is wrapped in try/catch/finally: the buttons always re-enable, and a
+   failure is named (BRIDGE UNREACHABLE / MALFORMED REQUEST / WRONG GATE SCOPE / PROOF REFUSED
+   / BRIDGE NOT CONFIGURED / BRIDGE ERROR) instead of a silent stall. The credential steps are
+   relabelled ("Verify the signed output against chain state", no block wait).
+6. Drive-by: the registry's version-identity check compared `application_id` with itself
+   (clippy `eq_op` — a tautology, always false); it now checks the one identity a policy
+   actually carries (`policy.gate_id` vs the version's gate id).
+
+**Verified (AUTOMATED TESTS ONLY):**
+- Bridge lib **133/133** (3 new: credential advertisement for a componentless gate; the 409
+  refusal leaves the challenge live and never reaches the wallet; the simulation names the
+  real mode and invents no consensus step). Registry 6/6. JS **25/25** (2 new: explicit-resource
+  signing works with no prior shield; absent resource refuses honestly).
+- Live bridge on **:7897** restarted (new pid, same env): `/lab/gates` now shows
+  `esm10 → proofMode "credential"`, `esm-diag → "consensus"`; `POST /gate/esm10/prove` → 409
+  credential-only refusal. Connect CDP harness **13/15** against the Esmeralda bridge — the 2
+  "failures" are the harness's stale cross-network expectation (it asserts a MISMATCH verdict;
+  on this bridge wallet and gate are both byte 38, and the page's honest match verdict is
+  correct). Matrix harness **28/28**, no console errors.
+
+**Operator's physical resume steps (the 961341ef output — no new shield, no new spend):**
+1. Reload http://127.0.0.1:7897/lab — the picker should default to **esm10 — 10 tTARI**, badge
+   `credential · wallet extension`; wallet **Sapient** auto-selected.
+2. Press **Connect wallet**, approve the account prompt (already authorized from the last test).
+3. Paste the output id into the resume box:
+   `utxo_0101010101010101010101010101010101010101010101010101010101010101_5ad3313f43e35ac5d89c7e5819ad12852aacc6534a21ddbf6b237b7fc5be8c6f`
+4. Press **Resume existing proof**, approve ONLY the signature prompt in Sapient (it names the
+   resource and the challenge — there is no transaction this time).
+5. Expect: step "Verify the signed output against chain state" → **ACCESS GRANTED**, with the
+   receipt floor 10 tTARI and required 10 tTARI. The bridge is not registry-backed, so the
+   panel will note that no session token is issued until the admin plane is wired.
+
+Not ACCESS-GRANTED-verified until the operator confirms.

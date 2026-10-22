@@ -247,7 +247,12 @@ impl Registry {
                     v.application_id, v.gate_id, v.version
                 ));
             }
-            if v.policy.gate_id != v.gate_id || v.application_id != v.application_id {
+            // The policy must name the gate this version was filed under. (The application
+            // identity is already established two lines up: the version was looked up through
+            // `application(&v.application_id)`, and a policy carries no application id of its
+            // own to compare. The old second operand compared the field with itself — a
+            // tautology clippy rightly refuses — so the honest check is this one comparison.)
+            if v.policy.gate_id != v.gate_id {
                 return Err("policy version identity mismatch".into());
             }
             // A version belongs to the ledger the application is bound to. If the application was

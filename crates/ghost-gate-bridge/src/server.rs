@@ -210,6 +210,28 @@ pub fn default_permitted_hosts() -> std::collections::BTreeSet<String> {
         .collect()
 }
 
+/// The proof mode a gate actually offers, as the Lab advertises it.
+///
+/// An Ootle gate WITH a component offers the consensus path (a statement executed at that
+/// component) and may also accept credential proofs. An Ootle gate with NO component is
+/// credential-only: there is nothing to execute or submit a consensus proof against, so
+/// advertising "consensus" would steer a browser wallet into the walletd prove route, whose
+/// only honest answer is a refusal. This string is what the Lab dispatches on, so it must
+/// tell the truth — the physical-test failure this guards against was exactly a credential-only
+/// gate advertised as "consensus".
+fn proof_mode_label(
+    kind: crate::gate_registry::ProofKind,
+    component: Option<&tari_template_lib_types::ComponentAddress>,
+) -> &'static str {
+    match kind {
+        crate::gate_registry::ProofKind::Ootle => match component {
+            Some(_) => "consensus",
+            None => "credential",
+        },
+        crate::gate_registry::ProofKind::MinotariXtm => "xtm",
+    }
+}
+
 /// Lowercases a `Host` header value and drops its port, if any.
 ///
 /// Bracketed IPv6 (`[::1]:7799`) is handled by stripping after the last `:`, which is safe because
@@ -539,10 +561,10 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
         let mut gates = Vec::new();
         for id in self.gates.ids().collect::<Vec<_>>() {
             let Some(meta) = self.gates.public_metadata(id) else { continue };
-            let proof_mode = match meta.proof_kind {
-                crate::gate_registry::ProofKind::Ootle => "consensus",
-                crate::gate_registry::ProofKind::MinotariXtm => "xtm",
-            };
+            // The component decides the mode: an Ootle gate without one is credential-only, and
+            // the Lab must never be told it can run the walletd consensus path against it.
+            let proof_mode =
+                proof_mode_label(meta.proof_kind, self.gates.get(id).and_then(|g| g.component()));
             // Whether this gate is registry-backed decides whether a session is issued at all; the
             // page shows that honestly rather than promising a grant it cannot deliver.
             let access_plane = self.access.as_mut().and_then(|a| a.plane.current_policy_hash(id));
@@ -593,10 +615,10 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             return Response::error(404, format!("GG: no such gate: {gate_id}"));
         };
         let attempt_id = new_attempt_id();
-        let proof_mode = match meta.proof_kind {
-            crate::gate_registry::ProofKind::Ootle => "consensus",
-            crate::gate_registry::ProofKind::MinotariXtm => "xtm",
-        };
+        // Same rule as /lab/gates: the component decides the mode, and the simulation must
+        // illustrate the shape the REAL flow would take.
+        let proof_mode =
+            proof_mode_label(meta.proof_kind, self.gates.get(&gate_id).and_then(|g| g.component()));
         let mut trace = crate::trace::Trace::new(attempt_id.clone(), meta.gate_id.clone(), true);
         use crate::trace::ev;
         ev::attempt_started(&mut trace);
@@ -610,7 +632,11 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
         // measurements, and they are stamped simulated so no reader can mistake them for evidence.
         ev::verifier_checked(&mut trace, meta.threshold, meta.threshold.saturating_mul(3), 7);
         ev::policy_binding(&mut trace);
-        ev::consensus_observed(&mut trace, "simulated0000tx");
+        // A credential-only gate has no consensus step to illustrate; inventing one would teach
+        // the wrong shape. The signature-against-chain-state check IS its verdict step.
+        if proof_mode != "credential" {
+            ev::consensus_observed(&mut trace, "simulated0000tx");
+        }
         ev::access_granted(&mut trace, 604_800, true);
         let json = trace.to_json();
         self.store_trace(trace);
@@ -754,10 +780,8 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             ev::attempt_started(&mut trace);
             let meta = self.gates.public_metadata(id);
             if let Some(meta) = &meta {
-                let mode = match meta.proof_kind {
-                    crate::gate_registry::ProofKind::Ootle => "consensus",
-                    crate::gate_registry::ProofKind::MinotariXtm => "xtm",
-                };
+                let mode =
+                    proof_mode_label(meta.proof_kind, self.gates.get(id).and_then(|g| g.component()));
                 ev::gate_selected(&mut trace, &meta.gate_id, meta.threshold, mode);
             }
             ev::challenge_minted(&mut trace, id);
@@ -983,6 +1007,19 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
         let Some(gate) = self.gates.get(id).cloned() else {
             return Response::error(404, "GG: no such gate");
         };
+        // A credential-only gate has no on-chain component, so there is nothing the consensus
+        // path could execute against and nothing walletd could submit. Refuse BEFORE the body
+        // is even parsed, with the honest reason: a browser wallet pointed here gets a clear
+        // "wrong flow" instead of a walletd timeout, and any challenge it already holds stays
+        // live for the credential route that can actually answer it.
+        if gate.kind() == crate::gate_registry::ProofKind::Ootle && gate.component().is_none() {
+            return Response::error(
+                409,
+                "GG: this gate is credential-only: it binds no on-chain component, so a consensus \
+                 proof cannot be built for it. Use the credential flow — sign this bridge's \
+                 challenge over a qualifying output and POST it to /gate/{id}/credential.",
+            );
+        }
         let parsed: ProveRequest = match serde_json::from_str(&request.body) {
             Ok(v) => v,
             Err(e) => return Response::error(400, format!("GG: malformed proof request: {e}")),
@@ -2643,5 +2680,93 @@ mod tests {
         b.gates.set_use_mode("g1", "telegram");
         let r2 = b.handle(&req).await;
         assert_ne!(r2.status, 403, "a telegram-scoped gate passes the scope check");
+    }
+
+    /// A bridge shaped like the Esmeralda deployment that exposed the wrong-mode advertisement:
+    /// one component-backed consensus gate, one credential-only gate (no component).
+    fn two_mode_bridge() -> Bridge<FakeWallet> {
+        let mut gates = GateRegistry::new();
+        gates.register("diag", binding()).unwrap();
+        gates.register(
+            "esm10",
+            GateBinding::ootle(
+                None,
+                ResourceAddress::new(ObjectKey::from_array([7u8; 32])),
+                10_000_000,
+                network::LOCALNET,
+                MaxBytes::new_checked(b"vip.example".to_vec()).unwrap(),
+                2,
+                "GHOSTTEST".into(),
+            ),
+        )
+        .unwrap();
+        Bridge::new(gates, FakeWallet::new(), OriginPolicy::new().allow("https://vip.example"))
+    }
+
+    /// The Lab dispatches on `proofMode`, so a credential-only gate MUST be advertised as
+    /// "credential". Advertising "consensus" steered a browser wallet into the walletd prove
+    /// route, whose only honest answer is a refusal — the physical-test failure this pins.
+    #[tokio::test]
+    async fn lab_gates_advertises_credential_for_a_componentless_gate() {
+        let mut b = two_mode_bridge();
+        let r = b.handle(&get("/lab/gates")).await;
+        assert_eq!(r.status, 200);
+        let v: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        let modes: Vec<(String, String)> = v["gates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| {
+                (
+                    g["gateId"].as_str().unwrap().to_string(),
+                    g["proofMode"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        assert!(modes.contains(&("diag".to_string(), "consensus".to_string())), "{modes:?}");
+        assert!(modes.contains(&("esm10".to_string(), "credential".to_string())), "{modes:?}");
+    }
+
+    /// The prove route cannot answer a credential-only gate, and it refuses BEFORE the body is
+    /// parsed or the wallet is touched: a browser wallet pointed here gets an honest "wrong
+    /// flow" refusal instead of a walletd timeout, and the challenge it holds stays live for
+    /// the credential route that can actually answer it.
+    #[tokio::test]
+    async fn the_prove_route_refuses_a_credential_only_gate() {
+        let mut b = two_mode_bridge();
+        let issued = b.handle(&post("/gate/esm10/challenge", serde_json::json!({}))).await;
+        assert_eq!(issued.status, 200, "{}", issued.body);
+        let v: serde_json::Value = serde_json::from_str(&issued.body).unwrap();
+        let nonce = v["challenge_nonce"].as_str().unwrap().to_string();
+        let session = v["session_commitment"].as_str().unwrap().to_string();
+        let proved = b
+            .handle(&post(
+                "/gate/esm10/prove",
+                serde_json::json!({"gate_id":"esm10","challenge_nonce":nonce,"session_commitment":session}),
+            ))
+            .await;
+        assert_eq!(proved.status, 409, "{}", proved.body);
+        assert!(proved.body.contains("credential-only"), "{}", proved.body);
+        // Nothing reached the wallet…
+        assert!(b.wallet.asked.is_empty(), "a credential-only gate never reaches the wallet");
+        // …and the challenge was not burnt: the credential route can still answer it.
+        assert_eq!(b.challenges.live(), 1, "the refusal must not consume the challenge");
+    }
+
+    /// The offline simulation illustrates the shape the REAL flow would take: a credential-only
+    /// gate is labelled "credential" and shows no consensus step, because it has none.
+    #[tokio::test]
+    async fn the_lab_simulation_names_the_real_mode_for_a_componentless_gate() {
+        let mut b = two_mode_bridge();
+        let r = b.handle(&post("/lab/simulate", serde_json::json!({ "gateId": "esm10" }))).await;
+        assert_eq!(r.status, 200, "{}", r.body);
+        let v: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        let events = v["trace"]["events"].as_array().unwrap();
+        let selected = events.iter().find(|e| e["code"] == "gate.selected").expect("a gate event");
+        assert_eq!(selected["detail"]["proofMode"], "credential", "{selected}");
+        assert!(
+            events.iter().all(|e| e["code"] != "consensus.observed"),
+            "a credential-only simulation must not invent a consensus step"
+        );
     }
 }

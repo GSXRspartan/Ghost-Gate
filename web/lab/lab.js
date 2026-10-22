@@ -24,6 +24,7 @@ const state = {
     gates: [],
     gate: null,
     mode: null,          // the selected wallet option
+    requestedGate: null, // an explicit ?gate= in the URL, honoured before any default
     attemptId: null,
     proofId: null,
     simulated: false,
@@ -92,6 +93,35 @@ const STEPS = [
     },
 ];
 
+/** The step list the selected gate actually exercises. A credential gate has no consensus wait:
+ *  its verdict is a signature checked against chain state, so that step is relabelled rather
+ *  than shown as a block wait that never happens. Ids are stable across modes, so step
+ *  advancement is unaffected. */
+function stepList() {
+    if (state.gate && state.gate.proofMode === "credential") {
+        return STEPS.map((s) => s.id === "consensus"
+            ? {
+                ...s,
+                title: "Verify the signed output against chain state",
+                note: "No block wait: the bridge reads the named output from chain state, checks its public value promise against the gate's threshold, and checks the signature against the output's own on-chain spend key.",
+            }
+            : s);
+    }
+    return STEPS;
+}
+
+/** Which gate to select when nothing (or nothing valid) is selected.
+ *  Order: an explicit ?gate= in the URL, then this session's or a remembered explicit choice,
+ *  then the first credential-mode gate — the only mode a browser wallet can complete end to end
+ *  without a wallet daemon — then the cheapest gate. The old behaviour, always the cheapest
+ *  gate, silently picked the consensus gate and steered a Sapient holder into the wrong flow. */
+function pickDefaultGate(gates) {
+    const wanted = state.requestedGate || (() => { try { return localStorage.getItem("gg-lab-gate"); } catch { return null; } })();
+    if (wanted && gates.some((g) => g.gateId === wanted)) return wanted;
+    const cred = gates.find((g) => g.proofMode === "credential");
+    return (cred || gates[0]).gateId;
+}
+
 /** Populate the gate picker from the registry. The registry is the only source; a value typed
  *  here can never become a threshold. */
 function populateGateSelect() {
@@ -107,11 +137,17 @@ function populateGateSelect() {
         opt.textContent = `${g.gateId} — ${formatAmount(g.thresholdRaw, g.divisibility)} ${g.symbol || "?"}`;
         sel.append(opt);
     }
-    sel.onchange = () => selectGate(sel.value);
+    sel.onchange = () => {
+        // An explicit choice sticks — for this session and the next. The default logic only
+        // ever applies when nothing valid is selected.
+        try { localStorage.setItem("gg-lab-gate", sel.value); } catch { /* private mode */ }
+        selectGate(sel.value);
+    };
 }
 
 function selectGate(gateId) {
     state.gate = state.gates.find((g) => g.gateId === gateId) || null;
+    if (gateId) $("gate-select").value = gateId;
     state.step = -1;
     renderGateFacts(state.gate);
     renderWallets();
@@ -200,12 +236,17 @@ async function renderWallets() {
     if (!gate) { sel.innerHTML = '<option>—</option>'; return; }
 
     const options = [];
-    // The consensus path needs a wallet daemon; the bridge knows whether one is there.
+    // The consensus path needs a wallet daemon; the bridge knows whether one is there. A
+    // credential-only gate has no component for a consensus proof to execute against, so the
+    // wallet daemon is not offered at all — advertising it here is how a Sapient holder was
+    // once steered into a walletd route that could only refuse.
     if (gate.proofMode === "consensus") {
         options.push({ id: "walletd", label: "Wallet daemon · consensus (advanced)" });
     }
-    options.push({ id: "sapient", label: "Sapient — Ootle L2 · credential" });
-    options.push({ id: "universe", label: "Tari Universe — in-app · credential" });
+    if (gate.proofMode === "credential" || gate.proofMode === "consensus") {
+        options.push({ id: "sapient", label: "Sapient — Ootle L2 · credential" });
+        options.push({ id: "universe", label: "Tari Universe — in-app · credential" });
+    }
 
     for (const o of options) {
         const opt = document.createElement("option");
@@ -213,8 +254,19 @@ async function renderWallets() {
         opt.textContent = o.label;
         sel.append(opt);
     }
+    if (!options.length) {
+        // An experimental gate no wallet can prove: say so instead of leaving a silent dropdown.
+        sel.innerHTML = '<option value="">no wallet can prove this gate</option>';
+        state.mode = null;
+        const note = $("wallet-note");
+        note.classList.remove("ok", "warn", "bad");
+        note.classList.add("bad");
+        note.textContent = "This gate's proof mode is experimental; no wallet on this page can prove it.";
+        renderConnectIntro();
+        return;
+    }
     sel.onchange = () => selectMode(sel.value);
-    if (options.length) selectMode(options[0].id);
+    selectMode(options[0].id);
 }
 
 async function selectMode(id) {
@@ -263,6 +315,19 @@ async function selectMode(id) {
         note.textContent = `This wallet cannot prove this gate: ${usable.reason || "unsupported"}`;
     }
     renderConnectIntro();
+    // The resume row exists only for a credential gate driven by a browser wallet: resuming
+    // signs over an output that already exists on chain — there is nothing for the wallet
+    // daemon to build, and nothing for it to do here.
+    const resumeRow = $("resume-row");
+    if (resumeRow) {
+        resumeRow.hidden = !(state.gate && state.gate.proofMode === "credential" && state.mode !== "walletd");
+        if (!resumeRow.hidden) {
+            try {
+                const saved = localStorage.getItem("gg-last-output");
+                if (saved) $("resume-substate").value = saved;
+            } catch { /* private mode */ }
+        }
+    }
 }
 
 // ---------------------------------------------------- connection-only ceremony
@@ -431,7 +496,7 @@ function renderConnectIntro() {
 function renderSteps() {
     const ol = $("steps");
     ol.innerHTML = "";
-    STEPS.forEach((s, i) => {
+    stepList().forEach((s, i) => {
         const li = document.createElement("li");
         li.dataset.step = s.id;
         li.innerHTML = '<div><div class="step-title"></div><div class="step-note"></div></div>';
@@ -525,6 +590,13 @@ async function prove() {
     if (!gate) return;
     if (!gate.activatable) {
         showOutcome("denied", "NOT AVAILABLE", "This gate's proof mode is experimental and cannot be activated. It is shown, not promised.");
+        return;
+    }
+    // Defence in depth: a credential-only gate offers no wallet daemon (see renderWallets), but
+    // if a stale list or a race ever pairs the two, this refuses before anything is asked.
+    if (gate.proofMode === "credential" && state.mode === "walletd") {
+        showOutcome("denied", "WRONG PROOF MODE",
+            "This gate is credential-only: it binds no on-chain component, so the wallet daemon cannot prove it. Choose Sapient or Tari Universe.");
         return;
     }
     $("prove").disabled = true;
@@ -640,49 +712,131 @@ async function proveCredential(gate, challenge_nonce, session_commitment) {
         showOutcome("denied", "NO PROOF ARTIFACT", "The wallet produced no output to verify; there is nothing to check against chain state.");
         return;
     }
+    // Remember the output so a later attempt can resume from it instead of shielding again:
+    // a qualifying output stays qualifying, and re-shielding spends funds for nothing.
+    try { localStorage.setItem("gg-last-output", built.substateId); } catch { /* private mode */ }
+    await finishCredential(gate, challenge_nonce, session_commitment, built.substateId, provider);
+}
+
+/**
+ * RESUME EXISTING PROOF — the same credential verdict, over an output that already exists.
+ *
+ * A shielded output with a qualifying minimum-value promise stays qualifying: re-shielding
+ * spends funds for nothing. The resume path mints a FRESH challenge (challenges are
+ * single-use and bound to the policy in force), asks the wallet to sign it over the named
+ * existing output — the gate's resource is passed explicitly, because no shield ran in this
+ * session to set it — and posts the same credential request the fresh path posts. The bridge
+ * decides everything; this page only relays identifiers and a signature.
+ */
+async function resumeProof() {
+    const gate = state.gate;
+    if (!gate) return;
+    if (gate.proofMode === "credential" && state.mode === "walletd") {
+        showOutcome("denied", "WRONG PROOF MODE",
+            "This gate is credential-only: choose Sapient or Tari Universe to resume a proof.");
+        return;
+    }
+    const substateId = ($("resume-substate").value || "").trim();
+    // Shape-check only: the bridge verifies existence, ownership and value against chain state.
+    // A malformed id here is a typo, not an attack — refuse it before any wallet prompt.
+    if (!/^utxo_[0-9a-f]{64}_[0-9a-f]{64}$/i.test(substateId)) {
+        showOutcome("denied", "BAD OUTPUT ID",
+            "Resume needs the substate id of an existing qualifying output — the utxo_… string the wallet returned when it shielded. Nothing was signed and no challenge was spent.");
+        return;
+    }
+    $("prove").disabled = true;
+    const resumeBtn = $("resume-proof");
+    resumeBtn.disabled = true;
+
+    // A fresh challenge, exactly as the fresh path mints one: single-use, bound to this
+    // attempt and to the gate's live policy.
+    state.attemptId = Array.from(crypto.getRandomValues(new Uint8Array(16)))
+        .map((b) => b.toString(16).padStart(2, "0")).join("");
+    $("attempt-label").textContent = `attempt ${state.attemptId.slice(0, 8)}… · live`;
+    advance("challenge");
+    const ch = await api(`/gate/${gate.gateId}/challenge`, { method: "POST", body: "{}" });
+    if (!ch.ok) {
+        $("prove").disabled = false;
+        resumeBtn.disabled = false;
+        showOutcome("denied", "NO CHALLENGE", ch.body.error || "the bridge would not issue a challenge for this gate.");
+        return;
+    }
+    const { challenge_nonce, session_commitment } = ch.body;
+    advance("authorize"); advance("submit");
+    const provider = state.mode === "universe" ? universeProvider() : sapientProvider();
+    await finishCredential(gate, challenge_nonce, session_commitment, substateId, provider);
+}
+
+/**
+ * The credential tail, shared by the fresh and resume paths: sign, submit, report.
+ *
+ * Every failure mode is named, and the buttons always come back: a network error used to
+ * leave the page stuck at a disabled button with no message at all.
+ */
+async function finishCredential(gate, challenge_nonce, session_commitment, substateId, provider) {
     // The ownership signature over THIS bridge's challenge. The wallet re-derives the
-    // output's one-time key from the gate's resource; the bridge re-checks everything.
+    // output's one-time key from the gate's resource — passed explicitly, so a resume does
+    // not depend on a shield having run; the bridge re-checks everything against chain state.
     let signed;
     try {
-        signed = await provider.signChallenge(built.substateId, challenge_nonce);
+        signed = await provider.signChallenge(substateId, challenge_nonce, gate.resourceAddress);
     } catch (e) {
         $("prove").disabled = false;
+        $("resume-proof").disabled = false;
         showOutcome("denied", "SIGNATURE REFUSED", String(e && e.message ? e.message : e));
         return;
     }
     advance("consensus"); advance("verify");
-    const asked = await api(`/gate/${gate.gateId}/credential`, {
-        method: "POST",
-        body: JSON.stringify({
-            gate_id: gate.gateId,
-            challenge_nonce,
-            session_commitment,
-            substate_id: built.substateId,
-            // camelCase from the wallet, snake_case on the wire.
-            public_key: signed.publicKey || "",
-            public_nonce: signed.publicNonce,
-            signature: signed.signature,
-        }),
-    });
-    $("prove").disabled = false;
+    let asked = null;
+    try {
+        asked = await api(`/gate/${gate.gateId}/credential`, {
+            method: "POST",
+            body: JSON.stringify({
+                gate_id: gate.gateId,
+                challenge_nonce,
+                session_commitment,
+                substate_id: substateId,
+                // camelCase from the wallet, snake_case on the wire.
+                public_key: signed.publicKey || "",
+                public_nonce: signed.publicNonce,
+                signature: signed.signature,
+            }),
+        });
+    } catch (e) {
+        showOutcome("denied", "BRIDGE UNREACHABLE",
+            `The proof was signed but the bridge could not be reached to verify it. The challenge stays single-use and expires on its own; the signed output is untouched. ${e && e.message ? e.message : e}`);
+        return;
+    } finally {
+        $("prove").disabled = false;
+        $("resume-proof").disabled = false;
+    }
     if (asked.ok && asked.body.state === "accepted") {
         advance("grant"); advance("session");
         const r = asked.body.receipt || {};
         const sessionInfo = asked.body.access
             ? ` A verified session was issued for ${Math.round((asked.body.access.expiresUnix - Date.now() / 1000) / 86400)} day(s); afterwards, a fresh proof is required.`
-            : "";
+            : (gate.sessionsAvailable ? " The proof was verified, but this bridge issues no session token (not registry-backed)." : "");
         showOutcome("granted", "ACCESS GRANTED",
             "Threshold proven on chain against a real output you own. The output's own public floor was checked, not your balance — the amount above the floor was never disclosed." + sessionInfo,
             {
                 "attested floor": `${formatAmount(r.attested_minimum, gate.divisibility)} ${gate.symbol || ""}`.trim(),
                 "required": `${formatAmount(r.required_minimum, gate.divisibility)} ${gate.symbol || ""}`.trim(),
-                "output": built.substateId.slice(0, 18) + "…",
+                "output": substateId.slice(0, 18) + "…",
             });
-    } else {
-        showOutcome("denied", "ACCESS DENIED",
-            "The required threshold was not proven. Your exact balance remains private.",
-            { reason: asked.body.refused || asked.body.error || "the proof did not complete" });
+        return;
     }
+    const reason = asked.body.refused || asked.body.error || "the proof did not complete";
+    const titles = {
+        400: "MALFORMED REQUEST",
+        403: "WRONG GATE SCOPE",
+        409: "PROOF REFUSED",
+        503: "BRIDGE NOT CONFIGURED",
+    };
+    const title = titles[asked.status] || (asked.status >= 500 ? "BRIDGE ERROR" : "ACCESS DENIED");
+    const body = asked.status === 409
+        ? "The required threshold was not proven. Your exact balance remains private."
+        : "The proof was not accepted.";
+    showOutcome("denied", title, body, { reason, status: asked.status });
 }
 
 async function poll(proofId, attempt = 0) {
@@ -934,7 +1088,7 @@ async function refreshStatus() {
     }
     const stillThere = state.gate && gates.some((g) => g.gateId === state.gate.gateId);
     if (!stillThere) {
-        if (gates.length) selectGate(gates[0].gateId);
+        if (gates.length) selectGate(pickDefaultGate(gates));
         else if (state.gate) selectGate(null);
         else renderGateFacts(null);
     }
@@ -1107,6 +1261,7 @@ $("tg-start").onclick = async () => {
 $("view-simple").onclick = () => setView("simple");
 $("view-technical").onclick = () => setView("technical");
 $("prove").onclick = prove;
+$("resume-proof").onclick = resumeProof;
 $("simulate").onclick = simulate;
 $("term-filter").oninput = renderTerminal;
 $("term-sev").onchange = renderTerminal;
@@ -1139,6 +1294,8 @@ function renderExport() {
 
 // ---------------------------------------------------------------- boot
 (async function boot() {
+    // An explicit ?gate= wins over every default, once, on load.
+    state.requestedGate = new URLSearchParams(location.search).get("gate");
     setView("simple");
     setModeBadge(false);
     $("prov-note").textContent = "Provenance: bridge = this process; wallet = the wallet's own answer; consensus = the network; verifier = checks this codebase performs. Events are recorded server-side and pass an allowlist before they reach this page.";

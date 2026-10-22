@@ -304,6 +304,39 @@ test("credentials flow: shield -> poll -> submit -> sign, in that order, with th
   }
 });
 
+test("resume flow: signChallenge accepts an explicit resource without any shield having run", async () => {
+  const { provider, calls } = fakeTari({ caps: sapientCapabilities("local") });
+  const undo = withWindow(provider);
+  try {
+    const p = sapientProvider();
+    // No approveAndBuildProof: the output already exists on chain (the RESUME path signs over
+    // it directly, naming the gate's resource explicitly).
+    const ownership = await p.signChallenge("utxo_res_2c71", "challenge-abc", "resource_gate");
+    assert.deepEqual(ownership, { publicKey: "pk", publicNonce: "r", signature: "s" });
+    const signCall = calls.at(-1);
+    assert.equal(signCall.method, "tari_signOwnershipChallenge");
+    assert.equal(signCall.params.resourceAddress, "resource_gate", "the explicit resource is used");
+    assert.equal(signCall.params.substateId, "utxo_res_2c71");
+    assert.equal(signCall.params.challenge, "challenge-abc");
+  } finally {
+    undo();
+  }
+});
+
+test("resume flow: no build and no explicit resource refuses honestly instead of guessing", async () => {
+  const { provider } = fakeTari({ caps: sapientCapabilities("local") });
+  const undo = withWindow(provider);
+  try {
+    const p = sapientProvider();
+    await assert.rejects(
+      () => p.signChallenge("utxo_res_2c71", "challenge-abc"),
+      (e) => /no proof has been built yet/.test(e.message),
+    );
+  } finally {
+    undo();
+  }
+});
+
 test("a wallet rejection (4001) surfaces as a declined request, not an error", async () => {
   const { provider } = fakeTari({ caps: sapientCapabilities("local") });
   const original = provider.request.bind(provider);

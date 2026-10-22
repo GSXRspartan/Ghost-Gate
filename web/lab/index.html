@@ -101,6 +101,15 @@
                             <button class="ghost" id="simulate">Run the offline simulation</button>
                         </div>
                     </div>
+                    <!-- Resume: a credential gate's verdict can be earned by an output that
+                         already exists. Pasting its substate id here signs a fresh challenge over
+                         it — no new shield, no new spend. -->
+                    <div class="resume-row" id="resume-row" hidden>
+                        <input type="text" id="resume-substate" class="resume-input"
+                               placeholder="utxo_… — substate id of an existing qualifying output"
+                               spellcheck="false" autocomplete="off" aria-label="Existing output substate id">
+                        <button class="ghost" id="resume-proof" type="button">Resume existing proof</button>
+                    </div>
                     <p class="sub">Nine steps. Each one reflects a real operation this system performs — none of them is decoration.</p>
                     <ol class="steps" id="steps"></ol>
                     <div class="outcome" id="outcome" hidden>

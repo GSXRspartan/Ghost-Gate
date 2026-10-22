@@ -177,13 +177,19 @@ export function windowTariProvider(id, label, discover) {
      * The ownership signature over the site's challenge. `resourceAddress` names the gate's
      * resource — the wallet re-derives the output's one-time key from it, and the bridge re-checks
      * everything against chain state.
+     *
+     * `resourceAddress` may be passed explicitly by the RESUME flow: signing over an output that
+     * already exists on chain must not depend on a shield having been built in this page session
+     * (the module-scoped `resource` is only set by `approveAndBuildProof`). An explicit resource
+     * is still the caller's duty to get right — the bridge re-checks it against the gate anyway.
      */
-    async signChallenge(substateId, challenge) {
+    async signChallenge(substateId, challenge, resourceAddressOverride) {
       const p = get();
-      if (!resource) throw new Error("no proof has been built yet, so there is nothing to sign over");
+      const use = resourceAddressOverride || resource;
+      if (!use) throw new Error("no proof has been built yet, so there is nothing to sign over");
       return p.request({
         method: "tari_signOwnershipChallenge",
-        params: { resourceAddress: resource, substateId, challenge },
+        params: { resourceAddress: use, substateId, challenge },
       });
     },
     /**

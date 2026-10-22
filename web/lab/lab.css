@@ -311,6 +311,19 @@ select { text-overflow: ellipsis; }
 .steps-head h2 { margin: 0.1rem 0 0.2rem; }
 .actions { display: flex; gap: 0.6rem; flex-wrap: wrap; }
 
+/* ---------- resume row (credential gates) ---------- */
+.resume-row { display: flex; gap: 0.6rem; margin-top: 0.7rem; flex-wrap: wrap; align-items: center; }
+.resume-row[hidden] { display: none; }
+.resume-row .resume-input {
+    flex: 1 1 20rem; min-width: 0;
+    font-family: var(--mono); font-size: 0.78rem;
+    color: var(--text); background: var(--ink-2);
+    border: 1px solid rgba(41, 212, 124, 0.25); border-radius: 6px;
+    padding: 0.55rem 0.7rem;
+}
+.resume-row .resume-input:focus { outline: 2px solid var(--green); outline-offset: -1px; }
+.resume-row .resume-input::placeholder { color: rgba(232, 255, 236, 0.35); }
+
 /* ---------- the step rail (Simple view) ---------- */
 .steps { list-style: none; margin: 0.5rem 0 0; padding: 0; counter-reset: step; }
 .steps li {
