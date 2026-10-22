@@ -150,6 +150,18 @@ test("describeProviderError names 4001, 4100, 4200, locked and generic distinctl
   assert.match(generic.text, /something odd/);
 });
 
+test("describeProviderError treats JSON-RPC internal and method-not-found errors distinctly", () => {
+  const internal = describeProviderError({ code: -32603, message: "boom" });
+  assert.equal(internal.cls, "bad");
+  assert.match(internal.text, /internal error/i);
+  assert.match(internal.text, /boom/, "the wallet's own message is kept visible");
+  assert.doesNotMatch(internal.text, /declined/i, "an internal error is not the user's decline");
+
+  const noMethod = describeProviderError({ code: -32601, message: "no such method" });
+  assert.equal(noMethod.cls, "bad");
+  assert.match(noMethod.text, /does not support/i);
+});
+
 test("amounts parse as strings or bigints and never as floats", () => {
   assert.equal(parseAmount("400000").toString(), "400000");
   assert.equal(parseAmount(400000n)?.toString(), "400000");

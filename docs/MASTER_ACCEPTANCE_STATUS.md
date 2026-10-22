@@ -468,3 +468,45 @@ had no error handling.
    panel will note that no session token is issued until the admin plane is wired.
 
 Not ACCESS-GRANTED-verified until the operator confirms.
+
+## 15. Session log — 2026-10-21 (resume flow hardened after second physical test)
+
+**What happened.** The operator entered the existing 10-tTARI output and pressed Resume, but
+the page showed "WALLET REFUSED — the wallet rejected the proof transaction" with the step rail
+parked at step 5. That wording belongs to `proveCredential`'s shield catch, so the outcome on
+screen came from the shield/build step, not the resume path. Two real gaps in `resumeProof`
+made the UI look stuck: the challenge POST was not wrapped (an uncaught network error left the
+stale outcome and disabled buttons in place), and the outcome panel / step rail were never
+reset at the start, so the forward-only `advance()` kept the previous attempt's position
+visible.
+
+**Fixes (this commit):**
+1. `resumeProof()` now clears the outcome panel and resets `state.step` to 0 with a fresh
+   `renderSteps()` before doing anything else, so no earlier attempt's result can linger.
+2. The ENTIRE resume operation is one try/catch/finally: challenge minting, provider
+   selection, signing and the credential POST are all covered; an uncaught error shows
+   "RESUME FAILED" through `describeProviderError` and the buttons always re-enable.
+3. Signature failures now go through `describeProviderError` with the code preserved as a
+   detail line: 4001 = "You declined the request in your wallet", 4100 = "not connected to
+   your wallet yet", 4200/-32601 = "does not support that call", -32603 = "The wallet hit an
+   internal error…". No failure is mislabelled as the user rejecting a transaction.
+4. An unusable signature (missing publicNonce/signature) is refused client-side as
+   "INCOMPLETE SIGNATURE" instead of being POSTed with empty fields.
+5. `describeProviderError` gained explicit JSON-RPC handling: -32603 (internal error) and
+   -32601 (method not found).
+
+**Verified (AUTOMATED TESTS ONLY):**
+- New harness `scripts/lab_resume_check.sh` + `scripts/cdp-resume-check.mjs`, run against the
+  live Esmeralda bridge on :7897 in headless Edge: **30/30 checks pass**. It reproduces the
+  stale walletd refusal on esm-diag, then clicks the real Resume button on esm10 and asserts
+  the exact network flow (challenge → sign → credential, NO /prove, NO shield calls), the
+  signature params (existing output id, explicit gate resource), the step-rail reset, and the
+  three failure wordings with codes preserved.
+- The target output was independently rechecked on the indexer: still UP, `verified:true`,
+  `minimum_value_promise = 10000000`, auth key intact, not frozen. The tTARI output is
+  untouched; nothing was re-shielded.
+- JS suite **26/26** (new: -32603/-32601 taxonomy tests). Bridge lib still 133/133.
+
+**Remaining for ACCESS GRANTED:** a registry-backed access plane (GG_BINDINGS_PATH + admin
+plane) so the verified proof issues a real session token. All automated verification only
+until then; still indexer-trusted development verification, not production security.

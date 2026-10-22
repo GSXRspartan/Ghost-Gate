@@ -202,8 +202,13 @@ export function describeProviderError(e) {
       "This site is not connected to your wallet yet. Connect or reconnect Sapient — unlock the " +
       "wallet, approve this site if it asks — then press Connect wallet again." };
   }
-  if (code === 4200) {
+  if (code === 4200 || code === -32601) {
     return { cls: "bad", text: "This wallet does not support that call." };
+  }
+  if (code === -32603) {
+    // JSON-RPC internal error: the wallet ITSELF failed — not the user, not the site. Saying
+    // "you declined" here would be a lie about the user's own action.
+    return { cls: "bad", text: `The wallet hit an internal error while handling the request: ${message}` };
   }
   if (/lock/i.test(message)) {
     return { cls: "warn", text: "The wallet appears to be locked. Unlock Sapient, then press Connect wallet again." };

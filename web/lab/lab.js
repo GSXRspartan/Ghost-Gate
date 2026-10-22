@@ -704,7 +704,11 @@ async function proveCredential(gate, challenge_nonce, session_commitment) {
         });
     } catch (e) {
         $("prove").disabled = false;
-        showOutcome("denied", "WALLET REFUSED", String(e && e.message ? e.message : e));
+        const d = describeProviderError(e);
+        showOutcome("denied", "WALLET REFUSED", d.text, {
+            ...(e && e.code !== undefined ? { "provider error": `code ${e.code}` } : {}),
+            detail: String(e && e.message ? e.message : e),
+        });
         return;
     }
     if (!built || !built.substateId) {
@@ -727,51 +731,80 @@ async function proveCredential(gate, challenge_nonce, session_commitment) {
  * existing output — the gate's resource is passed explicitly, because no shield ran in this
  * session to set it — and posts the same credential request the fresh path posts. The bridge
  * decides everything; this page only relays identifiers and a signature.
+ *
+ * The whole operation is one try/catch/finally: a stale outcome from an earlier attempt is
+ * cleared FIRST (so this attempt's result can never be mistaken for the last one's), the
+ * steps rail restarts from the top (advance() is forward-only and would otherwise leave an
+ * old attempt's position on screen), and every failure is named with the provider-error
+ * taxonomy rather than a generic rejection. No path here touches the shield request or the
+ * walletd prove route — resuming signs; it does not build anything.
  */
 async function resumeProof() {
     const gate = state.gate;
     if (!gate) return;
-    if (gate.proofMode === "credential" && state.mode === "walletd") {
-        showOutcome("denied", "WRONG PROOF MODE",
-            "This gate is credential-only: choose Sapient or Tari Universe to resume a proof.");
-        return;
-    }
-    const substateId = ($("resume-substate").value || "").trim();
-    // Shape-check only: the bridge verifies existence, ownership and value against chain state.
-    // A malformed id here is a typo, not an attack — refuse it before any wallet prompt.
-    if (!/^utxo_[0-9a-f]{64}_[0-9a-f]{64}$/i.test(substateId)) {
-        showOutcome("denied", "BAD OUTPUT ID",
-            "Resume needs the substate id of an existing qualifying output — the utxo_… string the wallet returned when it shielded. Nothing was signed and no challenge was spent.");
-        return;
-    }
-    $("prove").disabled = true;
+    // Start clean, BEFORE anything can fail: the old outcome panel goes away and the steps
+    // rail restarts, so what the visitor reads from here on is THIS attempt only.
+    $("outcome").hidden = true;
+    state.step = 0;
+    renderSteps();
+    const proveBtn = $("prove");
     const resumeBtn = $("resume-proof");
-    resumeBtn.disabled = true;
+    try {
+        if (gate.proofMode !== "credential") {
+            showOutcome("denied", "WRONG GATE",
+                `Resuming applies to a credential-mode gate; "${gate.gateId}" is ${gate.proofMode}. Select a credential gate first.`);
+            return;
+        }
+        if (!state.mode || state.mode === "walletd") {
+            showOutcome("denied", "WRONG WALLET",
+                "Resuming needs a browser wallet (Sapient or Tari Universe) to sign over the existing output; the wallet daemon cannot do that.");
+            return;
+        }
+        const substateId = ($("resume-substate").value || "").trim();
+        // Shape-check only: the bridge verifies existence, ownership and value against chain state.
+        // A malformed id here is a typo, not an attack — refuse it before any wallet prompt.
+        if (!/^utxo_[0-9a-f]{64}_[0-9a-f]{64}$/i.test(substateId)) {
+            showOutcome("denied", "BAD OUTPUT ID",
+                "Resume needs the substate id of an existing qualifying output — the utxo_… string the wallet returned when it shielded. Nothing was signed and no challenge was spent.");
+            return;
+        }
 
-    // A fresh challenge, exactly as the fresh path mints one: single-use, bound to this
-    // attempt and to the gate's live policy.
-    state.attemptId = Array.from(crypto.getRandomValues(new Uint8Array(16)))
-        .map((b) => b.toString(16).padStart(2, "0")).join("");
-    $("attempt-label").textContent = `attempt ${state.attemptId.slice(0, 8)}… · live`;
-    advance("challenge");
-    const ch = await api(`/gate/${gate.gateId}/challenge`, { method: "POST", body: "{}" });
-    if (!ch.ok) {
-        $("prove").disabled = false;
+        // A fresh attempt id and a fresh challenge, exactly as the fresh path mints them:
+        // single-use, bound to this attempt and to the gate's live policy.
+        state.attemptId = Array.from(crypto.getRandomValues(new Uint8Array(16)))
+            .map((b) => b.toString(16).padStart(2, "0")).join("");
+        $("attempt-label").textContent = `attempt ${state.attemptId.slice(0, 8)}… · live`;
+        advance("challenge");
+        const ch = await api(`/gate/${gate.gateId}/challenge`, { method: "POST", body: "{}" });
+        if (!ch.ok) {
+            showOutcome("denied", "NO CHALLENGE", ch.body.error || "the bridge would not issue a challenge for this gate.");
+            return;
+        }
+        const { challenge_nonce, session_commitment } = ch.body;
+        advance("authorize"); advance("submit");
+        const provider = state.mode === "universe" ? universeProvider() : sapientProvider();
+        await finishCredential(gate, challenge_nonce, session_commitment, substateId, provider);
+    } catch (e) {
+        // Anything uncaught above — a network failure on the challenge call, a provider that
+        // threw before its own handler, anything — lands here with its real shape preserved,
+        // and the finally below guarantees the page is never left disabled.
+        const d = describeProviderError(e);
+        showOutcome("denied", "RESUME FAILED", d.text,
+            e && e.code !== undefined ? { "provider error": `code ${e.code}`, detail: String(e && e.message ? e.message : e) } : {});
+    } finally {
+        proveBtn.disabled = false;
         resumeBtn.disabled = false;
-        showOutcome("denied", "NO CHALLENGE", ch.body.error || "the bridge would not issue a challenge for this gate.");
-        return;
     }
-    const { challenge_nonce, session_commitment } = ch.body;
-    advance("authorize"); advance("submit");
-    const provider = state.mode === "universe" ? universeProvider() : sapientProvider();
-    await finishCredential(gate, challenge_nonce, session_commitment, substateId, provider);
 }
 
 /**
  * The credential tail, shared by the fresh and resume paths: sign, submit, report.
  *
  * Every failure mode is named, and the buttons always come back: a network error used to
- * leave the page stuck at a disabled button with no message at all.
+ * leave the page stuck at a disabled button with no message at all. Signature failures go
+ * through the provider-error taxonomy so a decline (4001), a not-connected wallet (4100), an
+ * unsupported call (4200/-32601) and the wallet's own internal failure (-32603) each read as
+ * what they are — "the user rejected a transaction" is claimed only when it happened.
  */
 async function finishCredential(gate, challenge_nonce, session_commitment, substateId, provider) {
     // The ownership signature over THIS bridge's challenge. The wallet re-derives the
@@ -783,7 +816,21 @@ async function finishCredential(gate, challenge_nonce, session_commitment, subst
     } catch (e) {
         $("prove").disabled = false;
         $("resume-proof").disabled = false;
-        showOutcome("denied", "SIGNATURE REFUSED", String(e && e.message ? e.message : e));
+        const d = describeProviderError(e);
+        showOutcome("denied", "SIGNATURE REFUSED", d.text, {
+            ...(e && e.code !== undefined ? { "provider error": `code ${e.code}` } : {}),
+            detail: String(e && e.message ? e.message : e),
+        });
+        return;
+    }
+    // An unusable signature is refused HERE, not forwarded: the bridge would only refuse it
+    // again, and the visitor should be told the wallet's answer was incomplete.
+    if (!signed || !signed.publicNonce || !signed.signature) {
+        $("prove").disabled = false;
+        $("resume-proof").disabled = false;
+        showOutcome("denied", "INCOMPLETE SIGNATURE",
+            "The wallet returned a signature missing its nonce or signature component, so the proof cannot be verified. Nothing was submitted.",
+            { received: signed ? Object.keys(signed).join(", ") : "nothing" });
         return;
     }
     advance("consensus"); advance("verify");
