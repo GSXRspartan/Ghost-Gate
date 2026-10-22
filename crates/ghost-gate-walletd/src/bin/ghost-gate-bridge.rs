@@ -58,7 +58,12 @@ fn main() -> ExitCode {
         match binding.kind() {
             ghost_gate_bridge::ProofKind::Ootle => println!(
                 "    {id}: [ootle] {} over {} (threshold {}, divisibility {})",
-                binding.component().copied().unwrap(),
+                // A credential-only gate binds no component; the banner says so instead of
+                // pretending one exists.
+                binding
+                    .component()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "<credential-only: no component>".to_string()),
                 binding.resource().copied().unwrap(),
                 binding.threshold(),
                 binding.divisibility
@@ -580,15 +585,29 @@ fn parse_gate(entry: &str) -> Result<(String, GateBinding), String> {
     let parts: Vec<&str> = rest.split(':').collect();
     if parts.len() < 5 {
         return Err(format!(
-            "{entry:?} needs id=gate_address:resource_address:threshold:divisibility:symbol"
+            "{entry:?} needs id=gate_address:resource_address:threshold:divisibility:symbol \
+             (an empty gate_address registers a credential-only gate)"
         ));
     }
-    if !parts[0].starts_with("component_") {
-        return Err(format!(
-            "gate address must start with component_, got {:?}",
+    // An empty gate address registers a credential-only gate: no on-chain component is bound,
+    // and the challenge carries the NO_COMPONENT sentinel. The consensus path cannot run on
+    // such a gate — which is exactly the point: the credential path verifies against chain
+    // state and needs no component at all.
+    let component = if parts[0].trim().is_empty() {
+        None
+    } else {
+        if !parts[0].starts_with("component_") {
+            return Err(format!(
+                "gate address must start with component_ (or be empty for a credential-only gate), got {:?}",
+                parts[0]
+            ));
+        }
+        Some(
             parts[0]
-        ));
-    }
+                .parse()
+                .map_err(|e| format!("gate address: {e}"))?,
+        )
+    };
     if !parts[1].starts_with("resource_") {
         return Err(format!(
             "the second field must be a resource ADDRESS starting with resource_, got {:?}. A gate binds \
@@ -599,7 +618,7 @@ fn parse_gate(entry: &str) -> Result<(String, GateBinding), String> {
     Ok((
         id.to_string(),
         GateBinding::ootle(
-            Some(parts[0].parse().map_err(|e| format!("gate address: {e}"))?),
+            component,
             parts[1].parse().map_err(|e| format!("resource address: {e}"))?,
             parts[2].parse().map_err(|e| format!("threshold: {e}"))?,
             std::env::var("GG_OOTLE_NETWORK")

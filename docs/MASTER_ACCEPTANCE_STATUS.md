@@ -389,3 +389,18 @@ select a gate, choose "Sapient — Ootle L2 · credential", press **Connect wall
 extension's prompt. Expect the real address, the Esmeralda/Localnet mismatch verdict, the
 capability list, and the optional possession-only signature — with no spend request. Not
 LIVE WALLET VERIFIED until you confirm it.
+
+## 7. Task 6 — tTARI balance verification and the 10-tTARI qualifying output (2026-10-21)
+- Revealed balance of the Esmeralda dispenser account verified **on-chain**: sequenced
+  get_transactions_diff (cursor 267) → tx a1dd6fae… shows VaultFungible +100_000_000 raw
+  tTARI (resource_0101…01, divisibility 6). 100 tTARI revealed, zero stealth outputs.
+- The user-reported private 100 tTARI is **not** a qualifying output: ledger-wide scan of
+  80 recent UTXO-bearing txs found three candidate stealth outputs, all with
+  minimum_value_promise = 0. Promises are only set by an explicit shield/sendPrivately.
+- Qualifying-output creation prepared as a self-shield request (10000000 raw with
+  minimumValuePromise 10000000) for operator approval in the wallet; the tx id and
+  stealth commitment will be recorded in this doc once executed.
+- esm-diag bridge on 7897 now carries a second, credential-only gate `esm10`
+  (empty component, threshold 10_000_000, network 38, tTARI, useMode both).
+  parse_gate accepts an empty component; the banner prints
+  `<credential-only: no component>` (the previous version panicked on unwrap(None)).
