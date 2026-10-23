@@ -32,7 +32,8 @@ use crate::gate_registry::GateRegistry;
 use crate::http::{Request, Response, Route, parse_request, render};
 use crate::origin::OriginPolicy;
 use crate::policy::{ProveRequest, validate_prove_request};
-use crate::session::{ChallengeBook, ProofJob, ProofStatus, PublicProof, random_nonce};
+use crate::replay_store::{ReplayRecord, ReplayStore, Reservation};
+use crate::session::{ChallengeBook, IssuedChallenge, ProofJob, ProofStatus, PublicProof, random_nonce};
 use crate::wallet::{StatementRequest, WalletChannel};
 
 /// Largest request body accepted. A prove request is three short strings; anything larger is not one.
@@ -71,6 +72,9 @@ pub struct Bridge<
     /// proof-status response can carry the grant to the client that polled it.
     pub access_grants: std::collections::BTreeMap<String, ghost_gate_registry::AccessGrant>,
     pub challenges: ChallengeBook,
+    /// Set only for a configured registry-backed bridge. Its absence means proofs may be previewed
+    /// but no durable access authorization is issued.
+    pub replay: Option<Box<dyn ReplayStore>>,
     pub jobs: Vec<ProofJob>,
     /// The Privacy Lab's per-attempt diagnostic traces, keyed by an unguessable attempt id the
     /// visitor holds. Bounded in both directions (see MAX_TRACES / MAX_TRACE_EVENTS): a trace can
@@ -124,6 +128,34 @@ pub struct Bridge<
 impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChannel, XR: crate::xtm::XtmChainReader>
     Bridge<W, R, X, XR>
 {
+    /// Attach the configured durable replay coordinator. Browser preview constructors leave this
+    /// absent; registry-backed production startup rejects that configuration instead of falling
+    /// back to a process-local map.
+    pub fn set_replay_store(&mut self, replay: Box<dyn ReplayStore>) {
+        self.replay = Some(replay);
+    }
+
+    fn replay_record(&self, gate_id: &str, issued: &IssuedChallenge) -> ReplayRecord {
+        let tenant = self.access.as_ref()
+            .and_then(|access| access.info(gate_id))
+            .map(|info| info.application_id.clone())
+            .unwrap_or_else(|| "local-preview".to_string());
+        ReplayRecord {
+            nonce: issued.challenge.nonce().into_array(),
+            tenant,
+            gate: gate_id.to_string(),
+            relying_site: hex::encode(issued.challenge.relying_site()),
+            visitor_session: issued.challenge.session_commitment().to_vec(),
+            network: issued.challenge.network(),
+            policy_hash: issued.policy_hash.clone(),
+            expires_unix: issued.expires_at.duration_since(std::time::UNIX_EPOCH)
+                .map(|value| value.as_secs()).unwrap_or_default(),
+            state: crate::replay_store::ReplayState::Issued,
+            proof_job_id: None,
+            authorization_id: None,
+            access_token: None,
+        }
+    }
     /// Assembles a bridge over every channel at once. The narrower constructors below are sugar
     /// for the common deployments; this is the one the L1-enabled bridge binary uses.
     pub fn assemble(
@@ -138,6 +170,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             access: None,
             access_grants: std::collections::BTreeMap::new(),
             challenges: ChallengeBook::new(),
+            replay: None,
             jobs: Vec::new(),
             traces: std::collections::HashMap::new(),
             job_attempts: std::collections::HashMap::new(),
@@ -168,6 +201,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             access: None,
             access_grants: std::collections::BTreeMap::new(),
             challenges: ChallengeBook::new(),
+            replay: None,
             jobs: Vec::new(),
             traces: std::collections::HashMap::new(),
             job_attempts: std::collections::HashMap::new(),
@@ -278,6 +312,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R, crate::xt
             access: None,
             access_grants: std::collections::BTreeMap::new(),
             challenges: ChallengeBook::new(),
+            replay: None,
             jobs: Vec::new(),
             traces: std::collections::HashMap::new(),
             job_attempts: std::collections::HashMap::new(),
@@ -312,6 +347,7 @@ impl<W: WalletChannel, X: crate::xtm::XtmChannel, XR: crate::xtm::XtmChainReader
             access: None,
             access_grants: std::collections::BTreeMap::new(),
             challenges: ChallengeBook::new(),
+            replay: None,
             jobs: Vec::new(),
             traces: std::collections::HashMap::new(),
             job_attempts: std::collections::HashMap::new(),
@@ -345,6 +381,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             access: None,
             access_grants: std::collections::BTreeMap::new(),
             challenges: ChallengeBook::new(),
+            replay: None,
             jobs: Vec::new(),
             traces: std::collections::HashMap::new(),
             job_attempts: std::collections::HashMap::new(),
@@ -526,6 +563,25 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
         }
     }
 
+    fn reserve_replay(
+        &mut self,
+        gate_id: &str,
+        nonce: &[u8; 32],
+        proof_job_id: &str,
+    ) -> Result<Option<Reservation>, crate::replay_store::ReplayError> {
+        let issued = self.challenges.peek(nonce).map_err(|_| crate::replay_store::ReplayError::BindingMismatch)?;
+        let expected = self.replay_record(gate_id, issued);
+        let Some(replay) = self.replay.as_mut() else { return Ok(None); };
+        replay.reserve(&expected, proof_job_id, crate::session::now_unix()).map(Some)
+    }
+
+    fn release_replay_refused(&mut self, gate_id: &str, nonce: &[u8; 32]) {
+        let Ok(issued) = self.challenges.peek(nonce) else { return; };
+        let expected = self.replay_record(gate_id, issued);
+        let Some(replay) = self.replay.as_mut() else { return; };
+        let _ = replay.release_refused(&expected, crate::session::now_unix());
+    }
+
     /// Issues a verified-access session for an accepted proof on a registry-backed gate, and
     /// remembers it against the challenge nonce so the status poll can carry it. Returns None
     /// when the bridge is not registry-backed or the gate is not registry-bound.
@@ -540,7 +596,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
         // the OLD threshold — so no session is issued and the caller must mint a fresh challenge.
         let current = self.access.as_mut()?.plane.current_policy_hash(gate_id);
         let nonce = hex::decode(nonce_hex).ok().and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok());
-        if let Some(nonce) = nonce {
+        if self.replay.is_none() && let Some(nonce) = nonce {
             if self.challenges.policy_current(&nonce, current.as_deref()).is_err() {
                 eprintln!(
                     "ghost-gate-bridge: refusing a session for gate {gate_id}: the policy was replaced while \
@@ -550,7 +606,23 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                 return None;
             }
         }
-        let grant = self.access.as_mut()?.grant(gate_id).ok()?;
+        let grant = if let Some(replay) = self.replay.as_mut() {
+            let nonce = nonce?;
+            let existing = replay.get(&nonce).ok()?;
+            // The policy hash was fixed at challenge issue. A policy replacement is not a reason
+            // to reinterpret an old proof under a new threshold.
+            if existing.policy_hash.as_deref() != current.as_deref() {
+                return None;
+            }
+            let authorization_id = format!("gg-auth-{}", hex::encode(nonce));
+            let token = existing.access_token.clone().unwrap_or_else(|| hex::encode(random_nonce()));
+            let record = replay.authorize(&nonce, &authorization_id, &token, crate::session::now_unix()).ok()?;
+            let authorization_id = record.authorization_id.as_deref()?;
+            let token = record.access_token.as_deref()?;
+            self.access.as_mut()?.grant_idempotent(gate_id, authorization_id, token).ok()?
+        } else {
+            self.access.as_mut()?.grant(gate_id).ok()?
+        };
         // The grant's own remaining life is the session duration the visitor was shown. It is the
         // visitor's OWN session, so its length discloses nothing about anyone else.
         let valid = grant.expires_unix.saturating_sub(crate::session::now_unix());
@@ -836,6 +908,15 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                 return Response::error(500, "GG: the challenge could not be recorded");
             },
         };
+        // The caller does not receive a nonce until its server-authoritative bindings have been
+        // persisted. A configured durable coordinator failing here is a 503, never a quiet
+        // fallback to the local ChallengeBook.
+        let replay_record = self.replay_record(id, &issued);
+        if let Some(replay) = self.replay.as_mut()
+            && let Err(error) = replay.create(&replay_record)
+        {
+            return Response::error(503, error.to_string());
+        }
         // The challenge's own fields are named rather than serialised as a blob, so a relying site reads
         // the binding it is about to rely on. `gate` and `resource` are addresses, not names.
         let challenge_json = match &issued.challenge {
@@ -906,13 +987,13 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
 
         // The reader must exist before anything else: a bridge with no chain access has no
         // credential mode, and saying so is the honest answer.
-        let Some(chain) = self.chain.as_ref() else {
+        if self.chain.is_none() {
             return Response::error(
                 503,
                 "GG: this bridge has no chain reader configured, so credential proofs cannot be verified. \
                  Set GG_INDEXER_ENDPOINT to enable the credential mode.",
             );
-        };
+        }
         // The scope: a policy decision about the gate, which is not a function of the request body.
         // It is checked AFTER the body parses (a malformed request is malformed whatever the gate)
         // and AFTER the reader exists (a bridge with no reader has no credential mode at all).
@@ -955,7 +1036,19 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
         // delivery cannot verify the same challenge twice and race its eventual authorization.
         let nonce = challenge.nonce().into_array();
         let session_commitment = challenge.session_commitment().to_vec();
+        let job_id = hex::encode(&crate::session::random_nonce()[..8]);
+        match self.reserve_replay(id, &nonce, &job_id) {
+            Ok(Some(Reservation::Pending { proof_job_id })) => {
+                return Response::json(202, &serde_json::json!({ "proof_id": proof_job_id, "idempotent": true }));
+            }
+            Ok(Some(Reservation::Authorized(_))) => {
+                return Response::json(409, &serde_json::json!({ "refused": "GG: challenge is already authorized" }));
+            }
+            Ok(Some(Reservation::Reserved(_))) | Ok(None) => {}
+            Err(error) => return Response::error(503, error.to_string()),
+        }
         if let Err(error) = self.challenges.reserve_for_submission(&nonce, &session_commitment) {
+            self.release_replay_refused(id, &nonce);
             return Response::error(409, error.to_string());
         }
 
@@ -970,6 +1063,9 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             challenge_string: &nonce_hex,
         };
 
+        // Borrow only after the durable reservation. Holding this immutable borrow while the
+        // coordinator mutates would also make the lock ordering hard to audit.
+        let chain = self.chain.as_ref().expect("checked before challenge reservation");
         let outcome = verifier.verify(chain, &parsed).await;
         match outcome {
             Ok(receipt) => {
@@ -986,7 +1082,6 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                         challenge.session_commitment(),
                     );
                 }
-                let job_id = hex::encode(&crate::session::random_nonce()[..8]);
                 let job_nonce = challenge.nonce().into_array();
                 self.jobs.push(ProofJob {
                     id: job_id.clone(),
@@ -1059,6 +1154,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             }
             Err(refusal) => {
                 let _ = self.challenges.release_submission(&nonce, &session_commitment);
+                self.release_replay_refused(id, &nonce);
                 // The refusal is a real operation too — record it in the attempt's trace so
                 // the inspector shows why the credential was refused, without leaking
                 // secrets (Trace::push sanitizes every detail at the boundary).
@@ -1130,6 +1226,18 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
 
         let nonce = challenge.nonce().into_array();
         let session_commitment = challenge.session_commitment().to_vec();
+        let job_id_bytes = random_nonce();
+        let job_id = hex::encode(&job_id_bytes[..8]);
+        match self.reserve_replay(id, &nonce, &job_id) {
+            Ok(Some(Reservation::Pending { proof_job_id })) => {
+                return Response::json(202, &serde_json::json!({ "proof_id": proof_job_id, "idempotent": true }));
+            }
+            Ok(Some(Reservation::Authorized(_))) => {
+                return Response::json(409, &serde_json::json!({ "refused": "GG: challenge is already authorized" }));
+            }
+            Ok(Some(Reservation::Reserved(_))) | Ok(None) => {}
+            Err(error) => return Response::error(503, error.to_string()),
+        }
         match self.challenges.reserve_for_submission(&nonce, &session_commitment) {
             Ok(()) => {}
             Err(crate::session::BookError::InProgress) => {
@@ -1143,14 +1251,15 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                 }
                 return Response::error(409, "GG: a proof for this challenge is already being processed");
             }
-            Err(error) => return Response::error(409, error.to_string()),
+            Err(error) => {
+                self.release_replay_refused(id, &nonce);
+                return Response::error(409, error.to_string());
+            }
         }
 
         // Dispatch on the gate's typed condition, not on a string: the two proof paths share the
         // challenge bookkeeping and nothing else. The job id is minted once here so both paths
         // answer with the same shape.
-        let job_id_bytes = random_nonce();
-        let job_id = hex::encode(&job_id_bytes[..8]);
         let attempt = request.attempt.as_deref();
         match gate.kind() {
             crate::gate_registry::ProofKind::Ootle => self.prove_ootle(id, challenge, job_id, attempt).await,
@@ -1224,6 +1333,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                     },
                 );
                 let _ = self.challenges.release_submission(&nonce, challenge.session_commitment.as_slice());
+                self.release_replay_refused(id, &nonce);
                 return Response::json(202, &serde_json::json!({ "proof_id": job_id }));
             }
         };
@@ -1257,7 +1367,12 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                         reason: e.to_string(),
                     },
                 );
-                let _ = self.challenges.release_submission(&nonce, challenge.session_commitment.as_slice());
+                // A transport error after submit is ambiguous: walletd may have accepted the
+                // transaction while its response was lost. Durable mode keeps the reservation
+                // until a reconciler can establish finality, rather than submitting again.
+                if self.replay.is_none() {
+                    let _ = self.challenges.release_submission(&nonce, challenge.session_commitment.as_slice());
+                }
                 Response::json(202, &serde_json::json!({ "proof_id": job_id }))
             }
         }
@@ -1314,10 +1429,12 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                         reason: e.to_string(),
                     },
                 );
-                let _ = self.challenges.release_submission(
-                    &xtm_challenge.nonce.into_array(),
-                    xtm_challenge.session_commitment.as_slice(),
-                );
+                if self.replay.is_none() {
+                    let _ = self.challenges.release_submission(
+                        &xtm_challenge.nonce.into_array(),
+                        xtm_challenge.session_commitment.as_slice(),
+                    );
+                }
                 Response::json(202, &serde_json::json!({ "proof_id": job_id }))
             }
         }
@@ -1410,13 +1527,14 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                         let session = issued.challenge.session_commitment().to_vec();
                         let _ = self.challenges.release_submission(&nonce, &session);
                     }
+                    self.release_replay_refused(&gate_id, &nonce);
                 }
                 Ok(crate::wallet::CommitOutcome::Pending) => {}
                 Err(e) => {
                     self.jobs[index].status = ProofStatus::Failed {
                         reason: e.to_string(),
                     };
-                    if let Ok(issued) = self.challenges.peek(&nonce) {
+                    if self.replay.is_none() && let Ok(issued) = self.challenges.peek(&nonce) {
                         let session = issued.challenge.session_commitment().to_vec();
                         let _ = self.challenges.release_submission(&nonce, &session);
                     }
@@ -1503,6 +1621,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                     reason: other.to_string(),
                 };
                 let _ = self.challenges.release_submission(&nonce, xtm_challenge.session_commitment.as_slice());
+                self.release_replay_refused(&gate_id, &nonce);
             },
         }
     }
@@ -1969,6 +2088,35 @@ mod tests {
         assert_eq!(retry_json["proof_id"], first_id);
         assert_eq!(retry_json["idempotent"], true);
         assert_eq!(b.wallet.submitted.len(), 1, "one nonce must create at most one wallet submission while pending");
+    }
+
+    #[tokio::test]
+    async fn configured_replay_store_persists_issue_and_reserves_the_live_handler_once() {
+        use crate::replay_store::{MemoryReplayStore, ReplayState};
+
+        let mut b = bridge(FakeWallet::new());
+        b.set_replay_store(Box::new(MemoryReplayStore::default()));
+        let (nonce, session) = issue(&mut b).await;
+        let nonce_bytes: [u8; 32] = hex::decode(&nonce).unwrap().try_into().unwrap();
+        let issued = b.replay.as_mut().unwrap().get(&nonce_bytes).unwrap();
+        assert_eq!(issued.gate, "g1");
+        assert_eq!(issued.network, network::LOCALNET);
+        assert_eq!(issued.visitor_session, hex::decode(&session).unwrap());
+        assert_eq!(issued.state, ReplayState::Issued);
+
+        let request = serde_json::json!({"gate_id":"g1","challenge_nonce":nonce,"session_commitment":session});
+        let first = b.handle(&post("/gate/g1/prove", request.clone())).await;
+        assert_eq!(first.status, 202, "{}", first.body);
+        let first_id = serde_json::from_str::<serde_json::Value>(&first.body).unwrap()["proof_id"].as_str().unwrap().to_string();
+        let reserved = b.replay.as_mut().unwrap().get(&nonce_bytes).unwrap();
+        assert_eq!(reserved.state, ReplayState::Submitted);
+        assert_eq!(reserved.proof_job_id.as_deref(), Some(first_id.as_str()));
+
+        let retry = b.handle(&post("/gate/g1/prove", request)).await;
+        let retry_json: serde_json::Value = serde_json::from_str(&retry.body).unwrap();
+        assert_eq!(retry.status, 202, "{}", retry.body);
+        assert_eq!(retry_json["proof_id"], first_id);
+        assert_eq!(b.wallet.submitted.len(), 1, "durable reservation prevents a second submission");
     }
 
     #[tokio::test]

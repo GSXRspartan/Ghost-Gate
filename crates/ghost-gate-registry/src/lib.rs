@@ -96,6 +96,10 @@ pub struct AdminSession {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerifiedSession {
     pub token: String,
+    /// Stable server-side authorization identity from the replay coordinator. It makes recovery
+    /// idempotent after a crash between recording an authorization and returning its session.
+    #[serde(default)]
+    pub authorization_id: Option<String>,
     pub application_id: String,
     /// The gate the proof actually satisfied.
     pub proven_gate: String,
@@ -579,6 +583,26 @@ pub fn issue_session(
     policy_hash: String,
     fresh_entropy: &mut [u8; 32],
 ) -> Result<VerifiedSession, String> {
+    rand::fill(fresh_entropy);
+    let token = hex::encode(fresh_entropy);
+    issue_session_with_token(
+        reg, application_id, gate_id, policy_hash, &format!("legacy-{token}"), &token,
+    )
+}
+
+/// Same policy validation as [`issue_session`], with a token already created and durably held by
+/// the replay coordinator. It is never for browser input.
+pub fn issue_session_with_token(
+    reg: &Registry,
+    application_id: &str,
+    gate_id: &str,
+    policy_hash: String,
+    authorization_id: &str,
+    token: &str,
+) -> Result<VerifiedSession, String> {
+    if authorization_id.is_empty() || token.len() != 64 || !token.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("invalid server-side authorization identity or session token".into());
+    }
     let app = reg
         .application(application_id)
         .ok_or_else(|| format!("unknown application {application_id}"))?;
@@ -601,9 +625,9 @@ pub fn issue_session(
     }
     let granted = app.granted_by(gate_id);
     let issued = now_unix();
-    rand::fill(fresh_entropy);
     Ok(VerifiedSession {
-        token: hex::encode(fresh_entropy),
+        token: token.to_ascii_lowercase(),
+        authorization_id: Some(authorization_id.to_string()),
         application_id: application_id.to_string(),
         proven_gate: gate_id.to_string(),
         policy_hash,
@@ -813,6 +837,24 @@ mod tests {
     }
 
     #[test]
+    fn durable_authorization_recovers_one_session_instead_of_minting_two() {
+        let dir = std::env::temp_dir().join(format!("gg-session-idempotent-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let paths = StorePaths::new(&dir);
+        let reg = registry_with_tiers();
+        save_registry(&paths, &reg).unwrap();
+        let hash = reg.current_version("meme", "gold").unwrap().policy_hash.clone();
+        let mut plane = AccessPlane::new(paths.clone());
+        let token = "ab".repeat(32);
+        let first = plane.issue_idempotent("meme", "gold", hash.clone(), "auth-1", &token).unwrap();
+        let recovered = plane.issue_idempotent("meme", "gold", hash, "auth-1", &token).unwrap();
+        assert_eq!(first.token, token);
+        assert_eq!(recovered.token, first.token);
+        assert_eq!(load_sessions(&paths).unwrap().len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_policy_change_kills_old_sessions_evidence_even_within_ttl() {
         let reg = registry_with_tiers();
         let app = reg.application("meme").unwrap();
@@ -1010,6 +1052,46 @@ impl AccessPlane {
             granted: session.granted.clone(),
             expires_unix: session.expires_unix,
             test_lane: session.test_lane,
+        };
+        fresh.push(session);
+        save_sessions(&self.paths, &fresh)?;
+        self.cached_sessions = Some((fresh, std::time::SystemTime::now()));
+        Ok(grant)
+    }
+
+    /// Install or recover one session for a durable replay authorization. This is deliberately
+    /// idempotent rather than pretending two separate files form a transaction: a retry passes
+    /// the same durable authorization identity and bearer token and recovers the same session.
+    pub fn issue_idempotent(
+        &mut self,
+        application_id: &str,
+        gate_id: &str,
+        policy_hash: String,
+        authorization_id: &str,
+        token: &str,
+    ) -> Result<AccessGrant, String> {
+        let reg = self.registry()?;
+        let _lock = StoreLock::acquire(&self.paths)?;
+        let mut fresh = load_sessions(&self.paths)?;
+        prune_sessions(&mut fresh);
+        if let Some(existing) = fresh.iter().find(|s| s.authorization_id.as_deref() == Some(authorization_id)) {
+            if existing.application_id != application_id || existing.proven_gate != gate_id
+                || existing.policy_hash != policy_hash || existing.token != token {
+                return Err("authorization identity conflicts with an existing session".into());
+            }
+            return Ok(AccessGrant {
+                token: existing.token.clone(), application_id: existing.application_id.clone(),
+                proven_gate: existing.proven_gate.clone(), granted: existing.granted.clone(),
+                expires_unix: existing.expires_unix, test_lane: existing.test_lane,
+            });
+        }
+        let session = issue_session_with_token(
+            &reg, application_id, gate_id, policy_hash, authorization_id, token,
+        )?;
+        let grant = AccessGrant {
+            token: session.token.clone(), application_id: session.application_id.clone(),
+            proven_gate: session.proven_gate.clone(), granted: session.granted.clone(),
+            expires_unix: session.expires_unix, test_lane: session.test_lane,
         };
         fresh.push(session);
         save_sessions(&self.paths, &fresh)?;

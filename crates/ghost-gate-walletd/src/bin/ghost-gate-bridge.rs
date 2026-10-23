@@ -760,8 +760,17 @@ where
     bridge.gates = registry;
     handle.plane.apply_revocations(&snapshot.revoked_session_prefixes)?;
     bridge.access = Some(handle);
+    // Registry-backed bridges issue real access sessions. They must also coordinate replay state
+    // durably; selecting MemoryReplayStore here would turn a restart into a second authorization.
+    let replay_dir = std::env::var("GG_REPLAY_STORE_PATH")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "GG_BINDINGS_PATH enables real sessions and therefore requires GG_REPLAY_STORE_PATH; refusing a process-local replay fallback".to_string())?;
+    let replay = ghost_gate_bridge::replay_store::FileReplayStore::open(&replay_dir)
+        .map_err(|error| format!("cannot open durable replay store at {replay_dir:?}: {error}"))?;
+    bridge.set_replay_store(Box::new(replay));
     println!(
-        "  access plane: registry-backed ({bound} of {count} snapshot gates bound; {} revocation prefixes)",
+        "  access plane: registry-backed ({bound} of {count} snapshot gates bound; {} revocation prefixes; durable local replay store configured)",
         snapshot.revoked_session_prefixes.len()
     );
     Ok(())

@@ -36,6 +36,9 @@ pub struct ReplayRecord {
     pub relying_site: String,
     pub visitor_session: Vec<u8>,
     pub network: u8,
+    /// Policy version digest selected by server configuration at issue time. A replacement means
+    /// this challenge may never create a session under the newer policy.
+    pub policy_hash: Option<String>,
     pub expires_unix: u64,
     pub state: ReplayState,
     /// Server-generated id of the first accepted submission; used for same-visitor retries.
@@ -99,6 +102,7 @@ fn matches(record: &ReplayRecord, expected: &ReplayRecord, now: u64) -> bool {
         && record.relying_site == expected.relying_site
         && record.visitor_session == expected.visitor_session
         && record.network == expected.network
+        && record.policy_hash == expected.policy_hash
 }
 
 fn reserve_record(record: &mut ReplayRecord, expected: &ReplayRecord, job: &str, now: u64)
@@ -238,7 +242,7 @@ impl ReplayStore for FileReplayStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn record() -> ReplayRecord { ReplayRecord { nonce: [7; 32], tenant: "tenant-a".into(), gate: "gate-a".into(), relying_site: "site-a".into(), visitor_session: vec![1], network: 38, expires_unix: 10, state: ReplayState::Issued, proof_job_id: None, authorization_id: None, access_token: None } }
+    fn record() -> ReplayRecord { ReplayRecord { nonce: [7; 32], tenant: "tenant-a".into(), gate: "gate-a".into(), relying_site: "site-a".into(), visitor_session: vec![1], network: 38, policy_hash: Some("policy-a".into()), expires_unix: 10, state: ReplayState::Issued, proof_job_id: None, authorization_id: None, access_token: None } }
 
     #[test]
     fn identical_retry_gets_original_job_but_another_visitor_cannot() {

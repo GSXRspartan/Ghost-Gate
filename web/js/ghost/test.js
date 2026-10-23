@@ -383,6 +383,38 @@ test("a wallet rejection (4001) surfaces as a declined request, not an error", a
   }
 });
 
+test("a zero-balance Sapient account cannot turn connection capability into eligibility", async () => {
+  // This mirrors the real adversarial visitor path: the extension can be present, local, on the
+  // right network and able to sign, while still being unable to construct the required 10 tTARI
+  // output. The adapter must neither submit nor sign a made-up credential after that refusal.
+  const { provider, calls } = fakeTari({ caps: sapientCapabilities("local") });
+  const original = provider.request.bind(provider);
+  provider.request = async (args) => {
+    if (args.method === "tari_createTransactionRequest") {
+      calls.push({ method: args.method, params: args.params });
+      throw Object.assign(new Error("insufficient eligible tTARI for this request"), { code: -32603 });
+    }
+    return original(args);
+  };
+  const undo = withWindow(provider);
+  try {
+    const p = sapientProvider();
+    const probe = await p.probe();
+    assert.deepEqual(probe.modes.map((mode) => mode.mode), ["credential"], "capability is not a balance verdict");
+    await assert.rejects(
+      () => p.approveAndBuildProof("credential", {
+        resourceAddress: "resource_gate", amount: "10000000", minimumValuePromise: "10000000", maxFee: "0",
+      }),
+      /insufficient eligible tTARI/,
+    );
+    assert.deepEqual(calls.map((call) => call.method), ["tari_getCapabilities", "tari_createTransactionRequest"]);
+    assert(!calls.some((call) => call.method === "tari_submitTransactionRequest"));
+    assert(!calls.some((call) => call.method === "tari_signOwnershipChallenge"));
+  } finally {
+    undo();
+  }
+});
+
 test("a wallet that returns no substateId is an error, never a silent skip", async () => {
   const { provider } = fakeTari({ caps: sapientCapabilities("local") });
   const original = provider.request.bind(provider);

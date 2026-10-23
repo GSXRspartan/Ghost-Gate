@@ -100,6 +100,28 @@ impl AccessHandle {
         self.plane.issue(&info.application_id, gate_id, info.policy_hash)
     }
 
+    /// Recover the one access session attached to a durable replay authorization. The browser
+    /// never supplies either value: both are generated and persisted by the bridge replay store.
+    pub fn grant_idempotent(
+        &mut self,
+        gate_id: &str,
+        authorization_id: &str,
+        token: &str,
+    ) -> Result<AccessGrant, String> {
+        let info = self
+            .index
+            .get(gate_id)
+            .ok_or_else(|| format!("gate {gate_id} is not registry-bound"))?
+            .clone();
+        self.plane.issue_idempotent(
+            &info.application_id,
+            gate_id,
+            info.policy_hash,
+            authorization_id,
+            token,
+        )
+    }
+
     /// The full server-side access decision.
     pub fn check(&mut self, token: &str, gate_id: &str) -> AccessDecision {
         let Some(info) = self.index.get(gate_id).cloned() else {
