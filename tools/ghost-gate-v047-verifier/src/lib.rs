@@ -10,6 +10,8 @@
 
 use std::collections::BTreeMap;
 
+use serde::Deserialize;
+
 use ootle_network::Network;
 use tari_engine_types::{
     SubstateVersion,
@@ -33,10 +35,53 @@ pub struct VerifiedEvidence {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConsensusError {
+    #[error("GG: no independently approved pinned trust anchor is configured")]
+    UntrustedAnchor,
+    #[error("GG: consensus evidence is stale under the configured epoch policy")]
+    StaleEvidence,
     #[error("GG: the proof is for an epoch not reached by the pinned handover chain")]
     EpochNotTrusted,
     #[error("GG: the proof's committee cannot be verified against the trusted validator set: {0}")]
     Verification(#[from] LightClientError),
+}
+
+/// A reviewable trust-root envelope. The committee is not trusted by itself: it is verified
+/// against the independently reviewed validator-set hash during construction.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PinnedAnchorConfig {
+    pub network: u8,
+    pub anchor_epoch: u64,
+    pub walk_shard: u32,
+    pub validator_set_hash: serde_json::Value,
+    pub walked_committee: serde_json::Value,
+    pub provenance: String,
+    pub reviewed_at: String,
+    pub reviewed_by: String,
+    pub upstream_commit: String,
+    pub review_status: String,
+    #[serde(default = "default_max_proof_age_epochs")]
+    pub max_proof_age_epochs: u64,
+}
+
+fn default_max_proof_age_epochs() -> u64 { 1 }
+
+impl PinnedAnchorConfig {
+    /// Parse an operator-reviewed anchor. No indexer response can cause an untrusted config to
+    /// become trusted; `approved` review and the exact v0.47 source revision are mandatory.
+    pub fn into_verifier(self) -> Result<(PinnedConsensusVerifier, u64), ConsensusError> {
+        if self.review_status != "approved" || self.provenance.trim().is_empty()
+            || self.reviewed_at.trim().is_empty() || self.reviewed_by.trim().is_empty()
+            || self.upstream_commit != "9dabb2a76a9ad5c6e99dfa180ab7bbbcb1a05a47"
+        { return Err(ConsensusError::UntrustedAnchor); }
+        let network = Network::try_from(self.network).map_err(|_| ConsensusError::UntrustedAnchor)?;
+        let hash = serde_json::from_value::<ValidatorSetHash>(self.validator_set_hash)
+            .map_err(|_| ConsensusError::UntrustedAnchor)?;
+        let committee = serde_json::from_value::<ValidatorSetCommittee>(self.walked_committee)
+            .map_err(|_| ConsensusError::UntrustedAnchor)?;
+        let verifier = PinnedConsensusVerifier::pinned(network, Shard::from(self.walk_shard), Epoch(self.anchor_epoch), &hash, &committee)?;
+        Ok((verifier, self.max_proof_age_epochs))
+    }
 }
 
 /// A validator-set chain rooted in one externally pinned v0.47 validator-set hash.
@@ -79,6 +124,23 @@ impl PinnedConsensusVerifier {
 
     pub fn latest_epoch(&self) -> Epoch {
         self.latest.epoch()
+    }
+
+    /// A valid historical inclusion proof is not present-holdings evidence. This check uses the
+    /// latest verified handover epoch, never an indexer's unverified reported epoch.
+    pub fn verify_substate_fresh(
+        &self,
+        max_proof_age_epochs: u64,
+        substate_id: &SubstateId,
+        version: SubstateVersion,
+        value: &SubstateValue,
+        proof: &SubstateProof,
+        committee: &ValidatorSetCommittee,
+    ) -> Result<VerifiedEvidence, ConsensusError> {
+        if proof.anchor.epoch.as_u64().saturating_add(max_proof_age_epochs) < self.latest.epoch().as_u64() {
+            return Err(ConsensusError::StaleEvidence);
+        }
+        self.verify_substate(substate_id, version, value, proof, committee)
     }
 
     /// Verify exactly one next-epoch handover. The official implementation checks checkpoint
@@ -172,5 +234,16 @@ mod tests {
         let proof = substate_proof(&set, &id, SubstateVersion::ZERO, &value);
         let wrong = SubstateValue::ClaimedOutputTombstone(ClaimedOutputTombstone { value: 8 });
         assert!(verifier.verify_substate(&id, SubstateVersion::ZERO, &wrong, &proof, &set.committee(low())).is_err());
+    }
+
+    #[test]
+    fn draft_or_provenance_free_anchor_config_never_becomes_trusted() {
+        let draft: PinnedAnchorConfig = serde_json::from_value(serde_json::json!({
+            "network": 38, "anchorEpoch": 2, "walkShard": 0,
+            "validatorSetHash": "00", "walkedCommittee": {},
+            "provenance": "", "reviewedAt": "", "reviewedBy": "",
+            "upstreamCommit": "9dabb2a76a9ad5c6e99dfa180ab7bbbcb1a05a47", "reviewStatus": "draft"
+        })).unwrap();
+        assert!(matches!(draft.into_verifier(), Err(ConsensusError::UntrustedAnchor)));
     }
 }
