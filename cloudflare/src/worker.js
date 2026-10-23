@@ -6,7 +6,7 @@ const CHALLENGE_TTL_SECS = 180;
 const MAX_PROOF_BYTES = 8 * 1024;
 
 function catalog(env) {
-  try { return parseGateCatalog(env.GG_GATE_CATALOG); }
+  try { return parseGateCatalog(env.GG_GATE_CATALOG, { allowLocalHttp: env.GG_LOCAL_DEVELOPMENT === "1" }); }
   catch (error) { return error; }
 }
 
@@ -30,8 +30,22 @@ function cookies(request) {
   }).filter(([key]) => key));
 }
 
-function cookie(name, value, maxAge = null) {
-  return `${name}=${value}; Path=/; HttpOnly; Secure; SameSite=Strict${maxAge === null ? "" : `; Max-Age=${maxAge}`}`;
+function localDevelopment(request, env) {
+  if (env.GG_LOCAL_DEVELOPMENT !== "1") return false;
+  const { hostname } = new URL(request.url);
+  return ["localhost", "127.0.0.1", "[::1]"].includes(hostname);
+}
+
+function cookie(name, value, maxAge = null, secure = true) {
+  return `${name}=${value}; Path=/; HttpOnly; ${secure ? "Secure; " : ""}SameSite=Strict${maxAge === null ? "" : `; Max-Age=${maxAge}`}`;
+}
+
+function cookieNames(request, env) {
+  // `__Host-` cookies intentionally cannot work over local HTTP. The only exception is an explicit
+  // localhost-only development process; deployments retain the stronger names and Secure flag.
+  return localDevelopment(request, env)
+    ? { visitor: "gg_visitor", access: "gg_access", nonce: "gg_nonce", secure: false }
+    : { visitor: "__Host_gg_visitor", access: "__Host_gg_access", nonce: "__Host_gg_nonce", secure: true };
 }
 
 function coordinator(env, gate, nonce) {
@@ -138,16 +152,24 @@ export default {
       service: "ghost-gate-edge", coordinator: Boolean(env.REPLAY_COORDINATOR && env.GG_COORDINATOR_TOKEN),
       verifier: Boolean(env.GG_VERIFIER_ORIGIN && env.GG_VERIFIER_TOKEN && env.GG_VERIFIER_REQUEST_KEY && env.GG_VERIFIER_RESPONSE_KEY),
     });
+    if (request.method === "GET" && !parsed.pathname.startsWith("/api/") && env.ASSETS) {
+      // The hosted product owns `/`; the older bridge serves its own local assets and never runs
+      // through this Worker. All other static requests retain their normal asset path.
+      if (parsed.pathname === "/") return env.ASSETS.fetch(new Request(new URL("/hosted.html", request.url), request));
+      return env.ASSETS.fetch(request);
+    }
     const gates = catalog(env);
     if (gates instanceof Error) return failClosed("hosted gate configuration is invalid");
     const match = route(parsed.pathname);
+    if (request.method === "GET" && parsed.pathname === "/api/gates") return json(200, { gates });
     if (match.kind === "gates" && request.method === "GET") return json(200, { gates: gates.filter((gate) => gate.tenant === match.tenant) });
     if (match.kind === "none") return json(404, { error: "GG: route not found" });
     const checked = gateAndOrigin(request, gates, match);
     if (checked.error) return checked.error;
     const gate = checked.gate;
     const allCookies = cookies(request);
-    const visitorSession = allCookies.__Host_gg_visitor || randomId();
+    const names = cookieNames(request, env);
+    const visitorSession = allCookies[names.visitor] || randomId();
 
     if (match.kind === "challenge" && request.method === "POST") {
       const nonce = randomId();
@@ -157,7 +179,7 @@ export default {
       return json(201, { state: "issued", challenge: {
         nonce, tenant: gate.tenant, gateId: gate.gateId, network: gate.network,
         resourceAddress: gate.resourceAddress, thresholdRaw: gate.thresholdRaw, policyVersion: gate.policyVersion, expiresUnix,
-      } }, { "set-cookie": cookie("__Host_gg_visitor", visitorSession, CHALLENGE_TTL_SECS) });
+      } }, { "set-cookie": cookie(names.visitor, visitorSession, CHALLENGE_TTL_SECS, names.secure) });
     }
 
     if (match.kind === "proof" && request.method === "POST") {
@@ -198,7 +220,7 @@ export default {
       });
       if (!authorized.ok) return authorized;
       return json(200, { state: "authorized", authorized: true, expiresUnix: sessionExpiresUnix }, {
-        cookies: [cookie("__Host_gg_access", sessionToken, gate.sessionTtlSecs), cookie("__Host_gg_nonce", nonce, gate.sessionTtlSecs)],
+        cookies: [cookie(names.access, sessionToken, gate.sessionTtlSecs, names.secure), cookie(names.nonce, nonce, gate.sessionTtlSecs, names.secure)],
       });
     }
 
@@ -207,8 +229,8 @@ export default {
       return coordinatorCall(env, gate, match.nonce, "status", binding(gate, match.nonce, visitorSession));
     }
 
-    const nonce = allCookies.__Host_gg_nonce;
-    const sessionToken = allCookies.__Host_gg_access;
+    const nonce = allCookies[names.nonce];
+    const sessionToken = allCookies[names.access];
     if (!nonce || !/^[0-9a-f]{64}$/i.test(nonce)) return json(401, { authorized: false, error: "GG: no active session" });
     if (match.kind === "session" && request.method === "GET") return coordinatorCall(env, gate, nonce, "access", { ...binding(gate, nonce, visitorSession), sessionToken });
     if (match.kind === "protected" && request.method === "GET") {
@@ -219,9 +241,9 @@ export default {
     if (match.kind === "revoke" && request.method === "POST") {
       const response = await coordinatorCall(env, gate, nonce, "revoke", { ...binding(gate, nonce, visitorSession), sessionToken });
       if (!response.ok) return response;
-      return json(200, { revoked: true }, { "set-cookie": cookie("__Host_gg_access", "", 0) });
+      return json(200, { revoked: true }, { "set-cookie": cookie(names.access, "", 0, names.secure) });
     }
-    if (match.kind === "logout" && request.method === "POST") return json(200, { loggedOut: true }, { "set-cookie": cookie("__Host_gg_access", "", 0) });
+    if (match.kind === "logout" && request.method === "POST") return json(200, { loggedOut: true }, { "set-cookie": cookie(names.access, "", 0, names.secure) });
     return json(404, { error: "GG: route not found" });
   },
 };

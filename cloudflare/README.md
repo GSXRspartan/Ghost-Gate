@@ -4,6 +4,23 @@ This directory is the hosted-style edge for Ghost Gate. It is deliberately separ
 local walletd bridge: it contains neither a walletd endpoint nor an operator account, seed, or
 wallet API token.
 
+## Hosted browser entrypoint
+
+`/` is a static, Cloudflare-served browser application (`web/hosted.html`). It reuses the
+capability-driven Sapient and Tari Universe adapters: a visitor may connect an account, inspect
+its reported Ootle network/capabilities, select only a server-published gate, and request a
+server-bound challenge. The account address and account name are not sent to the Worker.
+
+The UI deliberately does **not** construct a proof transaction or display access granted until the
+hosted verifier independently validates current chain/finality evidence. A connected wallet,
+ownership signature, client balance metadata, or an indexer's `verified` field is not enough.
+
+For a local browser-only Worker run, `GG_LOCAL_DEVELOPMENT=1` permits an `http://localhost` or
+`http://127.0.0.1` relying site in `GG_GATE_CATALOG` and uses non-`__Host-` development cookies.
+That exception is rejected unless the explicit flag is present, and it is never suitable for a
+deployed origin. Production gate origins remain exact HTTPS origins and use Secure `__Host-`
+cookies.
+
 ## Authority split
 
 - The `ReplayCoordinator` Durable Object is the single authority for a hosted challenge nonce.

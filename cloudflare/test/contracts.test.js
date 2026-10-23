@@ -11,6 +11,21 @@ test("edge discovery only emits public, server-configured gate metadata", () => 
   assert.equal(parsed[0].thresholdRaw, "10000000");
 });
 
+test("localhost HTTP is opt-in development configuration only", () => {
+  const local = JSON.stringify([{ tenant: "tenant-a", gateId: "esm10", relyingSite: "http://127.0.0.1:8787", network: 38, resourceAddress: "resource_test", thresholdRaw: "10000000" }]);
+  assert.throws(() => parseGateCatalog(local));
+  assert.equal(parseGateCatalog(local, { allowLocalHttp: true })[0].relyingSite, "http://127.0.0.1:8787");
+});
+
+test("hosted Worker sends root to the hosted static entrypoint", async () => {
+  const seen = [];
+  const response = await worker.fetch(new Request("https://edge.example/"), {
+    ASSETS: { fetch(request) { seen.push(new URL(request.url).pathname); return new Response("site"); } },
+  });
+  assert.equal(await response.text(), "site");
+  assert.deepEqual(seen, ["/hosted.html"]);
+});
+
 test("hosted proof endpoints fail closed without an authenticated verifier", async () => {
   const request = new Request("https://edge.example/api/tenants/tenant-a/gates/esm10/proof", { method: "POST", headers: { origin: "https://gate.example" } });
   const response = await worker.fetch(request, { GG_GATE_CATALOG: catalog });

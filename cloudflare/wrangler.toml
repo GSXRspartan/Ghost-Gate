@@ -2,6 +2,9 @@ name = "ghost-gate"
 main = "src/worker.js"
 compatibility_date = "2026-10-23"
 
+[assets]
+directory = "../web"
+
 [[durable_objects.bindings]]
 name = "REPLAY_COORDINATOR"
 class_name = "ReplayCoordinator"

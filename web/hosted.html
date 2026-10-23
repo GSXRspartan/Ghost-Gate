@@ -1,0 +1,59 @@
+<!doctype html>
+<!-- Hosted Ghost Gate UI. This page is served by the Cloudflare Worker, never by walletd. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Ghost Gate</title>
+  <link rel="stylesheet" href="/hosted.css">
+</head>
+<body>
+  <main>
+    <header>
+      <p class="eyebrow">GHOST GATE</p>
+      <h1>Prove eligibility. Keep custody.</h1>
+      <p>Your browser wallet remains yours. Ghost Gate never asks for a seed, API key, or walletd account.</p>
+      <div class="mode" role="group" aria-label="Display mode">
+        <button id="simple-mode" class="selected" type="button">Simple</button>
+        <button id="technical-mode" type="button">Technical</button>
+      </div>
+    </header>
+
+    <section class="card">
+      <h2>Choose a gate</h2>
+      <label for="gate">Available eligibility policy</label>
+      <select id="gate" disabled><option>Loading server-configured gates…</option></select>
+      <p id="gate-summary" class="muted"></p>
+      <dl id="gate-detail" class="technical" hidden></dl>
+    </section>
+
+    <section class="card">
+      <h2>Connect your wallet</h2>
+      <div class="wallets" role="group" aria-label="Wallet provider">
+        <button data-wallet="sapient" type="button" class="selected">Sapient</button>
+        <button data-wallet="universe" type="button">Tari Universe</button>
+      </div>
+      <button id="connect" type="button" class="primary">Connect wallet</button>
+      <p id="wallet-status" class="muted">Connecting a wallet alone never grants access.</p>
+      <dl id="wallet-detail" class="technical" hidden></dl>
+    </section>
+
+    <section class="card">
+      <h2>Request a challenge</h2>
+      <p class="simple">This safely prepares a short-lived, one-time proof request. It does not move funds or charge a fee.</p>
+      <p class="technical" hidden>A challenge is tenant, gate, relying-site, network, resource, threshold, policy-version, and visitor-session bound in Durable Object storage.</p>
+      <button id="challenge" type="button" class="primary" disabled>Request challenge</button>
+      <p id="challenge-status" class="muted">Connect a compatible wallet first.</p>
+    </section>
+
+    <section class="card">
+      <h2>Eligibility verification</h2>
+      <p id="verification-status">No authorization has been issued.</p>
+      <p class="warning">Hosted credential verification remains unavailable until Ghost Gate independently validates current Esmeralda committee/finality evidence. A wallet connection, signature, claimed balance, or indexer assertion alone cannot open this gate.</p>
+      <button id="protected" type="button" disabled>Check protected area</button>
+    </section>
+  </main>
+  <script type="module" src="/hosted.js"></script>
+</body>
+</html>

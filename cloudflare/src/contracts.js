@@ -14,7 +14,7 @@ export function failClosed(message = "trusted proof verification is unavailable"
   return json(503, { error: `GG: ${message}`, authorized: false });
 }
 
-export function parseGateCatalog(raw) {
+export function parseGateCatalog(raw, { allowLocalHttp = false } = {}) {
   if (!raw) return [];
   let catalog;
   try { catalog = JSON.parse(raw); } catch { throw new Error("GG_GATE_CATALOG is not valid JSON"); }
@@ -28,8 +28,10 @@ export function parseGateCatalog(raw) {
     }
     let relyingOrigin;
     try { relyingOrigin = new URL(gate.relyingSite).origin; } catch { throw new Error("GG_GATE_CATALOG contains an invalid relying site"); }
-    if (relyingOrigin !== gate.relyingSite || !relyingOrigin.startsWith("https://")) {
-      throw new Error("GG_GATE_CATALOG relying sites must be HTTPS origins");
+    const localHttp = relyingOrigin.startsWith("http://")
+      && ["localhost", "127.0.0.1", "[::1]"].includes(new URL(gate.relyingSite).hostname);
+    if (relyingOrigin !== gate.relyingSite || (!relyingOrigin.startsWith("https://") && !(allowLocalHttp && localHttp))) {
+      throw new Error("GG_GATE_CATALOG relying sites must be HTTPS origins (except explicit localhost development)");
     }
     // The worker publishes only public policy metadata. It never stores a wallet API token, seed,
     // visitor account name, or server-side wallet selection.
