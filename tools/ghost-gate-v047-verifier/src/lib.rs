@@ -208,6 +208,11 @@ pub struct PinnedConsensusVerifier {
     trusted_sets: BTreeMap<Epoch, TrustedValidatorSetHash>,
 }
 
+/// The sidecar transport is intentionally sized for one observed Esmeralda checkpoint handover.
+/// Longer walks must be explicitly designed with a larger reviewed transport budget rather than
+/// making a single proof request unbounded.
+const MAX_HANDOVERS_PER_REQUEST: usize = 1;
+
 impl PinnedConsensusVerifier {
     /// Establish the only unauthenticated-to-authenticated boundary in this adapter.
     ///
@@ -266,8 +271,7 @@ impl PinnedConsensusVerifier {
         max_proof_age_epochs: u64,
         request: &ConsensusProofRequest,
     ) -> ConsensusProofResult {
-        const MAX_HANDOVERS: usize = 64;
-        if request.handovers.len() > MAX_HANDOVERS {
+        if request.handovers.len() > MAX_HANDOVERS_PER_REQUEST {
             return ConsensusProofResult { verdict: ChainVerdict::EvidenceUnavailable, evidence: None, reason: "handover_limit" };
         }
         for handover in &request.handovers {
@@ -332,7 +336,15 @@ mod tests {
     use ootle_network::Network;
     use tari_engine_types::{SubstateVersion, confidential::ClaimedOutputTombstone, substate::{SubstateId, SubstateValue}};
     use tari_ootle_common_types::{Epoch, shard::Shard};
-    use tari_ootle_light_client::test_fixtures::{NETWORK, ValidatorSetFixture, low, substate_proof};
+    use tari_ootle_light_client::test_fixtures::{
+        CheckpointSpec,
+        NETWORK,
+        Signers,
+        ValidatorSetFixture,
+        checkpoint_entry,
+        low,
+        substate_proof,
+    };
     use tari_template_lib_types::ClaimedOutputTombstoneAddress;
 
     use super::*;
@@ -394,6 +406,203 @@ mod tests {
         let result = verifier.verify_request(1, &request);
         assert_eq!(result.verdict, ChainVerdict::ChainVerified);
         assert_eq!(result.evidence.unwrap().network, NETWORK.as_byte());
+    }
+
+    #[test]
+    fn request_rejects_more_than_one_handover_before_parsing_evidence() {
+        let (mut verifier, set, id, value) = fixture();
+        let next = ValidatorSetFixture::new(3);
+        let checkpoint = checkpoint_entry(CheckpointSpec::handover(&set, &next));
+        let request = ConsensusProofRequest {
+            substate_id: id.to_string(),
+            version: SubstateVersion::ZERO,
+            value,
+            proof: substate_proof(
+                &set,
+                &id,
+                SubstateVersion::ZERO,
+                &SubstateValue::ClaimedOutputTombstone(ClaimedOutputTombstone { value: 7 }),
+            ),
+            committee: set.committee(low()),
+            handovers: vec![checkpoint.clone(), checkpoint],
+        };
+        let result = verifier.verify_request(1, &request);
+        assert_eq!(result.verdict, ChainVerdict::EvidenceUnavailable);
+        assert_eq!(result.reason, "handover_limit");
+        assert_eq!(verifier.latest_epoch(), set.epoch);
+    }
+
+    #[test]
+    fn signed_handover_requires_the_pinned_set_and_complete_authentic_evidence() {
+        let current = ValidatorSetFixture::new(2);
+        let next = ValidatorSetFixture::new(3);
+        let checkpoint = checkpoint_entry(CheckpointSpec::handover(&current, &next));
+        let mut verifier = PinnedConsensusVerifier::pinned(
+            NETWORK,
+            Shard::first(),
+            current.epoch,
+            &current.hash(),
+            &current.committee(low()),
+        )
+        .unwrap();
+        verifier.advance(&checkpoint).unwrap();
+        assert_eq!(verifier.latest_epoch(), next.epoch);
+
+        // A next-set hash cannot replace the current pinned root.
+        assert!(PinnedConsensusVerifier::pinned(
+            NETWORK,
+            Shard::first(),
+            current.epoch,
+            &next.hash(),
+            &current.committee(low()),
+        )
+        .is_err());
+
+        let mut changed_validator = checkpoint.clone();
+        changed_validator
+            .next_epoch_committee
+            .as_mut()
+            .unwrap()
+            .members[0]
+            .vote_power = 2;
+        // The API's `members` list is convenience data. The official verifier reads the members
+        // from the committee proof, so this cosmetic mutation cannot substitute a validator.
+        let mut verifier = PinnedConsensusVerifier::pinned(
+            NETWORK,
+            Shard::first(),
+            current.epoch,
+            &current.hash(),
+            &current.committee(low()),
+        )
+        .unwrap();
+        verifier.advance(&changed_validator).unwrap();
+        assert_eq!(verifier.latest_epoch(), next.epoch);
+
+        let mut changed_authenticated_validator = checkpoint.clone();
+        changed_authenticated_validator
+            .next_epoch_committee
+            .as_mut()
+            .unwrap()
+            .proof[0] ^= 1;
+        assert!(PinnedConsensusVerifier::pinned(
+            NETWORK,
+            Shard::first(),
+            current.epoch,
+            &current.hash(),
+            &current.committee(low()),
+        )
+        .unwrap()
+        .advance(&changed_authenticated_validator)
+        .is_err());
+
+        let insufficient_signers = Signers {
+            keys: current.low.keys[..2].to_vec(),
+        };
+        let missing_signer = checkpoint_entry(CheckpointSpec {
+            network: current.network,
+            epoch: current.epoch,
+            shard_group: low(),
+            signers: &insufficient_signers,
+            next_set: next.hash(),
+            carry_preimage: true,
+            next_epoch_committee: Some(next.committee(low())),
+        });
+        assert!(PinnedConsensusVerifier::pinned(
+            NETWORK,
+            Shard::first(),
+            current.epoch,
+            &current.hash(),
+            &current.committee(low()),
+        )
+        .unwrap()
+        .advance(&missing_signer)
+        .is_err());
+
+        let mut bad_signature = checkpoint.clone();
+        *bad_signature.checkpoint.last_mut().unwrap() ^= 1;
+        assert!(PinnedConsensusVerifier::pinned(
+            NETWORK,
+            Shard::first(),
+            current.epoch,
+            &current.hash(),
+            &current.committee(low()),
+        )
+        .unwrap()
+        .advance(&bad_signature)
+        .is_err());
+
+        let wrong_epoch = checkpoint_entry(CheckpointSpec {
+            network: current.network,
+            epoch: Epoch(3),
+            shard_group: low(),
+            signers: &current.low,
+            next_set: next.hash(),
+            carry_preimage: true,
+            next_epoch_committee: Some(next.committee(low())),
+        });
+        assert!(PinnedConsensusVerifier::pinned(
+            NETWORK,
+            Shard::first(),
+            current.epoch,
+            &current.hash(),
+            &current.committee(low()),
+        )
+        .unwrap()
+        .advance(&wrong_epoch)
+        .is_err());
+
+        let altered_hash = checkpoint_entry(CheckpointSpec {
+            network: current.network,
+            epoch: current.epoch,
+            shard_group: low(),
+            signers: &current.low,
+            next_set: ValidatorSetFixture::new(4).hash(),
+            carry_preimage: true,
+            next_epoch_committee: Some(next.committee(low())),
+        });
+        assert!(PinnedConsensusVerifier::pinned(
+            NETWORK,
+            Shard::first(),
+            current.epoch,
+            &current.hash(),
+            &current.committee(low()),
+        )
+        .unwrap()
+        .advance(&altered_hash)
+        .is_err());
+
+        let mut truncated = checkpoint.clone();
+        truncated.checkpoint.truncate(5);
+        assert!(PinnedConsensusVerifier::pinned(
+            NETWORK,
+            Shard::first(),
+            current.epoch,
+            &current.hash(),
+            &current.committee(low()),
+        )
+        .unwrap()
+        .advance(&truncated)
+        .is_err());
+
+        let esmeralda_checkpoint = checkpoint_entry(CheckpointSpec {
+            network: Network::Esmeralda,
+            epoch: current.epoch,
+            shard_group: low(),
+            signers: &current.low,
+            next_set: next.hash(),
+            carry_preimage: true,
+            next_epoch_committee: Some(next.committee(low())),
+        });
+        assert!(PinnedConsensusVerifier::pinned(
+            NETWORK,
+            Shard::first(),
+            current.epoch,
+            &current.hash(),
+            &current.committee(low()),
+        )
+        .unwrap()
+        .advance(&esmeralda_checkpoint)
+        .is_err());
     }
 
     #[test]

@@ -138,15 +138,46 @@ requires the exact release tag/fingerprint when `releaseBootstrap` is selected.
 
 This establishes a bounded bootstrap only under one explicit deployment assumption: the operator
 must deliberately pin the fingerprint above as an accepted Tari release-signing key. It does not
-infer that policy merely from GitHub, nor does it authenticate the 8368-to-11670 history. No
-sidecar configuration has been written and no live authorization path has been enabled.
+infer that policy merely from GitHub, nor does it authenticate the 8368-to-11670 history. The
+historical discrepancy does not change the deterministic calculation at 12634, but it means that
+calculation is a *conditional candidate root*, not independently established membership history.
+No sidecar configuration has been written and no live authorization path has been enabled.
+
+### Checkpoint transport and handover validation
+
+The loopback sidecar now reads one framed HTTP/1.1 request with a 64 KiB total limit, an 8 KiB
+header limit, and a 57,340-byte body limit. It requires a single valid `Content-Length` for
+`POST /v1/verify`, rejects `Transfer-Encoding`, duplicate framing/authentication headers,
+non-UTF-8 or malformed headers, excess bytes, truncated bodies and oversized requests. It uses a
+five-second read/write deadline and permits at most eight in-flight loopback connections. This
+keeps the approximately 29 KiB captured checkpoint class within bounded memory. It also permits
+only one handover per verification request; increasing that policy requires a separately reviewed
+transport budget, not an implicit increase in work or memory.
+
+The canonical v0.47 `TrustedValidatorSet::advance` path was adversarially tested with official
+signed fixtures. Relative to a pinned starting set, it accepts a valid handover and rejects a
+wrong starting root, a corrupted authenticated next-committee proof, insufficient checkpoint
+signers, a corrupted checkpoint signature, wrong epoch, altered next-set hash, truncated
+checkpoint and incorrect network. The indexer's duplicate JSON `members` field is deliberately
+not authoritative: changing only that convenience field leaves the proof-authenticated committee
+unchanged, which is the intended safe behavior.
+
+The complete genuine 12634-to-12635 response is not stored in this repository, and a read-only
+attempt to re-fetch it during this review was actively refused by the public endpoint. Therefore
+the genuine Esmeralda handover has **not** been rerun through the new sidecar. Fixture validation
+demonstrates the exact canonical checks but is not a claim that the live capture passed them.
 
 ### Exact remaining requirement
 
-**BLOCKED for live consensus authorization.** Authorize the release-signing-key pin as a project
-deployment trust decision (or obtain an independent Tari-maintainer authentication of that exact
-fingerprint), then install a reviewed local anchor using the bounded epoch-12634 bootstrap. Before
-enabling access issuance, increase the sidecar's bounded request allowance and perform one real
-epoch-12634-to-12635 signed-handover verification: the genuine checkpoint response is about 29 KiB
-while the present 16 KiB request cap rejects it. Until that handover is verified from the pinned
-anchor, Ghost Gate must remain `UNKNOWN`/fail-closed for live authorization.
+**BLOCKED for live consensus authorization.** The smallest missing independently authenticated
+artifact is a Tari-controlled immutable statement (for example, a signed release manifest or
+authenticated L1 record) binding Esmeralda network byte 38, epoch 12634, the four validator keys,
+unit weights, shard group `1..=256`, and the derived validator-set root. It need not reconstruct
+all 8368-to-11670 history, but it must bind the candidate root at the anchor epoch.
+
+After that artifact is reviewed and the release-signing-key pin is approved as deployment policy,
+place the reviewed, gitignored anchor JSON in a local path and set `GG_V047_ANCHOR_CONFIG` only
+for the loopback sidecar process. Then replay the retained raw 12634 checkpoint plus its next
+committee through `PinnedConsensusVerifier::advance`; it must reach 12635 with the canonical next
+set hash before access issuance is enabled. Until then Ghost Gate must return `UNKNOWN` and the
+hosted 10-tTARI access flow must not issue a session.
