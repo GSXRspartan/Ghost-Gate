@@ -4,6 +4,9 @@ export { ReplayCoordinator } from "./replay-coordinator.js";
 const text = new TextEncoder();
 const CHALLENGE_TTL_SECS = 180;
 const MAX_PROOF_BYTES = 8 * 1024;
+// Bound the wire body as well as the canonical proof. `Request.json()` otherwise buffers an
+// attacker-controlled chunked body before the proof-size check below can run.
+const MAX_PROOF_REQUEST_BYTES = MAX_PROOF_BYTES + 8 * 1024;
 
 function catalog(env) {
   try { return parseGateCatalog(env.GG_GATE_CATALOG, { allowLocalHttp: env.GG_LOCAL_DEVELOPMENT === "1" }); }
@@ -186,8 +189,16 @@ export default {
       // Refuse at the service boundary before examining browser evidence when no independently
       // authenticated verifier exists. This keeps an unconfigured deployment unmistakably closed.
       if (!env.GG_VERIFIER_ORIGIN || !env.GG_VERIFIER_TOKEN || !env.GG_VERIFIER_REQUEST_KEY || !env.GG_VERIFIER_RESPONSE_KEY) return failClosed("an authenticated trusted Rust verifier has not been configured");
+      const announcedLength = Number(request.headers.get("content-length"));
+      if (Number.isFinite(announcedLength) && announcedLength > MAX_PROOF_REQUEST_BYTES) {
+        return json(413, { error: "GG: proof request is too large", authorized: false });
+      }
       let payload;
-      try { payload = await request.json(); } catch { return json(400, { error: "GG: malformed proof request" }); }
+      try {
+        const raw = await request.text();
+        if (text.encode(raw).byteLength > MAX_PROOF_REQUEST_BYTES) return json(413, { error: "GG: proof request is too large", authorized: false });
+        payload = JSON.parse(raw);
+      } catch { return json(400, { error: "GG: malformed proof request" }); }
       const nonce = typeof payload?.nonce === "string" ? payload.nonce : "";
       if (!/^[0-9a-f]{64}$/i.test(nonce) || canonical(payload?.proof || null).length > MAX_PROOF_BYTES) return json(400, { error: "GG: proof request is invalid" });
       const proofDigest = await sha256(canonical(payload.proof || null));

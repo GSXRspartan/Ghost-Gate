@@ -37,6 +37,7 @@
       <button id="connect" type="button" class="primary">Connect wallet</button>
       <p id="wallet-status" class="muted">Connecting a wallet alone never grants access.</p>
       <dl id="wallet-detail" class="technical" hidden></dl>
+      <button id="disconnect" type="button" disabled>Forget wallet connection</button>
     </section>
 
     <section class="card">
@@ -51,7 +52,8 @@
       <h2>Eligibility verification</h2>
       <p id="verification-status">No authorization has been issued.</p>
       <p class="warning">Hosted credential verification remains unavailable until Ghost Gate independently validates current Esmeralda committee/finality evidence. A wallet connection, signature, claimed balance, or indexer assertion alone cannot open this gate.</p>
-      <button id="protected" type="button" disabled>Check protected area</button>
+      <button id="protected" type="button">Check protected area</button>
+      <button id="logout" type="button">Log out of this browser</button>
     </section>
   </main>
   <script type="module" src="/hosted.js"></script>

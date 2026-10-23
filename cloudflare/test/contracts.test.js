@@ -39,6 +39,20 @@ test("hosted proof endpoints reject a relying-site substitution before verifier 
   assert.equal(response.status, 403);
 });
 
+test("hosted proof endpoint bounds both an announced and chunked request body", async () => {
+  const env = {
+    GG_GATE_CATALOG: catalog, GG_VERIFIER_ORIGIN: "https://verifier.example", GG_VERIFIER_TOKEN: "verifier-secret",
+    GG_VERIFIER_REQUEST_KEY: "request-secret", GG_VERIFIER_RESPONSE_KEY: "response-secret",
+  };
+  const oversized = JSON.stringify({ nonce: "a".repeat(64), proof: { padding: "x".repeat(20 * 1024) } });
+  const request = new Request("https://edge.example/api/tenants/tenant-a/gates/esm10/proof", {
+    method: "POST", headers: { origin: "https://gate.example", "content-length": String(oversized.length) }, body: oversized,
+  });
+  const response = await worker.fetch(request, env);
+  assert.equal(response.status, 413);
+  assert.equal((await response.json()).authorized, false);
+});
+
 function canonical(value) {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   if (value && typeof value === "object") return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`;

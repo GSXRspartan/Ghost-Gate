@@ -38,7 +38,18 @@ function selectedGate() {
 
 function refreshChallengeAvailability() {
   $("challenge").disabled = !(state.gate && state.connected && state.networkOk);
+  $("disconnect").disabled = !state.connected;
   if (!state.connected) $("challenge-status").textContent = "Connect a compatible wallet first.";
+}
+
+function disconnect(message = "Wallet connection forgotten in this page. No access was granted.") {
+  // Browser extensions own their own connection permissions. This deliberately clears only this
+  // page's volatile state, so a switched account can never reuse an old challenge or UI state.
+  state.provider = null; state.connected = false; state.networkOk = false; state.challenge = null;
+  $("wallet-detail").replaceChildren();
+  setWalletStatus(message);
+  $("verification-status").textContent = "No authorization has been issued.";
+  refreshChallengeAvailability();
 }
 
 async function connect() {
@@ -69,6 +80,28 @@ async function connect() {
   } finally { $("connect").disabled = false; }
 }
 
+async function checkProtected() {
+  if (!state.gate) return;
+  $("verification-status").textContent = "Checking the server-side session…";
+  try {
+    const result = await api(gatePath("protected"));
+    $("verification-status").textContent = result.protected
+      ? "ACCESS GRANTED: the server validated an active authorization session."
+      : "No active authorization session.";
+  } catch (error) {
+    // A protected route returning 401 is the expected state before a VERIFIED proof. Never make
+    // this look like a wallet or challenge failure, and never render it as access.
+    $("verification-status").textContent = `Protected area remains unavailable: ${error.message}`;
+  }
+}
+
+async function logout() {
+  if (!state.gate) return;
+  try { await api(gatePath("logout"), { method: "POST" }); }
+  catch (error) { $("verification-status").textContent = `Logout could not be confirmed: ${error.message}`; return; }
+  disconnect("Logged out of this browser. Wallet permissions remain controlled by your wallet.");
+}
+
 async function requestChallenge() {
   $("challenge").disabled = true;
   $("challenge-status").textContent = "Issuing a one-time server-bound challenge…";
@@ -96,8 +129,11 @@ async function init() {
 $("gate").addEventListener("change", selectedGate);
 $("connect").addEventListener("click", connect);
 $("challenge").addEventListener("click", requestChallenge);
+$("disconnect").addEventListener("click", () => disconnect());
+$("protected").addEventListener("click", checkProtected);
+$("logout").addEventListener("click", logout);
 document.querySelectorAll("[data-wallet]").forEach((button) => button.addEventListener("click", () => {
-  state.providerId = button.dataset.wallet; state.connected = false; state.networkOk = false;
+  state.providerId = button.dataset.wallet; disconnect("Wallet provider changed. Previous wallet state and challenge were discarded.");
   document.querySelectorAll("[data-wallet]").forEach((candidate) => candidate.classList.toggle("selected", candidate === button));
   setWalletStatus("Provider selected. Connect to inspect this account's capabilities."); refreshChallengeAvailability();
 }));
