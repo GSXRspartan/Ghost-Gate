@@ -554,4 +554,46 @@ mod tests {
             gate.relying_site.as_slice()
         );
     }
+
+    // ------------------------------------------------------------------
+    // Adversarial: cross-visitor session binding
+    // ------------------------------------------------------------------
+
+    /// A challenge issued to one origin cannot be proved from another. This is the per-visitor
+    /// binding that prevents cross-site challenge replay, independent of the session commitment
+    /// (which may be a shared deployment-time value for consensus gates).
+    #[test]
+    fn a_challenge_issued_to_one_origin_cannot_be_answered_from_another() {
+        let mut book = ChallengeBook::new();
+        book.insert(challenge(1), Duration::from_secs(60), Some("https://site-a.example".into())).unwrap();
+        assert_eq!(
+            validate_prove_request(&binding(), &book, &request(1), Some("https://site-b.example")).unwrap_err(),
+            ProofRefusal::SessionMismatch,
+            "a challenge minted for site-a must not be answerable from site-b"
+        );
+        assert!(validate_prove_request(&binding(), &book, &request(1), Some("https://site-a.example")).is_ok());
+    }
+
+    /// An operator (no-Origin) challenge cannot be answered by a browser (has Origin).
+    #[test]
+    fn an_operator_challenge_cannot_be_answered_by_a_browser_origin() {
+        let mut book = ChallengeBook::new();
+        book.insert(challenge(1), Duration::from_secs(60), None).unwrap();
+        assert_eq!(
+            validate_prove_request(&binding(), &book, &request(1), Some("https://vip.example")).unwrap_err(),
+            ProofRefusal::SessionMismatch,
+        );
+        assert!(validate_prove_request(&binding(), &book, &request(1), None).is_ok());
+    }
+
+    /// A browser challenge cannot be answered by a no-origin operator caller.
+    #[test]
+    fn a_browser_challenge_cannot_be_answered_by_an_operator() {
+        let mut book = ChallengeBook::new();
+        book.insert(challenge(1), Duration::from_secs(60), Some("https://vip.example".into())).unwrap();
+        assert_eq!(
+            validate_prove_request(&binding(), &book, &request(1), None).unwrap_err(),
+            ProofRefusal::SessionMismatch,
+        );
+    }
 }

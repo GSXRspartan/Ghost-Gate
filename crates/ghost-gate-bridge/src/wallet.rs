@@ -40,12 +40,16 @@ pub struct WalletStatus {
     pub configured: bool,
     /// Whether a wallet daemon answered at all.
     pub reachable: bool,
-    /// Whether a default account exists. Never the account's address.
+    /// Whether the configured account (named or default) exists. Never the account's address.
     pub has_default_account: bool,
     /// The network the wallet is configured for, as Ootle's cohort byte.
     pub network: u8,
     /// Which cohort name the wallet reports, for a UI.
     pub network_name: String,
+    /// The operator-configured account name, if one was set via `GG_WALLETD_ACCOUNT`.
+    /// `None` means the wallet's default account is used. Never an address.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_name: Option<String>,
 }
 
 impl WalletStatus {
@@ -56,6 +60,7 @@ impl WalletStatus {
             has_default_account: false,
             network: 0,
             network_name: String::new(),
+            account_name: None,
         }
     }
 }
@@ -297,9 +302,25 @@ mod tests {
         let s = WalletStatus::unreachable();
         assert!(!s.reachable);
         assert!(!s.has_default_account);
+        assert_eq!(s.account_name, None);
         assert_eq!(
             WalletError::Unreachable("connection refused".into()).to_string(),
             "GG: the wallet daemon is not reachable: connection refused"
         );
+    }
+
+    #[test]
+    fn account_name_is_omitted_from_json_when_none() {
+        let s = WalletStatus::unreachable();
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(!json.contains("account_name"), "None account_name must be omitted: {json}");
+    }
+
+    #[test]
+    fn account_name_appears_in_json_when_set() {
+        let mut s = WalletStatus::unreachable();
+        s.account_name = Some("my-prover".into());
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"account_name\":\"my-prover\""), "set account_name must appear: {json}");
     }
 }

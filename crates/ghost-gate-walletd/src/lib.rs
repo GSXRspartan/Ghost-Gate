@@ -91,6 +91,10 @@ pub struct WalletDaemonChannel {
     /// Whether the operator supplied a real credential. When true, [`Self::bootstrap_local_auth`]
     /// must leave the supplied token untouched.
     token_supplied: bool,
+    /// Which account to prove from. When `Some`, the adapter calls `accounts_get` with this name
+    /// instead of `accounts_get_default`. An operator sets `GG_WALLETD_ACCOUNT` to bind the bridge
+    /// to a specific wallet account; the name never comes from a browser request.
+    account_name: Option<String>,
 }
 
 impl WalletDaemonChannel {
@@ -106,9 +110,22 @@ impl WalletDaemonChannel {
         max_fee: u64,
         max_epoch: u64,
     ) -> Result<Self, WalletError> {
-        // The client's token type is `zeroize::Zeroizing<String>` (alias private in the client),
-        // so the credential is constructed as exactly that — zeroised on drop, like the wallet
-        // holds it.
+        Self::connect_with_account(endpoint, token, expected_network, max_fee, max_epoch, None)
+    }
+
+    /// Connects to `endpoint` and binds to a specific account by name.
+    ///
+    /// When `account_name` is `Some`, the adapter uses `accounts_get` with that name instead of
+    /// `accounts_get_default`. The name is an operator configuration (`GG_WALLETD_ACCOUNT`), never
+    /// from a browser request — a caller cannot select which account proves.
+    pub fn connect_with_account(
+        endpoint: &str,
+        token: Option<String>,
+        expected_network: u8,
+        max_fee: u64,
+        max_epoch: u64,
+        account_name: Option<String>,
+    ) -> Result<Self, WalletError> {
         let token_supplied = token.is_some();
         let encoded = token.map(zeroize::Zeroizing::new);
         let client = WalletDaemonClient::connect(endpoint, encoded)
@@ -119,6 +136,7 @@ impl WalletDaemonChannel {
             max_fee,
             max_epoch,
             token_supplied,
+            account_name,
         })
     }
 
@@ -151,15 +169,32 @@ impl WalletDaemonChannel {
         }
     }
 
-    /// The default account, which is where a proof's output goes.
+    /// The account this bridge proves from: either the operator-named account or the wallet's
+    /// default.
     ///
-    /// The output returns to the prover's own account so they keep what they proved control of. Paying
-    /// a revealed output instead would spend the very funds the gate is reasoning about.
+    /// The output returns to the prover's own account so they keep what they proved control of.
+    /// When `account_name` is set, `accounts_get` resolves it by name; otherwise the wallet's
+    /// default account is used. The name is an operator configuration, never from a browser
+    /// request — a caller cannot select which account proves.
     async fn account(&mut self) -> Result<AccountGetResponse, WalletError> {
-        self.client
-            .accounts_get_default()
-            .await
-            .map_err(|e| WalletError::Unreachable(e.to_string()))
+        match &self.account_name {
+            Some(name) => self
+                .client
+                .accounts_get(tari_ootle_walletd_client::ComponentAddressOrName::Name(
+                    name.clone(),
+                ))
+                .await
+                .map_err(|e| {
+                    WalletError::Refused(format!(
+                        "cannot find account {name:?}: {e}"
+                    ))
+                }),
+            None => self
+                .client
+                .accounts_get_default()
+                .await
+                .map_err(|e| WalletError::Unreachable(e.to_string())),
+        }
     }
 
     /// Picks an output of the gate's resource that meets the threshold, without telling anyone.
@@ -233,13 +268,14 @@ impl WalletChannel for WalletDaemonChannel {
             .get_wallet_info()
             .await
             .map_err(|e| WalletError::Unreachable(e.to_string()))?;
-        let has_default_account = self.client.accounts_get_default().await.is_ok();
+        let has_account = self.account().await.is_ok();
         Ok(WalletStatus {
             configured: true,
             reachable: true,
-            has_default_account,
+            has_default_account: has_account,
             network: info.network_byte,
             network_name: info.network,
+            account_name: self.account_name.clone(),
         })
     }
 
@@ -597,6 +633,7 @@ mod tests {
             max_fee: 100_000,
             max_epoch: 100,
             token_supplied: false,
+            account_name: None,
         };
         let request = StatementRequest {
             resource: resource(7),

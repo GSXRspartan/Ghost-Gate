@@ -107,16 +107,18 @@ pub struct Bridge<
     /// The Minotari base node reader, for L1 evidence. `None` means no L1 verification is possible,
     /// and L1 challenges are then refused at issue time.
     pub xtm_chain: Option<XR>,
-    /// The fixed session commitment component-backed gates share with their deployed component.
+    /// The deployment-time session commitment shared between the bridge and its on-chain component.
     ///
-    /// A component checks the challenge's session commitment against the value stored in its own
-    /// state at instantiation (`check_challenge`), so a consensus-capable gate and the component it
-    /// binds must agree on ONE deployment-time session. The random per-challenge session the
-    /// credential path uses would be refused on chain (`SessionMismatch`), which is exactly what a
-    /// fixed value here prevents: when set, every Ootle challenge carries it; when `None`, the
-    /// bridge falls back to the random per-challenge session the component-free credential path
-    /// has always used. The 7897 Sapient deployment runs with `None` and is unaffected.
-    pub gate_session: Option<Vec<u8>>,
+    /// A component's `check_challenge` compares every challenge's `session_commitment` against the
+    /// immutable value stored at instantiation, so a consensus-capable gate and the component it
+    /// binds must agree on ONE deployment-time value. This is a **component identity**, not a
+    /// per-visitor session: per-visitor binding is provided by the unique nonce (burned on
+    /// acceptance) and the origin check in `validate_prove_request`, not by this field.
+    ///
+    /// When set, every Ootle challenge carries it; when `None`, the bridge generates a random
+    /// per-challenge value (suitable for the credential path, which has no on-chain component).
+    /// Operator sets `GG_GATE_SESSION` to the same value used at component instantiation.
+    pub component_session: Option<Vec<u8>>,
 }
 
 impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChannel, XR: crate::xtm::XtmChainReader>
@@ -148,7 +150,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             permitted_hosts: default_permitted_hosts(),
             xtm,
             xtm_chain,
-            gate_session: None,
+            component_session: None,
         }
     }
 
@@ -178,7 +180,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             permitted_hosts: default_permitted_hosts(),
             xtm,
             xtm_chain,
-            gate_session: None,
+            component_session: None,
         }
     }
 }
@@ -288,7 +290,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R, crate::xt
             challenge_expires_epoch: DEFAULT_CHALLENGE_EXPIRES_EPOCH,
             xtm: crate::xtm::NoXtm,
             xtm_chain: None,
-            gate_session: None,
+            component_session: None,
         }
     }
 }
@@ -322,7 +324,7 @@ impl<W: WalletChannel, X: crate::xtm::XtmChannel, XR: crate::xtm::XtmChainReader
             challenge_expires_epoch: DEFAULT_CHALLENGE_EXPIRES_EPOCH,
             xtm,
             xtm_chain,
-            gate_session: None,
+            component_session: None,
         }
     }
 }
@@ -355,7 +357,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             challenge_expires_epoch: DEFAULT_CHALLENGE_EXPIRES_EPOCH,
             xtm,
             xtm_chain,
-            gate_session: None,
+            component_session: None,
         }
     }
 }
@@ -803,7 +805,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             self.store_trace(trace);
         }
 
-        let session = self.gate_session.clone().unwrap_or_else(|| random_nonce().to_vec());
+        let session = self.component_session.clone().unwrap_or_else(|| random_nonce().to_vec());
         // Registry-backed: bind the challenge to the policy version in force right now, so a
         // replacement cannot be satisfied by an answer computed under the old threshold.
         let minted_under = self.access.as_mut().and_then(|a| a.plane.current_policy_hash(id));
@@ -1585,6 +1587,7 @@ mod tests {
                     has_default_account: true,
                     network: network::LOCALNET,
                     network_name: "localnet".into(),
+                    account_name: None,
                 },
                 build_result: Ok(()),
                 submit_result: Ok("tx_fake_0001".into()),
@@ -2636,15 +2639,16 @@ mod tests {
         );
     }
 
-    /// A configured deployment-time session replaces the random per-challenge session: a
-    /// component checks every challenge's session commitment against the value stored in its
-    /// own state, so a consensus-capable gate and the bridge MUST share one fixed value. The
-    /// component-free credential path keeps the random session when no value is configured —
+    /// A configured component session replaces the random per-challenge session: a component
+    /// checks every challenge's session commitment against the value stored in its own state,
+    /// so a consensus-capable gate and the bridge MUST share one fixed deployment-time value.
+    /// Per-visitor binding is provided by the unique nonce and origin, not by this field.
+    /// The component-free credential path keeps the random session when no value is configured —
     /// the 7897 Sapient deployment runs exactly that way and must not change behaviour.
     #[tokio::test]
-    async fn a_configured_gate_session_stamps_every_challenge() {
+    async fn a_configured_component_session_stamps_every_challenge() {
         let mut b = bridge(FakeWallet::new());
-        b.gate_session = Some(b"esm-gate-session".to_vec());
+        b.component_session = Some(b"esm-gate-session".to_vec());
         let r = b.handle(&post("/gate/g1/challenge", serde_json::json!({}))).await;
         assert_eq!(r.status, 200, "{}", r.body);
         let v: serde_json::Value = serde_json::from_str(&r.body).unwrap();
@@ -2875,5 +2879,170 @@ mod tests {
             events.iter().all(|e| e["code"] != "consensus.observed"),
             "a credential-only simulation must not invent a consensus step"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Adversarial session-binding tests (Priority 3 / multi-visitor)
+    // ------------------------------------------------------------------
+
+    fn post_from(path: &str, body: serde_json::Value, origin: &str) -> Request {
+        Request {
+            method: "POST",
+            path: path.into(),
+            origin: Some(origin.into()),
+            host: Some("127.0.0.1:7799".into()),
+            query: Default::default(),
+            body: body.to_string(),
+            attempt: None,
+        }
+    }
+
+    /// Visitor A's challenge cannot be answered by Visitor B from a different origin.
+    /// The per-visitor binding is the origin + nonce, not the session commitment (which is a
+    /// deployment-time component identity when GG_GATE_SESSION is set).
+    #[tokio::test]
+    async fn cross_origin_challenge_replay_is_refused() {
+        let mut b = bridge(FakeWallet::new());
+        b.component_session = Some(b"shared-deployment-id".to_vec());
+
+        // Visitor A requests a challenge from https://vip.example
+        let r = b.handle(&post_from("/gate/g1/challenge", serde_json::json!({}), "https://vip.example")).await;
+        assert_eq!(r.status, 200);
+        let v: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        let nonce = v["challenge_nonce"].as_str().unwrap().to_string();
+        let session = v["session_commitment"].as_str().unwrap().to_string();
+
+        // Visitor B from https://partner.example tries to answer Visitor A's challenge
+        let prove = post_from(
+            "/gate/g1/prove",
+            serde_json::json!({
+                "gate_id": "g1",
+                "challenge_nonce": nonce,
+                "session_commitment": session,
+            }),
+            "https://partner.example",
+        );
+        let r = b.handle(&prove).await;
+        assert_eq!(r.status, 409, "cross-origin replay must be refused: {}", r.body);
+        assert!(r.body.contains("session"), "the refusal should mention session binding: {}", r.body);
+        assert_eq!(b.challenges.live(), 1, "the challenge must not be consumed by a cross-origin attempt");
+    }
+
+    /// An operator challenge (no Origin) cannot be answered by a browser request (has Origin),
+    /// and vice versa. This prevents a CLI-minted challenge from being replayed by a page.
+    #[tokio::test]
+    async fn operator_challenge_cannot_be_answered_by_a_browser() {
+        let mut b = bridge(FakeWallet::new());
+        // Operator issues a challenge with no Origin
+        let mut no_origin_req = post("/gate/g1/challenge", serde_json::json!({}));
+        no_origin_req.origin = None;
+        let r = b.handle(&no_origin_req).await;
+        assert_eq!(r.status, 200);
+        let v: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        let nonce = v["challenge_nonce"].as_str().unwrap().to_string();
+        let session = v["session_commitment"].as_str().unwrap().to_string();
+
+        // A browser from a permitted origin tries to answer it
+        let prove = post_from(
+            "/gate/g1/prove",
+            serde_json::json!({
+                "gate_id": "g1",
+                "challenge_nonce": nonce,
+                "session_commitment": session,
+            }),
+            "https://vip.example",
+        );
+        let r = b.handle(&prove).await;
+        assert_eq!(r.status, 409, "an operator challenge cannot be answered by a browser: {}", r.body);
+    }
+
+    /// When component_session is set, every challenge carries the same deployment-time value —
+    /// but the nonce is unique per challenge. A visitor who intercepts another visitor's nonce
+    /// but sends from the same origin would still need to know the nonce, and each nonce is
+    /// consumed on acceptance. This test asserts nonce uniqueness across visitors.
+    #[tokio::test]
+    async fn every_challenge_carries_a_unique_nonce_even_with_shared_component_session() {
+        let mut b = bridge(FakeWallet::new());
+        b.component_session = Some(b"shared".to_vec());
+
+        let mut nonces = std::collections::HashSet::new();
+        for _ in 0..10 {
+            let r = b.handle(&post("/gate/g1/challenge", serde_json::json!({}))).await;
+            let v: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+            let nonce = v["challenge_nonce"].as_str().unwrap().to_string();
+            assert!(nonces.insert(nonce.clone()), "nonce collision: {nonce}");
+            // But the session commitment is the SAME for all
+            let session = v["session_commitment"].as_str().unwrap().to_string();
+            assert_eq!(session, hex::encode(b"shared"));
+        }
+    }
+
+    /// A consumed challenge cannot be replayed: once accepted, the nonce moves to the answered
+    /// set and any further attempt gets AlreadyAnswered.
+    #[tokio::test]
+    async fn a_consumed_nonce_cannot_be_replayed() {
+        let mut b = bridge(FakeWallet::new());
+        let (nonce, session) = issue(&mut b).await;
+
+        // Simulate acceptance by consuming the challenge directly
+        let nonce_bytes: [u8; 32] = hex::decode(&nonce).unwrap().try_into().unwrap();
+        let session_bytes = hex::decode(&session).unwrap();
+        b.challenges
+            .consume_on_acceptance(&nonce_bytes, &session_bytes)
+            .expect("first consumption succeeds");
+
+        // Now try to prove with the same nonce
+        let prove = post(
+            "/gate/g1/prove",
+            serde_json::json!({
+                "gate_id": "g1",
+                "challenge_nonce": nonce,
+                "session_commitment": session,
+            }),
+        );
+        let r = b.handle(&prove).await;
+        assert_eq!(r.status, 409, "a consumed nonce must be refused: {}", r.body);
+        assert!(r.body.contains("already"), "should say already answered: {}", r.body);
+    }
+
+    /// Two visitors from the SAME origin each get their own challenge. Each can only answer
+    /// their own — the nonce is the differentiator, not the origin.
+    #[tokio::test]
+    async fn same_origin_visitors_cannot_swap_challenges() {
+        let mut b = bridge(FakeWallet::new());
+        b.component_session = Some(b"shared".to_vec());
+
+        // Both visitors are from the same origin
+        let r1 = b.handle(&post("/gate/g1/challenge", serde_json::json!({}))).await;
+        let v1: serde_json::Value = serde_json::from_str(&r1.body).unwrap();
+        let nonce1 = v1["challenge_nonce"].as_str().unwrap().to_string();
+
+        let r2 = b.handle(&post("/gate/g1/challenge", serde_json::json!({}))).await;
+        let v2: serde_json::Value = serde_json::from_str(&r2.body).unwrap();
+        let nonce2 = v2["challenge_nonce"].as_str().unwrap().to_string();
+
+        assert_ne!(nonce1, nonce2, "two challenges must have different nonces");
+
+        // Each challenge is individually answerable (they share origin and session)
+        let session = v1["session_commitment"].as_str().unwrap().to_string();
+        assert_eq!(
+            session,
+            v2["session_commitment"].as_str().unwrap(),
+            "both carry the same component session"
+        );
+
+        // Consume nonce1
+        let nonce1_bytes: [u8; 32] = hex::decode(&nonce1).unwrap().try_into().unwrap();
+        let session_bytes = hex::decode(&session).unwrap();
+        b.challenges.consume_on_acceptance(&nonce1_bytes, &session_bytes).unwrap();
+
+        // nonce2 is still live
+        assert!(b.challenges.check_live(
+            &hex::decode(&nonce2).unwrap().try_into().unwrap(),
+            &session_bytes
+        ).is_ok());
+
+        // nonce1 is consumed
+        assert!(b.challenges.check_live(&nonce1_bytes, &session_bytes).is_err());
     }
 }
