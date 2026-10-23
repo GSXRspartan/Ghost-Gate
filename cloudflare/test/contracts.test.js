@@ -54,8 +54,8 @@ function coordinatorFixture() {
         if (action === "issue") { records.set(id, { ...body, state: "issued" }); return Response.json({ state: "issued" }, { status: 201 }); }
         if (!record || !binding(record, body)) return Response.json({ error: "binding" }, { status: 409 });
         if (action === "reserve") {
-          if (record.state === "issued") { record.state = "submitted"; record.proofJobId = body.proofJobId; }
-          if (record.state === "submitted" && record.proofJobId !== body.proofJobId) return Response.json({ state: "pending", proofJobId: record.proofJobId }, { status: 202 });
+          if (record.state === "issued") { record.state = "submitted"; record.proofJobId = body.proofJobId; record.proofDigest = body.proofDigest; }
+          if (record.state === "submitted" && record.proofDigest !== body.proofDigest) return Response.json({ error: "different proof" }, { status: 409 });
           return Response.json({ state: "reserved", proofJobId: record.proofJobId, challenge: record });
         }
         if (action === "authorize") { record.state = "authorized"; record.authorizationId = body.authorizationId; return Response.json({ state: "authorized" }); }
@@ -70,7 +70,7 @@ test("authenticated verifier result authorizes one durable hosted replay record"
   const coordinator = coordinatorFixture();
   const env = {
     GG_GATE_CATALOG: catalog, REPLAY_COORDINATOR: coordinator, GG_COORDINATOR_TOKEN: "coordinator-secret",
-    GG_VERIFIER_ORIGIN: "https://verifier.example", GG_VERIFIER_TOKEN: "verifier-secret", GG_VERIFIER_RESPONSE_KEY: "response-secret",
+    GG_VERIFIER_ORIGIN: "https://verifier.example", GG_VERIFIER_TOKEN: "verifier-secret", GG_VERIFIER_REQUEST_KEY: "request-secret", GG_VERIFIER_RESPONSE_KEY: "response-secret",
   };
   const visitor = "visitor-test-session";
   const challenge = await worker.fetch(new Request("https://edge.example/api/tenants/tenant-a/gates/esm10/challenge", {
@@ -82,6 +82,7 @@ test("authenticated verifier result authorizes one durable hosted replay record"
   globalThis.fetch = async (_url, init) => {
     assert.equal(init.headers.authorization, "Bearer verifier-secret");
     const input = JSON.parse(init.body); const { proof, ...signed } = input;
+    assert.equal(init.headers["x-gg-verifier-request-signature"], await hmac(input, "request-secret"));
     const result = { ...signed, verdict: "VERIFIED", verificationId: "verify-1234567890" };
     return new Response(JSON.stringify(result), { status: 200, headers: { "content-type": "application/json", "x-gg-verifier-signature": await hmac(result, "response-secret") } });
   };
@@ -98,7 +99,7 @@ test("authenticated verifier result authorizes one durable hosted replay record"
 
 test("an independent visitor cannot turn a pending hosted proof into their own job", async () => {
   const coordinator = coordinatorFixture();
-  const env = { GG_GATE_CATALOG: catalog, REPLAY_COORDINATOR: coordinator, GG_COORDINATOR_TOKEN: "coordinator-secret", GG_VERIFIER_ORIGIN: "https://verifier.example", GG_VERIFIER_TOKEN: "verifier-secret", GG_VERIFIER_RESPONSE_KEY: "response-secret" };
+  const env = { GG_GATE_CATALOG: catalog, REPLAY_COORDINATOR: coordinator, GG_COORDINATOR_TOKEN: "coordinator-secret", GG_VERIFIER_ORIGIN: "https://verifier.example", GG_VERIFIER_TOKEN: "verifier-secret", GG_VERIFIER_REQUEST_KEY: "request-secret", GG_VERIFIER_RESPONSE_KEY: "response-secret" };
   const first = "first-visitor";
   const challenge = await worker.fetch(new Request("https://edge.example/api/tenants/tenant-a/gates/esm10/challenge", { method: "POST", headers: { origin: "https://gate.example", cookie: `__Host_gg_visitor=${first}` } }), env);
   const nonce = (await challenge.json()).challenge.nonce;
@@ -114,4 +115,55 @@ test("an independent visitor cannot turn a pending hosted proof into their own j
     const stolen = await worker.fetch(new Request("https://edge.example/api/tenants/tenant-a/gates/esm10/proof", { method: "POST", headers: { origin: "https://gate.example", cookie: "__Host_gg_visitor=other-visitor" }, body: JSON.stringify({ nonce, proof: {} }) }), env);
     assert.equal(stolen.status, 409);
   } finally { globalThis.fetch = previousFetch; }
+});
+
+test("same visitor may retry the same pending proof, but cannot replace it", async () => {
+  const coordinator = coordinatorFixture();
+  const env = {
+    GG_GATE_CATALOG: catalog, REPLAY_COORDINATOR: coordinator, GG_COORDINATOR_TOKEN: "coordinator-secret",
+    GG_VERIFIER_ORIGIN: "https://verifier.example", GG_VERIFIER_TOKEN: "verifier-secret", GG_VERIFIER_REQUEST_KEY: "request-secret", GG_VERIFIER_RESPONSE_KEY: "response-secret",
+  };
+  const visitor = "retrying-visitor";
+  const challenge = await worker.fetch(new Request("https://edge.example/api/tenants/tenant-a/gates/esm10/challenge", {
+    method: "POST", headers: { origin: "https://gate.example", cookie: `__Host_gg_visitor=${visitor}` },
+  }), env);
+  const nonce = (await challenge.json()).challenge.nonce;
+  const previousFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async (_url, init) => {
+    const input = JSON.parse(init.body); const { proof, ...signed } = input;
+    const result = { ...signed, verdict: calls++ === 0 ? "UNKNOWN" : "VERIFIED", verificationId: "stable-verification-id-123" };
+    return new Response(JSON.stringify(result), { status: 200, headers: { "content-type": "application/json", "x-gg-verifier-signature": await hmac(result, "response-secret") } });
+  };
+  const request = (proof) => worker.fetch(new Request("https://edge.example/api/tenants/tenant-a/gates/esm10/proof", {
+    method: "POST", headers: { origin: "https://gate.example", cookie: `__Host_gg_visitor=${visitor}` }, body: JSON.stringify({ nonce, proof }),
+  }), env);
+  try {
+    assert.equal((await request({ output: "same" })).status, 202);
+    const authorized = await request({ output: "same" });
+    assert.equal(authorized.status, 200, await authorized.clone().text());
+    assert.equal((await authorized.json()).authorized, true);
+    assert.equal(calls, 2);
+  } finally { globalThis.fetch = previousFetch; }
+
+  const secondChallenge = await worker.fetch(new Request("https://edge.example/api/tenants/tenant-a/gates/esm10/challenge", {
+    method: "POST", headers: { origin: "https://gate.example", cookie: `__Host_gg_visitor=${visitor}` },
+  }), env);
+  const secondNonce = (await secondChallenge.json()).challenge.nonce;
+  const previousFetchAgain = globalThis.fetch;
+  globalThis.fetch = async (_url, init) => {
+    const input = JSON.parse(init.body); const { proof, ...signed } = input;
+    const result = { ...signed, verdict: "UNKNOWN", verificationId: "stable-verification-id-456" };
+    return new Response(JSON.stringify(result), { status: 200, headers: { "content-type": "application/json", "x-gg-verifier-signature": await hmac(result, "response-secret") } });
+  };
+  try {
+    const first = await worker.fetch(new Request("https://edge.example/api/tenants/tenant-a/gates/esm10/proof", {
+      method: "POST", headers: { origin: "https://gate.example", cookie: `__Host_gg_visitor=${visitor}` }, body: JSON.stringify({ nonce: secondNonce, proof: { output: "first" } }),
+    }), env);
+    assert.equal(first.status, 202);
+    const replaced = await worker.fetch(new Request("https://edge.example/api/tenants/tenant-a/gates/esm10/proof", {
+      method: "POST", headers: { origin: "https://gate.example", cookie: `__Host_gg_visitor=${visitor}` }, body: JSON.stringify({ nonce: secondNonce, proof: { output: "replacement" } }),
+    }), env);
+    assert.equal(replaced.status, 409);
+  } finally { globalThis.fetch = previousFetchAgain; }
 });

@@ -90,12 +90,19 @@ export class ReplayCoordinator {
     if (row.expires_unix < now && action !== "access") return json(409, { error: "GG: challenge has expired" });
 
     if (action === "reserve") {
-      if (!validText(body?.proofJobId, 128)) return json(400, { error: "GG: proof job identity is missing" });
-      if (row.state === "issued") {
-        this.state.storage.sql.exec("UPDATE replay_records SET state='submitted', proof_job_id=?, updated_unix=? WHERE nonce=? AND state='issued'", body.proofJobId, now, row.nonce);
-        return json(200, { state: "reserved", proofJobId: body.proofJobId, challenge: publicRecord({ ...row, state: "submitted", proof_job_id: body.proofJobId }) });
+      if (!validText(body?.proofJobId, 128) || !/^[0-9a-f]{64}$/i.test(body?.proofDigest || "")) {
+        return json(400, { error: "GG: proof job identity or digest is missing" });
       }
-      if (row.state === "submitted") return json(202, { state: "pending", proofJobId: row.proof_job_id });
+      if (row.state === "issued") {
+        this.state.storage.sql.exec("UPDATE replay_records SET state='submitted', proof_job_id=?, proof_digest=?, updated_unix=? WHERE nonce=? AND state='issued'", body.proofJobId, body.proofDigest, now, row.nonce);
+        return json(200, { state: "reserved", proofJobId: body.proofJobId, challenge: publicRecord({ ...row, state: "submitted", proof_job_id: body.proofJobId, proof_digest: body.proofDigest }) });
+      }
+      if (row.state === "submitted" && row.proof_digest === body.proofDigest) {
+        // The job identity is durable. Retrying the *same* browser evidence is safe after a
+        // Worker/verifier timeout, and deterministic verifier identities make authorize idempotent.
+        return json(200, { state: "reserved", idempotent: true, proofJobId: row.proof_job_id, challenge: publicRecord(row) });
+      }
+      if (row.state === "submitted") return json(409, { error: "GG: a different proof is already reserved for this challenge" });
       return json(409, { error: "GG: challenge authorization is final" });
     }
 

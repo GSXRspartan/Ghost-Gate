@@ -29,6 +29,7 @@ Set these as secrets, never in `wrangler.toml`, browser JavaScript, or a URL:
 
 - `GG_COORDINATOR_TOKEN` — Worker-to-Durable-Object capability.
 - `GG_VERIFIER_TOKEN` — Worker-to-Rust-verifier capability.
+- `GG_VERIFIER_REQUEST_KEY` — HMAC key over the complete Worker-to-verifier request.
 - `GG_VERIFIER_RESPONSE_KEY` — shared HMAC key for canonical verifier responses.
 
 Set `GG_VERIFIER_ORIGIN` to the HTTPS origin of the trusted verifier. Until all three verifier

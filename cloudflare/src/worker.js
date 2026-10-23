@@ -82,12 +82,29 @@ export async function verifyVerifierSignature(response, signature, secret) {
   return crypto.subtle.verify("HMAC", key, bytes, text.encode(canonical(response)));
 }
 
+/** Sign the complete server-created verification request before it leaves the Worker.
+ *
+ * The bearer capability stops an accidental public endpoint; this signature makes a request
+ * replayed or fabricated by another network peer useless to the verifier. `proof` is included in
+ * the canonical value so no intermediary can substitute browser evidence after reservation.
+ */
+async function signVerifierRequest(request, secret) {
+  if (!secret) return null;
+  const key = await crypto.subtle.importKey("raw", text.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const bytes = new Uint8Array(await crypto.subtle.sign("HMAC", key, text.encode(canonical(request))));
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 async function trustedVerify(env, verificationRequest) {
-  if (!env.GG_VERIFIER_ORIGIN || !env.GG_VERIFIER_TOKEN || !env.GG_VERIFIER_RESPONSE_KEY) return null;
+  if (!env.GG_VERIFIER_ORIGIN || !env.GG_VERIFIER_TOKEN || !env.GG_VERIFIER_REQUEST_KEY || !env.GG_VERIFIER_RESPONSE_KEY) return null;
+  const requestSignature = await signVerifierRequest(verificationRequest, env.GG_VERIFIER_REQUEST_KEY);
   let response;
   try {
     response = await fetch(`${env.GG_VERIFIER_ORIGIN.replace(/\/$/, "")}/v1/hosted/verify`, {
-      method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${env.GG_VERIFIER_TOKEN}` },
+      method: "POST", headers: {
+        "content-type": "application/json", authorization: `Bearer ${env.GG_VERIFIER_TOKEN}`,
+        "x-gg-verifier-request-signature": requestSignature,
+      },
       body: JSON.stringify(verificationRequest),
     });
   } catch { return { verdict: "UNKNOWN" }; }
@@ -119,7 +136,7 @@ export default {
     const parsed = new URL(request.url);
     if (request.method === "GET" && parsed.pathname === "/health") return json(200, {
       service: "ghost-gate-edge", coordinator: Boolean(env.REPLAY_COORDINATOR && env.GG_COORDINATOR_TOKEN),
-      verifier: Boolean(env.GG_VERIFIER_ORIGIN && env.GG_VERIFIER_TOKEN && env.GG_VERIFIER_RESPONSE_KEY),
+      verifier: Boolean(env.GG_VERIFIER_ORIGIN && env.GG_VERIFIER_TOKEN && env.GG_VERIFIER_REQUEST_KEY && env.GG_VERIFIER_RESPONSE_KEY),
     });
     const gates = catalog(env);
     if (gates instanceof Error) return failClosed("hosted gate configuration is invalid");
@@ -146,18 +163,22 @@ export default {
     if (match.kind === "proof" && request.method === "POST") {
       // Refuse at the service boundary before examining browser evidence when no independently
       // authenticated verifier exists. This keeps an unconfigured deployment unmistakably closed.
-      if (!env.GG_VERIFIER_ORIGIN || !env.GG_VERIFIER_TOKEN || !env.GG_VERIFIER_RESPONSE_KEY) return failClosed("an authenticated trusted Rust verifier has not been configured");
+      if (!env.GG_VERIFIER_ORIGIN || !env.GG_VERIFIER_TOKEN || !env.GG_VERIFIER_REQUEST_KEY || !env.GG_VERIFIER_RESPONSE_KEY) return failClosed("an authenticated trusted Rust verifier has not been configured");
       let payload;
       try { payload = await request.json(); } catch { return json(400, { error: "GG: malformed proof request" }); }
       const nonce = typeof payload?.nonce === "string" ? payload.nonce : "";
       if (!/^[0-9a-f]{64}$/i.test(nonce) || canonical(payload?.proof || null).length > MAX_PROOF_BYTES) return json(400, { error: "GG: proof request is invalid" });
+      const proofDigest = await sha256(canonical(payload.proof || null));
       const proofJobId = randomId(16);
-      const reservation = await coordinatorCall(env, gate, nonce, "reserve", { ...binding(gate, nonce, visitorSession), proofJobId });
+      const reservation = await coordinatorCall(env, gate, nonce, "reserve", {
+        ...binding(gate, nonce, visitorSession), proofJobId, proofDigest,
+      });
       let reserved;
       try { reserved = await reservation.clone().json(); } catch { return failClosed("durable replay coordination returned an invalid response"); }
-      if (reservation.status === 202) return json(202, { state: "pending", proofId: reserved.proofJobId, idempotent: true });
       if (!reservation.ok) return reservation;
-      const proofDigest = await sha256(canonical(payload.proof || null));
+      // A same-visitor retry with the exact same evidence returns the original durable job and
+      // may safely recontact the verifier. A changed proof is refused by the DO; it cannot turn an
+      // ambiguous outcome into another authorization attempt.
       const verifierInput = { ...reserved.challenge, proofDigest, proof: payload.proof || null };
       const result = await trustedVerify(env, verifierInput);
       if (!verifierMatches(result, verifierInput, proofDigest)) return json(202, { state: "pending", proofId: proofJobId, reason: "verification outcome is unavailable" });

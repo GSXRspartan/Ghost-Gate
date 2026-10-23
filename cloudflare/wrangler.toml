@@ -13,6 +13,7 @@ new_sqlite_classes = ["ReplayCoordinator"]
 # Secrets are set outside source control:
 #   wrangler secret put GG_COORDINATOR_TOKEN
 #   wrangler secret put GG_VERIFIER_TOKEN
+#   wrangler secret put GG_VERIFIER_REQUEST_KEY
 #   wrangler secret put GG_VERIFIER_RESPONSE_KEY
 # GG_VERIFIER_ORIGIN is intentionally not supplied here. Until a trusted Rust verifier implements
 # the HMAC-bound /v1/hosted/verify contract, proof and session routes fail closed.

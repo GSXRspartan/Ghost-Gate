@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HostedVerificationRequest {
     pub nonce: String,
     pub tenant: String,
@@ -22,7 +22,8 @@ pub struct HostedVerificationRequest {
     pub threshold_raw: String,
     pub policy_version: String,
     pub proof_digest: String,
-    /// Opaque browser evidence. It is intentionally not interpreted by this fail-closed adapter.
+    /// Browser evidence. It is authenticated as part of the Worker request and interpreted only
+    /// by a concrete credential adapter; the fail-closed adapter never treats it as eligibility.
     pub proof: serde_json::Value,
 }
 
@@ -66,9 +67,33 @@ impl HostedVerificationRequest {
     }
 }
 
+/// Canonical request bytes shared with the Worker. This signs the binding and the complete browser
+/// evidence, so a peer that has only the bearer token cannot replace a reserved proof in transit.
+pub fn canonical_request(request: &HostedVerificationRequest) -> String {
+    let mut fields = BTreeMap::<&str, serde_json::Value>::new();
+    fields.insert("gateId", request.gate_id.clone().into());
+    fields.insert("network", request.network.into());
+    fields.insert("nonce", request.nonce.clone().into());
+    fields.insert("policyVersion", request.policy_version.clone().into());
+    fields.insert("proof", request.proof.clone());
+    fields.insert("proofDigest", request.proof_digest.clone().into());
+    fields.insert("relyingSite", request.relying_site.clone().into());
+    fields.insert("resourceAddress", request.resource_address.clone().into());
+    fields.insert("tenant", request.tenant.clone().into());
+    fields.insert("thresholdRaw", request.threshold_raw.clone().into());
+    serde_json::to_string(&fields).expect("canonical fields serialise")
+}
+
+/// A stable identity for one canonical proof job. It is safe for a Worker to retry the same job
+/// after losing a verifier response: Durable Object authorization remains single-use, while both
+/// attempts name the same verification rather than issuing separate grants.
+pub fn verification_id(request: &HostedVerificationRequest) -> String {
+    hex::encode(Sha256::digest(canonical_request(request).as_bytes()))
+}
+
 /// Current production-safe verifier behavior: do not claim eligibility without a deployed,
-/// independently configured chain/finality adapter. The randomly generated verification identity
-/// makes an old signed outcome non-substitutable for a newly submitted proof job.
+/// independently configured chain/finality adapter. The caller supplies a deterministic identity
+/// for its canonical proof job, making a timeout retry idempotent rather than a second grant.
 pub fn verify_fail_closed(request: &HostedVerificationRequest, verification_id: String)
     -> Result<HostedVerificationResult, HostedContractError>
 {
@@ -121,6 +146,19 @@ pub fn hmac_sha256_hex(key: &[u8], message: &[u8]) -> String {
     hex::encode(outer.finalize())
 }
 
+/// Verify a hexadecimal HMAC without an early-exit comparison. This is used for the Worker to
+/// verifier request signature; malformed encodings are simply unauthenticated.
+pub fn verify_hmac_sha256_hex(signature: &str, key: &[u8], message: &[u8]) -> bool {
+    let Ok(provided) = hex::decode(signature) else { return false; };
+    let Ok(expected) = hex::decode(hmac_sha256_hex(key, message)) else { return false; };
+    if provided.len() != expected.len() { return false; }
+    let mut difference = 0u8;
+    for (left, right) in provided.iter().zip(expected.iter()) {
+        difference |= left ^ right;
+    }
+    difference == 0
+}
+
 pub fn sign_result(result: &HostedVerificationResult, key: &[u8]) -> String {
     hmac_sha256_hex(key, canonical_result(result).as_bytes())
 }
@@ -152,6 +190,26 @@ mod tests {
         assert_ne!(signature, sign_result(&result, b"test-key"));
         result.tenant = "tenant-a".into(); result.verdict = HostedVerdict::Verified;
         assert_ne!(signature, sign_result(&result, b"test-key"));
+    }
+
+    #[test]
+    fn request_signature_covers_browser_evidence_and_is_stable() {
+        let request = request();
+        assert_eq!(
+            canonical_request(&request),
+            format!(
+                "{{\"gateId\":\"esm10\",\"network\":38,\"nonce\":\"{}\",\"policyVersion\":\"v1\",\"proof\":{{\"untrusted\":true}},\"proofDigest\":\"{}\",\"relyingSite\":\"https://gate.example\",\"resourceAddress\":\"resource_test\",\"tenant\":\"tenant-a\",\"thresholdRaw\":\"10000000\"}}",
+                "a".repeat(64),
+                "b".repeat(64)
+            )
+        );
+        let signature = hmac_sha256_hex(b"request-key", canonical_request(&request).as_bytes());
+        assert!(verify_hmac_sha256_hex(&signature, b"request-key", canonical_request(&request).as_bytes()));
+        assert_eq!(verification_id(&request), verification_id(&request));
+        let mut changed = request.clone();
+        changed.proof = serde_json::json!({"untrusted": false});
+        assert!(!verify_hmac_sha256_hex(&signature, b"request-key", canonical_request(&changed).as_bytes()));
+        assert_ne!(verification_id(&request), verification_id(&changed));
     }
 
     #[test]
