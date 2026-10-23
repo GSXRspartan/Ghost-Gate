@@ -37,12 +37,12 @@ function Get-BridgeBinary {
     $target = ((cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).target_directory)
     $candidate = Join-Path $target 'debug\ghost-gate-bridge.exe'
     if (Test-Path $candidate) { return $candidate }
-    $host = (rustc -vV | Select-String '^host:' | ForEach-Object { $_.ToString().Split(':', 2)[1].Trim() })
+    $rustHost = (rustc -vV | Select-String '^host:' | ForEach-Object { $_.ToString().Split(':', 2)[1].Trim() })
     throw @"
 No native Windows Ghost Gate bridge executable was found.
   searched: $candidate
   cargo target directory: $target
-  rust host: $host
+  rust host: $rustHost
 Build separately (the launcher never compiles Rust):
   cargo build -p ghost-gate-walletd --bin ghost-gate-bridge
 The configured target directory may be a WSL/Linux path; a native PowerShell launcher requires ghost-gate-bridge.exe.
