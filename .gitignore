@@ -29,3 +29,4 @@ node_modules/
 .pnpm-store/
 # Machine-local Cargo config (absolute target-dir path; see the file for why)
 /.cargo/
+.tari-v047-reference/
