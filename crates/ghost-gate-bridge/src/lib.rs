@@ -48,6 +48,7 @@ pub mod gate_registry;
 pub mod http;
 pub mod origin;
 pub mod policy;
+pub mod replay_store;
 pub mod server;
 pub mod session;
 pub mod trace;
