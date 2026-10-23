@@ -9,7 +9,7 @@ $Repo = (git -C $PSScriptRoot\.. rev-parse --show-toplevel).Trim()
 $StateDir = Join-Path $Repo '.ghost-gate'
 $StateFile = Join-Path $StateDir 'dev-state.json'
 $ConfigFile = Join-Path $Repo '.env.dev'
-$BridgePort = if ($env:GG_BRIDGE_PORT) { [int]$env:GG_BRIDGE_PORT } else { 7799 }
+$BridgePort = if ($env:GG_BRIDGE_PORT) { [int]$env:GG_BRIDGE_PORT } elseif ($Mode -eq 'walletd') { 7898 } else { 7897 }
 $BridgeUrl = "http://127.0.0.1:$BridgePort"
 $WalletdUrl = if ($env:GG_WALLETD_ENDPOINT) { $env:GG_WALLETD_ENDPOINT } else { 'http://127.0.0.1:5110/json_rpc' }
 
@@ -34,14 +34,23 @@ function Get-WalletdInfo {
     $reply.result
 }
 function Get-BridgeBinary {
-    $candidate = Join-Path $Repo 'target\debug\ghost-gate-bridge.exe'
+    $target = ((cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).target_directory)
+    $candidate = Join-Path $target 'debug\ghost-gate-bridge.exe'
     if (Test-Path $candidate) { return $candidate }
-    & cargo build -p ghost-gate-walletd --bin ghost-gate-bridge --quiet
-    if (!(Test-Path $candidate)) { throw 'bridge build completed without target\\debug\\ghost-gate-bridge.exe' }
-    $candidate
+    $host = (rustc -vV | Select-String '^host:' | ForEach-Object { $_.ToString().Split(':', 2)[1].Trim() })
+    throw @"
+No native Windows Ghost Gate bridge executable was found.
+  searched: $candidate
+  cargo target directory: $target
+  rust host: $host
+Build separately (the launcher never compiles Rust):
+  cargo build -p ghost-gate-walletd --bin ghost-gate-bridge
+The configured target directory may be a WSL/Linux path; a native PowerShell launcher requires ghost-gate-bridge.exe.
+"@
 }
 function Assert-Configuration {
-    if (!$env:GG_BRIDGE_GATES) { throw 'set GG_BRIDGE_GATES in .env.dev; it must contain only the existing credential-only gate configuration' }
+    if (!$env:GG_BRIDGE_GATES) { $env:GG_BRIDGE_GATES = 'esm10=:resource_0101010101010101010101010101010101010101010101010101010101010101:10000000:6:tTARI' }
+    if (!$env:GG_OOTLE_NETWORK) { $env:GG_OOTLE_NETWORK = '26' }
     if ($env:GG_BRIDGE_GATES -notmatch '^[^=]+=:[^:]+:[0-9]+:[0-9]+:[^,]+$') { throw 'GG_BRIDGE_GATES must describe one credential-only gate: id=:resource:threshold:divisibility:symbol' }
 }
 function Assert-PortFree {
