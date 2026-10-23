@@ -19,8 +19,73 @@ use tari_engine_types::{
     substate::{SubstateId, SubstateValue},
 };
 use tari_indexer_client::types::{EpochCheckpointEntry, SubstateProof, ValidatorSetCommittee};
-use tari_ootle_common_types::{Epoch, ValidatorSetHash, shard::Shard};
+use tari_ootle_common_types::{
+    Epoch,
+    NumPreshards,
+    ProtocolVersion,
+    ShardGroup,
+    ValidatorSetHash,
+    VotePower,
+    hash_validator_set_committee,
+    shard::Shard,
+};
 use tari_ootle_light_client::{LightClientError, TrustedValidatorSet, TrustedValidatorSetHash};
+use tari_state_tree::ValidatorSetTree;
+use tari_template_lib_types::crypto::RistrettoPublicKeyBytes;
+
+/// The release signer pinned by Ghost Gate's release-bootstrap review. This value identifies
+/// source provenance only; the compiled code does not verify OpenPGP signatures at runtime.
+pub const ESMERALDA_V047_RELEASE_SIGNER_FINGERPRINT: &str =
+    "337B91EFC5F1027D8AEDF63D1885B149504C0A64";
+
+/// The exact signed release commit whose Esmeralda configured-oracle material was reviewed.
+pub const ESMERALDA_V047_RELEASE_COMMIT: &str = "9dabb2a76a9ad5c6e99dfa180ab7bbbcb1a05a47";
+
+/// The exact release tag whose signature was checked during the bootstrap review.
+pub const ESMERALDA_V047_RELEASE_TAG: &str = "v0.47.0";
+
+/// The first epoch whose release-derived committee was checked against captured public transport
+/// evidence. This is intentionally not inferred from the configured-oracle registration epoch.
+pub const ESMERALDA_V047_RELEASE_ANCHOR_EPOCH: u64 = 12_634;
+
+const ESMERALDA_RELEASE_VALIDATOR_KEYS: [&str; 4] = [
+    "10780fe1b4d31f8350e4b881dccd8f8210ce056050ac6dd8cca88ca16710b044",
+    "568adadd2744c7bb3ae4c58e26e83a49a5b5af3380edfcd6b5d7af315580552f",
+    "c480fe3a76f03dcdce8d7c85ac7d0001ec97b667260172709b23818c8707e503",
+    "d6da35adba3642e7d1343985d5e4f123f5230a74c5480bf2857aabe50bcd6362",
+];
+
+/// Derives an Esmeralda validator-set root from the four-validator topology embedded in the
+/// authenticated v0.47.0 release. It performs no network access and never changes sidecar
+/// readiness: callers must still explicitly choose and review this root before passing it to
+/// [`PinnedConsensusVerifier::pinned`].
+///
+/// The helper deliberately excludes registration history. It is valid only for an epoch where
+/// the signed release topology is independently known to be the active topology; a successful
+/// committee proof verifies that claim for the requested epoch without trusting the indexer as a
+/// root.
+pub fn derive_esmeralda_v047_release_validator_set_hash(epoch: Epoch) -> ValidatorSetHash {
+    let shard_group = ShardGroup::new(1, 256);
+    let members = ESMERALDA_RELEASE_VALIDATOR_KEYS.map(|key| {
+        RistrettoPublicKeyBytes::from_hex(key).expect("static release validator key is valid")
+    });
+    let leaf = hash_validator_set_committee(
+        ProtocolVersion::at(Network::Esmeralda, epoch),
+        &shard_group,
+        members
+            .iter()
+            .map(|key| (key, VotePower::of(1), &[][..])),
+    )
+    .expect("static release committee is sorted and valid");
+    ValidatorSetTree::build(
+        Network::Esmeralda,
+        epoch,
+        NumPreshards::P256,
+        [(shard_group, leaf)],
+    )
+    .expect("static release validator-set tree is valid")
+    .hash()
+}
 
 /// Audit metadata extracted only after the official v0.47 verifier has accepted an inclusion
 /// proof and its quorum-signed block proof. This is not a browser assertion.
@@ -87,8 +152,21 @@ pub struct PinnedAnchorConfig {
     pub reviewed_by: String,
     pub upstream_commit: String,
     pub review_status: String,
+    /// Optional provenance pin for the reviewed v0.47 signed-release bootstrap. When present,
+    /// the supplied hash must equal the deterministic release-derived root at `anchor_epoch`.
+    #[serde(default)]
+    pub release_bootstrap: Option<ReleaseBootstrap>,
     #[serde(default = "default_max_proof_age_epochs")]
     pub max_proof_age_epochs: u64,
+}
+
+/// Selects the fixed signed-release bootstrap after an operator has made the external OpenPGP
+/// trust decision. This is not a runtime signature verifier and is never enabled implicitly.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReleaseBootstrap {
+    pub release_tag: String,
+    pub signer_fingerprint: String,
 }
 
 fn default_max_proof_age_epochs() -> u64 { 1 }
@@ -104,6 +182,16 @@ impl PinnedAnchorConfig {
         let network = Network::try_from(self.network).map_err(|_| ConsensusError::UntrustedAnchor)?;
         let hash = serde_json::from_value::<ValidatorSetHash>(self.validator_set_hash)
             .map_err(|_| ConsensusError::UntrustedAnchor)?;
+        if let Some(bootstrap) = self.release_bootstrap {
+            if bootstrap.release_tag != ESMERALDA_V047_RELEASE_TAG
+                || bootstrap.signer_fingerprint != ESMERALDA_V047_RELEASE_SIGNER_FINGERPRINT
+                || self.network != Network::Esmeralda.as_byte()
+                || self.anchor_epoch != ESMERALDA_V047_RELEASE_ANCHOR_EPOCH
+                || hash != derive_esmeralda_v047_release_validator_set_hash(Epoch(self.anchor_epoch))
+            {
+                return Err(ConsensusError::UntrustedAnchor);
+            }
+        }
         let committee = serde_json::from_value::<ValidatorSetCommittee>(self.walked_committee)
             .map_err(|_| ConsensusError::UntrustedAnchor)?;
         let verifier = PinnedConsensusVerifier::pinned(network, Shard::from(self.walk_shard), Epoch(self.anchor_epoch), &hash, &committee)?;
@@ -317,5 +405,60 @@ mod tests {
             "upstreamCommit": "9dabb2a76a9ad5c6e99dfa180ab7bbbcb1a05a47", "reviewStatus": "draft"
         })).unwrap();
         assert!(matches!(draft.into_verifier(), Err(ConsensusError::UntrustedAnchor)));
+    }
+
+    #[test]
+    fn signed_release_topology_authenticates_captured_epoch_12634_committee() {
+        // This response is transport evidence captured from the public indexer. Its root is
+        // calculated below from the signed release topology, never taken from the response.
+        let committee: ValidatorSetCommittee = serde_json::from_str(r#"{
+          "epoch":12634,
+          "shard_group":{"start":1,"end_inclusive":256},
+          "validator_set_hash":"dc39359775aa329670eb8cbfce7e1c77f7e5280d1ae334bc62bb46485c6c8956",
+          "members":[
+            {"public_key":"10780fe1b4d31f8350e4b881dccd8f8210ce056050ac6dd8cca88ca16710b044","vote_power":1},
+            {"public_key":"568adadd2744c7bb3ae4c58e26e83a49a5b5af3380edfcd6b5d7af315580552f","vote_power":1},
+            {"public_key":"c480fe3a76f03dcdce8d7c85ac7d0001ec97b667260172709b23818c8707e503","vote_power":1},
+            {"public_key":"d6da35adba3642e7d1343985d5e4f123f5230a74c5480bf2857aabe50bcd6362","vote_power":1}
+          ],
+          "proof":"p2duZXR3b3JraWVzbWVyYWxkYWVlcG9jaBkxWm1udW1fcHJlc2hhcmRzZFAyNTZuY29tbWl0dGVlX3Jvb3SYIBgtGBoY9xjDGJoY7Ri/GBgYYhYYzhheGNMYahgwGKgXGNgYlRh7GOUYlBgdGPMY/hjvGM4YIBiuGPoY3Bhxa3NoYXJkX2dyb3VwomVzdGFydAFtZW5kX2luY2x1c2l2ZRkBAGdtZW1iZXJzhKJqcHVibGljX2tleVggEHgP4bTTH4NQ5LiB3M2PghDOBWBQrG3YzKiMoWcQsERqdm90ZV9wb3dlcgGianB1YmxpY19rZXlYIFaK2t0nRMe7OuTFjiboOkmlta8zgO381rXXrzFVgFUvanZvdGVfcG93ZXIBompwdWJsaWNfa2V5WCDEgP46dvA9zc6NfIWsfQAB7Je2ZyYBcnCbI4GMhwflA2p2b3RlX3Bvd2VyAaJqcHVibGljX2tleVgg1to1rbo2QufRNDmF1eTxI/UjCnTFSAvyhXqr5QvNY2Jqdm90ZV9wb3dlcgFlcHJvb2aiZGxlYWaiY2tleaFlYnl0ZXOYIBiLFRifCRhiGCAYtBjPGHEYzRg3GP0YfRjkGFcYjhhGGIEY5hjjGK0YqxjMGC4YuRhHGD8YkxhWGLwYvBgcanZhbHVlX2hhc2iYIAQYuxhTGOkYNRj1GHAYPBjlGNwSGJsYNgkYGREYyxjuGLsYbRjqGJkYLRi4GLAYshAYiwAYfhhzGNJoc2libGluZ3OA"
+        }"#).unwrap();
+        let epoch = Epoch(12_634);
+        let hash = derive_esmeralda_v047_release_validator_set_hash(epoch);
+        assert_eq!(hash.to_string(), "dc39359775aa329670eb8cbfce7e1c77f7e5280d1ae334bc62bb46485c6c8956");
+        assert_eq!(committee.validator_set_hash, hash);
+        PinnedConsensusVerifier::pinned(Network::Esmeralda, Shard::first(), epoch, &hash, &committee).unwrap();
+        let reviewed = PinnedAnchorConfig {
+            network: Network::Esmeralda.as_byte(),
+            anchor_epoch: ESMERALDA_V047_RELEASE_ANCHOR_EPOCH,
+            walk_shard: Shard::first().as_u32(),
+            validator_set_hash: serde_json::to_value(hash).unwrap(),
+            walked_committee: serde_json::to_value(&committee).unwrap(),
+            provenance: "release bootstrap test".into(),
+            reviewed_at: "2026-10-23T00:00:00Z".into(),
+            reviewed_by: "test".into(),
+            upstream_commit: ESMERALDA_V047_RELEASE_COMMIT.into(),
+            review_status: "approved".into(),
+            release_bootstrap: Some(ReleaseBootstrap {
+                release_tag: ESMERALDA_V047_RELEASE_TAG.into(),
+                signer_fingerprint: ESMERALDA_V047_RELEASE_SIGNER_FINGERPRINT.into(),
+            }),
+            max_proof_age_epochs: 1,
+        };
+        assert!(reviewed.clone().into_verifier().is_ok());
+        let mut mismatched = reviewed.clone();
+        mismatched.anchor_epoch += 1;
+        assert!(matches!(mismatched.into_verifier(), Err(ConsensusError::UntrustedAnchor)));
+        let mut wrong_signer = reviewed.clone();
+        wrong_signer
+            .release_bootstrap
+            .as_mut()
+            .unwrap()
+            .signer_fingerprint = "0000000000000000000000000000000000000000".into();
+        assert!(matches!(wrong_signer.into_verifier(), Err(ConsensusError::UntrustedAnchor)));
+        let mut wrong_tag = reviewed;
+        wrong_tag.release_bootstrap.as_mut().unwrap().release_tag = "v0.47.1".into();
+        assert!(matches!(wrong_tag.into_verifier(), Err(ConsensusError::UntrustedAnchor)));
+        assert_ne!(hash, derive_esmeralda_v047_release_validator_set_hash(Epoch(12_635)));
     }
 }

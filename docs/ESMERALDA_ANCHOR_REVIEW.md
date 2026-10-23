@@ -1,6 +1,7 @@
 # Esmeralda trust-anchor review package
 
-**Status: UNTRUSTED — Ghost Gate must return `UNKNOWN`.**
+**Status: UNTRUSTED BY DEFAULT — Ghost Gate must return `UNKNOWN` until an operator installs a
+reviewed anchor configuration.**
 
 No independently authenticated Esmeralda validator-set anchor has been provisioned on this laptop.
 The v0.47 wallet provider's `anchor_on_first_use` behavior and an indexer's `verified` response
@@ -22,6 +23,10 @@ The loopback sidecar accepts a JSON document only when all of these fields are p
   "reviewedAt": "<RFC3339 UTC timestamp>",
   "reviewedBy": "<named accountable reviewer or release verification identity>",
   "upstreamCommit": "9dabb2a76a9ad5c6e99dfa180ab7bbbcb1a05a47",
+  "releaseBootstrap": {
+    "releaseTag": "v0.47.0",
+    "signerFingerprint": "337B91EFC5F1027D8AEDF63D1885B149504C0A64"
+  },
   "reviewStatus": "approved",
   "maxProofAgeEpochs": 1
 }
@@ -46,8 +51,13 @@ because the v0.47 verifier proves it against the approved hash.
    handovers verified from this root. A failed handover, stale proof, unavailable evidence or
    configuration parse failure remains `UNKNOWN`.
 
-This package intentionally contains no candidate hash and no approval. Filling its placeholders
-requires an operator with independent provenance evidence.
+`releaseBootstrap` is optional. When present, the sidecar accepts only the exact reviewed
+v0.47.0 release tag, signer fingerprint, Esmeralda network byte, epoch 12634, and the
+deterministically derived validator-set hash. It is not enabled by default and does not make a
+transport response an anchor.
+
+This package intentionally contains no production approval or active configuration. Filling its
+placeholders requires an operator with independent provenance evidence.
 
 ## 2026-10-23 source and public-endpoint review
 
@@ -78,7 +88,7 @@ into an anchor configuration.
 `https://explorer.tari.mw/` served the Veil explorer UI, while `/api` returned 404. It was not
 used as a consensus source or a second trust root.
 
-### Source evidence and remaining gap
+### Signed source, source epoch, and indexer epoch
 
 The exact local Tari source is tag `v0.47.0` at
 `9dabb2a76a9ad5c6e99dfa180ab7bbbcb1a05a47`. Its
@@ -88,29 +98,55 @@ same four validator public keys for shard group `1..=256` with registration epoc
 The protocol-version schedule changes at epochs 11925 and 12220, so a validator-set hash is
 epoch-bound even when the members do not change.
 
-This is promising bootstrap material but not an approved Ghost Gate anchor yet:
+The annotated tag object for `v0.47.0` signs commit
+`9dabb2a76a9ad5c6e99dfa180ab7bbbcb1a05a47`. Its OpenPGP issuer fingerprint is
+`337B91EFC5F1027D8AEDF63D1885B149504C0A64` (long key ID `1885B149504C0A64`). An isolated,
+temporary native GPG home imported the matching public key from GitHub's public
+`sdbondi.gpg` endpoint and verified a `Good signature` over that exact tag and object. The key
+labels itself `Stanley Bondi <sdbondi@users.noreply.github.com>`.
 
-1. The `v0.47.0` annotated tag contains a PGP signature, but this laptop's `git tag -v v0.47.0`
-   could not start GPG (`couldn't create signal pipe, Win32 error 5`). No trusted maintainer key
-   fingerprint was available to complete signature verification.
-2. The source preset's registration epoch (`8367`) and the public indexer's reported active start
-   epoch (`11670`) differ. That may be expected oracle bookkeeping, but this review has no
-   independently authenticated evidence binding the source preset to the later validator-set
-   hashes, weights, and assignment.
-3. The official `TrustedValidatorSet::anchor_pinned` implementation correctly verifies a
-   transport-supplied committee against a pinned hash, but it deliberately cannot authenticate
-   the first hash. `anchor_on_first_use` has not been used.
+The earlier Windows error was a Git-for-Windows/MSYS path conversion problem: a native
+`C:\\...` homedir supplied to GPG was not the homedir that GPG opened. Supplying its MSYS path
+to an isolated keyring fixed verification. WSL cannot independently repeat the check on this
+laptop because its configured Ubuntu ext4 VHDX is missing under `D:`; it was not repaired or
+recreated. Public OpenPGP directory/keyserver lookups did not independently corroborate this
+key's owner identity. Thus GitHub's Verified badge and hosted public key establish neither an
+independent Esmeralda network root nor a Web-of-Trust identity certification.
 
-**Decision: remain `UNTRUSTED` and return `UNKNOWN`.** The sidecar must not receive an
-`approved` anchor configuration based on these endpoint responses or this unverified local clone.
+The source's `registration_epoch = 8367` is a configured-oracle registration value. The v0.47
+`Validator::activation_epoch` rule activates it at `8368`. The indexer endpoint exposes its stored
+`ValidatorNode.start_epoch`, and returns the same four complete public keys only from epoch
+`11670`, with vote power one and shard group `1..=256`. It returns no members at epochs 8367,
+8368, or 11669. This is a real historical mismatch, not decimal/hex formatting: the signed source
+does not itself explain the indexer's earlier history. The canonical v0.47 epoch-manager currently
+assigns every active validator vote power one; its Esmeralda protocol rules change at 11925 and
+12220, so the validator-set root is epoch-bound.
 
-### Exact next action
+The configured hybrid oracle does not close that gap. Its base-layer client provides epoch ticks;
+the configured oracle supplies topology. No authenticated L1 membership record was located in the
+reviewed release that can independently derive the source-to-11670 transition.
 
-Obtain an independently authenticated Tari Project release-verification artifact: the maintainer
-PGP fingerprint (or another durable signed release channel) for `v0.47.0`, plus a signed Esmeralda
-bootstrap statement that binds the network byte, validator public keys, vote powers, shard
-assignment, activation history, and either a validator-set hash/committee or an L1-verifiable
-derivation. After that artifact is verified, add a small deterministic bootstrap-derivation test,
-enter only its resulting hash and transport-fetched committee in the gitignored reviewed anchor
-file, and prove one live request through the sidecar. Until then, no live authorization can be
-called consensus-verified.
+### Narrow signed-release bootstrap result
+
+For the later epoch 12634, the four signed-release full public keys, vote powers, shard group and
+official v0.47 hash rules deterministically derive
+`dc39359775aa329670eb8cbfce7e1c77f7e5280d1ae334bc62bb46485c6c8956`. A captured indexer
+committee proof for that epoch matches this root and passes `PinnedConsensusVerifier::pinned`.
+The proof is evidence checked *against* the derived root; its transport response was never used to
+choose the root. The focused verifier suite covers this derivation, rejects a changed epoch, and
+requires the exact release tag/fingerprint when `releaseBootstrap` is selected.
+
+This establishes a bounded bootstrap only under one explicit deployment assumption: the operator
+must deliberately pin the fingerprint above as an accepted Tari release-signing key. It does not
+infer that policy merely from GitHub, nor does it authenticate the 8368-to-11670 history. No
+sidecar configuration has been written and no live authorization path has been enabled.
+
+### Exact remaining requirement
+
+**BLOCKED for live consensus authorization.** Authorize the release-signing-key pin as a project
+deployment trust decision (or obtain an independent Tari-maintainer authentication of that exact
+fingerprint), then install a reviewed local anchor using the bounded epoch-12634 bootstrap. Before
+enabling access issuance, increase the sidecar's bounded request allowance and perform one real
+epoch-12634-to-12635 signed-handover verification: the genuine checkpoint response is about 29 KiB
+while the present 16 KiB request cap rejects it. Until that handover is verified from the pinned
+anchor, Ghost Gate must remain `UNKNOWN`/fail-closed for live authorization.

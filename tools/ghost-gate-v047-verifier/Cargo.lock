@@ -916,6 +916,7 @@ dependencies = [
  "tari_indexer_client",
  "tari_ootle_common_types",
  "tari_ootle_light_client",
+ "tari_state_tree",
  "tari_template_lib_types",
  "thiserror 2.0.21",
  "tokio",

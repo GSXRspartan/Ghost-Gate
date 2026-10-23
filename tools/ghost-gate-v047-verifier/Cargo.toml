@@ -16,6 +16,7 @@ tari_engine_types = { path = "../../.tari-v047-reference/crates/engine_types" }
 tari_indexer_client = { path = "../../.tari-v047-reference/clients/tari_indexer_client", default-features = false }
 tari_ootle_common_types = { path = "../../.tari-v047-reference/crates/common_types" }
 tari_ootle_light_client = { path = "../../.tari-v047-reference/crates/wallet/light_client", features = ["test-fixtures"] }
+tari_state_tree = { path = "../../.tari-v047-reference/crates/state_tree" }
 tari_template_lib_types = { path = "../../.tari-v047-reference/crates/template_lib_types" }
 thiserror = "2.0.17"
 serde = { version = "1", features = ["derive"] }
