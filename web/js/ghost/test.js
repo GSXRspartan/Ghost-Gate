@@ -177,6 +177,19 @@ test("display formatting uses the resource's own divisibility, never an assumed 
   assert.equal(formatAmount("1000000", 2), "10000");
 });
 
+test("the real 10-tTARI gate threshold renders as 10, and a missing receipt threshold never renders as 'null'", () => {
+  // Regression (master status §14): the credential receipt's required_minimum reached the
+  // page as null/undefined on the physical Esmeralda proof, and the UI rendered "null tTARI".
+  // 10_000_000 raw at divisibility 6 is exactly 10 tTARI.
+  assert.equal(formatAmount("10000000", 6), "10");
+  assert.equal(formatAmount(10000000, 6), "10");
+  // formatAmount itself refuses missing evidence: it returns null for a missing threshold,
+  // never the string "null". The page renders an honest "unknown" note in that case.
+  assert.equal(formatAmount(null, 6), null);
+  assert.equal(formatAmount(undefined, 6), null);
+  assert.equal(formatAmount("", 6), null);
+});
+
 /* ------------------------------------------------------------------ */
 /* Sapient — the extension provider                                    */
 /* ------------------------------------------------------------------ */

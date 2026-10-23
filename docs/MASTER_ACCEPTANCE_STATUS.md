@@ -510,3 +510,47 @@ visible.
 **Remaining for ACCESS GRANTED:** a registry-backed access plane (GG_BINDINGS_PATH + admin
 plane) so the verified proof issues a real session token. All automated verification only
 until then; still indexer-trusted development verification, not production security.
+
+## 16. Session log — 2026-10-22 (three post-milestone defects fixed; live verification)
+
+**What happened.** After the operator's first genuine positive Sapient proof (the physical
+resume attempt on esm10 against the real 10-tTARI UTXO), three defects were reported:
+(1) the Technical Inspector was empty, (2) the receipt rendered "required: null tTARI",
+(3) the page showed ACCESS GRANTED even though the bridge issues no session
+(`registry_backed=false`, `access:null`). All three are fixed and verified.
+
+**Fixes:**
+1. Trace wiring: the credential path now records REAL protocol events into the attempt's
+   trace (`wallet.requested`, `verifier.threshold_checked`, `policy.bound`, and — new —
+   `access.unavailable` when the bridge is not registry-backed). The refusal path records
+   `access.refused`. `finishCredential` calls `refreshTrace()` on both verdict paths, so the
+   inspector populates after a resume. `Trace::push` sanitizes all details at the boundary.
+2. Receipt: `CredentialReceipt` gained `required_minimum` (the gate's live threshold); the
+   frontend renders it and, if the backend omits it, prints "unknown — the bridge did not
+   report a threshold" instead of "null tTARI". No success-looking substitution.
+3. Terminology: the success title is decided by the presence of a REAL session token in the
+   response — `ACCESS GRANTED` only when `access` exists; otherwise
+   `PROOF VERIFIED — SESSION NOT ISSUED` with an explicit "no access was granted" note and a
+   distinct `.outcome.verified` style. The backend also returns an explicit `status_message`.
+4. Frontend hardening (found by the harness): `loadTelegramScope` no longer dereferences a
+   null `state.gate` between the gate list loading and a selection being made; the wiring
+   block uses a defensive `wire()` helper; `setPill` guards against missing pills. All module
+   code now survives a missing element without silently killing the page.
+
+**Verified (AUTOMATED TESTS ONLY):**
+- Browser harness against the live single-gate bridge (:7897, esm10 only): **34/34 checks
+  pass**. Section D now proves BOTH honest success states: `access:null` renders
+  `PROOF VERIFIED — SESSION NOT ISSUED` (and never ACCESS GRANTED), a real session renders
+  `ACCESS GRANTED` with the duration; both render floor AND required threshold as 10 tTARI
+  with no "null tTARI". Console health clean.
+- JS suite **27/27** (new: the 10-tTARI threshold regression — `formatAmount("10000000",6)`
+  is "10" and a missing receipt threshold never renders as "null").
+- Bridge lib **133/133**.
+- The harness was fixed for the single-gate live bridge: the stale-refusal setup now injects
+  the stale outcome via the page's own outcome panel when esm-diag is absent (the operator
+  removed it; the malformed placeholder component address is NOT reinstated), and a
+  backtick-in-template-literal syntax error in the harness was fixed.
+
+**Remaining for real sessions:** registry-backed access plane (GG_BINDINGS_PATH + admin
+plane). The live bridge remains indexer-trusted development verification, not production
+security.

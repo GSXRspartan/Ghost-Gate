@@ -363,6 +363,8 @@ details.explain p { color: var(--dim); font-size: 0.8rem; line-height: 1.5; marg
 .outcome .verdict { font: 700 1rem var(--mono); letter-spacing: 0.1em; }
 .outcome.granted .verdict { color: var(--green); }
 .outcome.denied .verdict { color: var(--bad); }
+.outcome.verified { border-color: var(--green-dim); background: rgba(41, 212, 124, 0.06); }
+.outcome.verified .verdict { color: var(--green); }
 .outcome .why { color: var(--dim); margin-top: 0.4rem; font-size: 0.85rem; line-height: 1.5; }
 
 /* ---------- the terminal (Technical view) ---------- */

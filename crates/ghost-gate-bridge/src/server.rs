@@ -978,23 +978,77 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                 // The credential path grants its session here and hands it straight back, so
                 // the browser never has to poll for it.
                 let access = self.access_grants.get(&hex::encode(job_nonce)).cloned();
+
+                // The attempt id comes from the X-GG-Attempt header the page sets; when present,
+                // the inspector is fed the REAL protocol events, in order, as they happened —
+                // no invented successes.
+                if let Some(attempt) = request.attempt.as_deref() {
+                    if let Some(trace) = self.traces.get_mut(attempt) {
+                        use crate::trace::ev;
+                        // The wallet was asked to sign the challenge over the output it claims.
+                        ev::wallet_asked(trace);
+                        ev::wallet_answered(trace, receipt.attested_minimum);
+                        // The verifier ran: output read from chain state, floor compared with
+                        // the gate's live threshold.
+                        ev::verifier_checked(
+                            trace,
+                            receipt.required_minimum,
+                            receipt.attested_minimum,
+                            1,
+                        );
+                        ev::policy_binding(trace);
+                        // Session truth, stated honestly: a registry-backed bridge issues a
+                        // token here (a REAL grant, not a simulated one); a preview bridge
+                        // verifies and stops short of one. Two distinct events — conflating
+                        // "verified" with "granted" was the old failure mode.
+                        if let Some(grant) = &access {
+                            ev::access_granted(
+                                trace,
+                                grant.expires_unix.saturating_sub(crate::session::now_unix()),
+                                false,
+                            );
+                        } else {
+                            ev::access_unavailable(trace);
+                        }
+                    }
+                }
+
+                // The success message reflects whether a server-authorized session actually
+                // exists: a verified proof on a preview bridge is exactly that — verified,
+                // not granted.
+                let status_message = if access.is_some() {
+                    "ACCESS GRANTED"
+                } else {
+                    "PROOF VERIFIED — SESSION NOT ISSUED"
+                };
                 Response::json(
                     200,
                     &serde_json::json!({
                         "state": "accepted",
+                        "status_message": status_message,
                         "proof_id": job_id,
                         "receipt": receipt,
                         "access": access,
                     }),
                 )
             }
-            Err(refusal) => Response::json(
-                409,
-                &serde_json::json!({
-                    "refused": refusal.to_string(),
-                    "challenge_still_live": true,
-                }),
-            ),
+            Err(refusal) => {
+                // The refusal is a real operation too — record it in the attempt's trace so
+                // the inspector shows why the credential was refused, without leaking
+                // secrets (Trace::push sanitizes every detail at the boundary).
+                if let Some(attempt) = request.attempt.as_deref() {
+                    if let Some(trace) = self.traces.get_mut(attempt) {
+                        crate::trace::ev::access_refused(trace, "The credential was refused: the output or its signature did not verify against chain state.");
+                    }
+                }
+                Response::json(
+                    409,
+                    &serde_json::json!({
+                        "refused": refusal.to_string(),
+                        "challenge_still_live": true,
+                    }),
+                )
+            }
         }
     }
 

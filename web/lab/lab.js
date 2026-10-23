@@ -659,7 +659,12 @@ async function prove() {
             "Minimum threshold proven on chain. Your exact balance was never disclosed and never left your wallet." + sessionInfo,
             {
                 "attested floor": `${formatAmount(r.attested_minimum, gate.divisibility)} ${gate.symbol || ""}`.trim(),
-                "required": `${formatAmount(r.required_minimum, gate.divisibility)} ${gate.symbol || ""}`.trim(),
+                // A missing threshold in the receipt means the backend did not report one —
+                // say exactly that. Never substitute a success-looking value for absent
+                // backend evidence: "null tTARI" was the old silent failure mode.
+                "required": r.required_minimum == null
+                    ? "unknown — the bridge did not report a threshold"
+                    : `${formatAmount(r.required_minimum, gate.divisibility)} ${gate.symbol || ""}`.trim(),
                 "proof kind": r.proof_kind,
                 "live inputs used": r.input_count,
             });
@@ -860,16 +865,29 @@ async function finishCredential(gate, challenge_nonce, session_commitment, subst
     if (asked.ok && asked.body.state === "accepted") {
         advance("grant"); advance("session");
         const r = asked.body.receipt || {};
-        const sessionInfo = asked.body.access
+        // The bridge decides, the page reports: a session token in the response means ACCESS
+        // GRANTED; its absence is reported as exactly that — a verified proof on a bridge
+        // that issues no session. The two states must never be conflated.
+        const hasSession = !!asked.body.access;
+        const title = hasSession ? "ACCESS GRANTED" : "PROOF VERIFIED — SESSION NOT ISSUED";
+        const sessionInfo = hasSession
             ? ` A verified session was issued for ${Math.round((asked.body.access.expiresUnix - Date.now() / 1000) / 86400)} day(s); afterwards, a fresh proof is required.`
-            : (gate.sessionsAvailable ? " The proof was verified, but this bridge issues no session token (not registry-backed)." : "");
-        showOutcome("granted", "ACCESS GRANTED",
-            "Threshold proven on chain against a real output you own. The output's own public floor was checked, not your balance — the amount above the floor was never disclosed." + sessionInfo,
+            : " The proof was verified against chain state, but this bridge issues no session token (not registry-backed). No access was granted.";
+        showOutcome(hasSession ? "granted" : "verified", title,
+            (hasSession
+                ? "Threshold proven on chain against a real output you own. The output's own public floor was checked, not your balance — the amount above the floor was never disclosed."
+                : "The proof was verified against chain state: the output exists, is unspent, and its floor meets the gate's threshold. However, this bridge does not issue authorization sessions (not registry-backed), so nothing was unlocked.") + sessionInfo,
             {
                 "attested floor": `${formatAmount(r.attested_minimum, gate.divisibility)} ${gate.symbol || ""}`.trim(),
-                "required": `${formatAmount(r.required_minimum, gate.divisibility)} ${gate.symbol || ""}`.trim(),
+                // A missing threshold in the receipt means the backend did not report one —
+                // say exactly that. Never substitute a success-looking value for absent
+                // backend evidence: "null tTARI" was the old silent failure mode.
+                "required": r.required_minimum == null
+                    ? "unknown — the bridge did not report a threshold"
+                    : `${formatAmount(r.required_minimum, gate.divisibility)} ${gate.symbol || ""}`.trim(),
                 "output": substateId.slice(0, 18) + "…",
             });
+        await refreshTrace();
         return;
     }
     const reason = asked.body.refused || asked.body.error || "the proof did not complete";
@@ -884,6 +902,7 @@ async function finishCredential(gate, challenge_nonce, session_commitment, subst
         ? "The required threshold was not proven. Your exact balance remains private."
         : "The proof was not accepted.";
     showOutcome("denied", title, body, { reason, status: asked.status });
+    await refreshTrace();
 }
 
 async function poll(proofId, attempt = 0) {
@@ -1069,10 +1088,13 @@ const networkName = (b) => NETWORK_NAMES[b] || `byte 0x${Number(b || 0).toString
 
 function setPill(id, cls, text) {
     const pill = $(id);
+    if (!pill) return;
     pill.classList.remove("ok", "warn", "bad");
     if (cls) pill.classList.add(cls);
-    pill.querySelector(".v").textContent = text;
-    pill.title = `${pill.querySelector(".k").textContent}: ${text}`;
+    const valueEl = pill.querySelector(".v");
+    if (valueEl) valueEl.textContent = text;
+    const keyEl = pill.querySelector(".k");
+    if (keyEl) pill.title = `${keyEl.textContent}: ${text}`;
 }
 
 async function refreshStatus() {
@@ -1285,50 +1307,68 @@ function loadTelegramScope() {
     } else if (!scoped.length) {
         setInactive(`Telegram access is not configured: none of the ${state.gates.length} configured gate(s) allow Telegram membership. The administrator can change this per gate in the dashboard.`);
     } else if (!currentScoped) {
-        setInactive(`This gate ("${state.gate.gateId}") authorizes the website only. Switch to ${scoped.map((g) => g.gateId).join(", ")} or re-scope in the dashboard.`);
+        // state.gate is null between the gates list loading and a selection being made —
+        // read the scoped gate names without dereferencing a gate that isn't selected yet.
+        const names = scoped.map((g) => g.gateId).join(", ");
+        if (!state.gate) {
+            setInactive(`Telegram access is configured on ${names}. Select a gate to see whether it may be used.`);
+        } else {
+            setInactive(`This gate ("${state.gate.gateId}") authorizes the website only. Switch to ${names} or re-scope in the dashboard.`);
+        }
     } else {
         setActive();
         note.textContent = `${scoped.map((g) => g.gateId).join(", ")} may be used for Telegram membership.`;
     }
 }
 
-$("tg-start").onclick = async () => {
-    const gate = state.gate;
-    if (!gate) return;
-    if (gate.useMode === "website") {
-        loadTelegramScope();
-        return;
-    }
-    $("tg-note").textContent = "Opening the verification page — the flow continues in the bot's window.";
-    // The real flow lives at /telegram/join; the button that proves it is there.
-    window.location.href = `/telegram/join?gate=${encodeURIComponent(gate.gateId)}`;
-};
+const tgStart = $("tg-start");
+if (tgStart) {
+    tgStart.onclick = async () => {
+        const gate = state.gate;
+        if (!gate) return;
+        if (gate.useMode === "website") {
+            loadTelegramScope();
+            return;
+        }
+        const note = $("tg-note");
+        if (note) note.textContent = "Opening the verification page — the flow continues in the bot's window.";
+        // The real flow lives at /telegram/join; the button that proves it is there.
+        window.location.href = `/telegram/join?gate=${encodeURIComponent(gate.gateId)}`;
+    };
+}
 
 // ---------------------------------------------------------------- wiring
-$("view-simple").onclick = () => setView("simple");
-$("view-technical").onclick = () => setView("technical");
-$("prove").onclick = prove;
-$("resume-proof").onclick = resumeProof;
-$("simulate").onclick = simulate;
-$("term-filter").oninput = renderTerminal;
-$("term-sev").onchange = renderTerminal;
-$("term-pause").onclick = (e) => {
+// Every element is looked up defensively: a missing element degrades gracefully instead of
+// throwing a TypeError that aborts the whole module (which used to leave the page dead and
+// every DOM element unpopulated, including the gate selector).
+const wire = (id, ev, handler) => { const el = $(id); if (el) el.addEventListener(ev, handler); };
+wire("view-simple", "click", () => setView("simple"));
+wire("view-technical", "click", () => setView("technical"));
+wire("prove", "click", prove);
+wire("resume-proof", "click", resumeProof);
+wire("simulate", "click", simulate);
+wire("term-filter", "input", renderTerminal);
+wire("term-sev", "change", renderTerminal);
+wire("term-pause", "click", (e) => {
     state.paused = !state.paused;
     e.target.textContent = state.paused ? "RESUME" : "PAUSE";
-};
-$("term-copy").onclick = async () => {
+});
+wire("term-copy", "click", async () => {
     await navigator.clipboard.writeText(renderExport());
-    $("term-copy").textContent = "COPIED";
-    setTimeout(() => ($("term-copy").textContent = "COPY"), 1200);
-};
-$("term-export").onclick = () => {
+    const el = $("term-copy");
+    if (el) {
+        el.textContent = "COPIED";
+        setTimeout(() => (el.textContent = "COPY"), 1200);
+    }
+});
+wire("term-export", "click", () => {
     const blob = new Blob([renderExport()], { type: "application/json" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     a.download = `ghost-gate-trace-${state.attemptId || "simulation"}.json`;
     a.click();
     URL.revokeObjectURL(a.href);
-};
+});
 function renderExport() {
     return JSON.stringify({
         note: "Sanitized Ghost Gate Privacy Lab trace. No balances, keys, tokens or personal data are present — the server never assembles them.",
@@ -1369,4 +1409,10 @@ function renderExport() {
         }, state.walletFailures >= 3 ? DEGRADED_POLL_MS : NORMAL_POLL_MS);
     };
     scheduleStatusPoll();
-})();
+})().catch((e) => {
+    // A silent boot failure used to leave a dead page with a wall of console noise and no
+    // honest signal to the operator. This surfaces the failure where it can be read.
+    console.error("GHOST GATE: the Lab page failed to initialize:", e);
+    const note = document.getElementById("prov-note");
+    if (note) note.textContent = `Lab initialization failed: ${e && e.message ? e.message : e}. Reload the page or check the bridge.`;
+});

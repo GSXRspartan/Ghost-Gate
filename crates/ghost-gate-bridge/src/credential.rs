@@ -232,6 +232,11 @@ pub struct CredentialReceipt {
     /// general-purpose pass, and this field is what makes that check possible.
     pub gate_id: String,
     pub attested_minimum: u64,
+    /// The threshold the verifying gate required, in the resource's smallest unit. A receipt must
+    /// record what was asked, not just what was shown: the relying site compares floor ≥
+    /// required against the gate's policy in force, and the frontend renders both sides of that
+    /// comparison from this receipt alone.
+    pub required_minimum: u64,
     /// The output the proof stands on. Public by construction in this mode; documented as the
     /// linkability cost in `docs/PROVIDER_COMPATIBILITY.md` §3.
     pub substate_id: String,
@@ -296,6 +301,7 @@ impl CredentialVerifier<'_> {
         Ok(CredentialReceipt {
             gate_id: self.gate_id.to_string(),
             attested_minimum: on_chain.minimum_value_promise,
+            required_minimum: self.threshold,
             substate_id: request.substate_id.clone(),
             mode: "credential",
         })

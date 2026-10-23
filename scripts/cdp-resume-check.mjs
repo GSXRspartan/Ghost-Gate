@@ -22,8 +22,13 @@
  *   C. signature failures read through the provider-error taxonomy: -32603 is the wallet's
  *      internal error, 4001 is the user's decline, 4100 is "not connected" — none of them is
  *      mislabelled as a rejected transaction.
- *   D. a successful credential verdict renders ACCESS GRANTED with the receipt floor
- *      (rendering-only: the POST response is stubbed, clearly labelled in the output).
+ *   D. a successful credential verdict renders the two honest success states (rendering-only:
+ *      the POST response is stubbed, clearly labelled in the output):
+ *        D1. access: null  ->  "PROOF VERIFIED — SESSION NOT ISSUED" (the preview-bridge truth;
+ *            the old page wrongly showed ACCESS GRANTED here),
+ *        D2. a real access token -> "ACCESS GRANTED" with the session duration,
+ *      and both render the receipt floor AND required threshold in tTARI (the "null tTARI"
+ *      regression: the receipt's required_minimum must reach the page).
  *
  * Usage: node cdp-resume-check.mjs <cdp-port> <lab-url>
  */
@@ -112,7 +117,9 @@ const MOCK_RECORDING = `
         state: "accepted",
         proof_id: "stubbed-rendering-test",
         receipt: { attested_minimum: 10000000, required_minimum: 10000000, proof_kind: "credential", input_count: 1 },
-        access: null,
+        // The page decides the success title from the "access" field: null = verified-only,
+        // a token object = a real granted session. The harness sets this per scenario.
+        access: window.__ggStubAccess !== undefined ? window.__ggStubAccess : null,
       }), { status: 200, headers: { "Content-Type": "application/json" } }));
     }
     return __origFetch(input, init);
@@ -189,7 +196,16 @@ async function loadPage(initScript, url = LAB) {
   const added = await send("Page.addScriptToEvaluateOnNewDocument", { source: initScript });
   if (added && added.identifier) attachedScripts.push(added.identifier);
   await send("Page.navigate", { url });
-  await sleep(2500);
+  // Wait until the page's critical elements are actually in the DOM. A fixed sleep races
+  // against a cold-start headless browser; polling for readiness is deterministic.
+  for (let i = 0; i < 40; i++) {
+    const ready = await evaluate(
+      `!!document.getElementById("gate-select") && !!document.getElementById("resume-proof")`,
+    ).catch(() => false);
+    if (ready) break;
+    await sleep(250);
+  }
+  await sleep(500); // let the page's own JS settle
 }
 
 /** Waits until the outcome panel is visible with a title, up to `ms`. */
@@ -224,11 +240,18 @@ async function main() {
   console.log("\n== A. default selection: credential gate, Sapient wallet, resume row visible ==");
   await loadPage(MOCK_RECORDING, LAB);
   const sel = await evaluate(`(() => {
-    const gate = document.getElementById("gate-select").value;
-    const mode = document.getElementById("gt-mode").textContent;
-    const wallet = document.getElementById("wallet-select").value;
-    const row = document.getElementById("resume-row");
-    return { gate, mode, wallet, rowHidden: row ? row.hidden : null };
+    // Defensive lookups: if the page's JS failed to initialize, these are null — report
+    // that honestly instead of throwing an uncaught TypeError that kills the harness.
+    const gateEl = document.getElementById("gate-select");
+    const modeEl = document.getElementById("gt-mode");
+    const walletEl = document.getElementById("wallet-select");
+    const rowEl = document.getElementById("resume-row");
+    return {
+      gate: gateEl ? gateEl.value : null,
+      mode: modeEl ? modeEl.textContent : null,
+      wallet: walletEl ? walletEl.value : null,
+      rowHidden: rowEl ? rowEl.hidden : null,
+    };
   })()`);
   check("default gate is the credential gate (esm10)", sel.gate === "esm10", sel.gate);
   check("gate badge reads credential", /credential/.test(sel.mode || ""), sel.mode);
@@ -236,18 +259,39 @@ async function main() {
   check("resume row visible on a credential gate", sel.rowHidden === false, `hidden=${sel.rowHidden}`);
 
   console.log("\n== B. stale walletd refusal, then Resume existing proof ==");
-  // Reproduce the operator's stuck state first: consensus gate + walletd + Prove access.
-  await evaluate(`(() => {
-    const g = document.getElementById("gate-select");
-    g.value = "esm-diag"; g.dispatchEvent(new Event("change"));
-    return true;
-  })()`);
-  await sleep(500);
-  await evaluate(`document.getElementById("prove").click()`);
-  const stale = await waitOutcome(20000);
-  check("stale walletd refusal reproduced (denied outcome)", !!stale && stale.cls.includes("denied"),
-    stale ? `${stale.title}: ${stale.body.slice(0, 80)}` : "no outcome");
-  // Now the real thing: back to esm10, paste the EXISTING output, click Resume existing proof.
+  // Reproduce the operator's stuck state first: a DENIED outcome left on screen, the step rail
+  // parked. On the original bridge this was done through the real consensus gate + walletd;
+  // the live bridge now carries ONLY the credential gate (the operator removed esm-diag), so
+  // when that gate is absent we inject the stale outcome via the page's own outcome panel —
+  // the resume flow must clear whatever stale UI state it finds, however it got there.
+  const hasDiagGate = await evaluate(`[...document.getElementById("gate-select").options].some(o => o.value === "esm-diag")`);
+  let stale;
+  if (hasDiagGate) {
+    await evaluate(`(() => {
+      const g = document.getElementById("gate-select");
+      g.value = "esm-diag"; g.dispatchEvent(new Event("change"));
+      return true;
+    })()`);
+    await sleep(500);
+    await evaluate(`document.getElementById("prove").click()`);
+    stale = await waitOutcome(20000);
+    check("stale walletd refusal reproduced (denied outcome)", !!stale && stale.cls.includes("denied"),
+      stale ? `${stale.title}: ${stale.body.slice(0, 80)}` : "no outcome");
+  } else {
+    await evaluate(`(() => {
+      const p = document.getElementById("outcome");
+      p.hidden = false; p.className = "outcome denied";
+      document.getElementById("outcome-title").textContent = "WALLET REFUSED";
+      document.getElementById("outcome-body").textContent = "the wallet rejected the proof transaction (injected stale state)";
+      // Park the step rail mid-flow the way the stuck physical test left it.
+      const li = document.querySelector("#steps li[data-step='consensus']");
+      if (li) { li.className = "active"; }
+      return true;
+    })()`);
+    stale = { title: "WALLET REFUSED", cls: "outcome denied" };
+    check("stale refusal state injected (single-gate bridge: esm-diag not configured)", true, "injected via outcome panel");
+  }
+  // Back to the credential gate, paste the EXISTING output, click Resume existing proof.
   await evaluate(`(() => {
     const g = document.getElementById("gate-select");
     g.value = "esm10"; g.dispatchEvent(new Event("change"));
@@ -311,14 +355,35 @@ async function main() {
     check(`${code} leaves both buttons enabled`, reEnabled);
   }
 
-  console.log("\n== D. a successful credential verdict renders ACCESS GRANTED (rendering-only stub) ==");
-  await loadPage(MOCK_RECORDING + "\nwindow.__ggStubCredential = true;", `${LAB}?gate=esm10`);
+  console.log("\n== D. success rendering: both honest states (rendering-only stubs) ==");
+  // D1: the preview-bridge truth — verified but no session. The old page showed
+  // ACCESS GRANTED here, conflating a verified proof with an issued session.
+  await loadPage(MOCK_RECORDING + "\nwindow.__ggStubCredential = true;\nwindow.__ggStubAccess = null;", `${LAB}?gate=esm10`);
+  const verified = await runResume();
+  check("access:null renders PROOF VERIFIED — SESSION NOT ISSUED",
+    !!verified && verified.title === "PROOF VERIFIED — SESSION NOT ISSUED",
+    verified ? verified.title : "no outcome");
+  check("access:null does NOT render ACCESS GRANTED",
+    !!verified && !/ACCESS GRANTED/.test(verified.title || ""),
+    verified ? verified.title : "no outcome");
+  check("verified state renders floor AND required threshold in tTARI (no null tTARI)",
+    !!verified && /10\s*tTARI/.test(verified.detail || "") && !/null\s*tTARI/.test(verified.detail || ""),
+    verified ? (verified.detail || "").slice(0, 100) : "no outcome");
+
+  // D2: the registry-backed truth — a real session token rides in the response.
+  await loadPage(MOCK_RECORDING + `
+    window.__ggStubCredential = true;
+    window.__ggStubAccess = { token: "gg_sess_stub", expiresUnix: ${Math.floor(Date.now() / 1000) + 86400} };`, `${LAB}?gate=esm10`);
   const granted = await runResume();
-  check("accepted verdict renders ACCESS GRANTED", !!granted && granted.cls.includes("granted"),
-    granted ? `${granted.title}: ${granted.body.slice(0, 70)}` : "no outcome");
-  check("receipt floor and requirement rendered in tTARI",
-    !!granted && /10\s*tTARI/.test(granted.detail || ""),
-    granted ? (granted.detail || "").slice(0, 120) : "no outcome");
+  check("real session renders ACCESS GRANTED",
+    !!granted && granted.title === "ACCESS GRANTED" && granted.cls.includes("granted"),
+    granted ? granted.title : "no outcome");
+  check("grant renders floor AND required threshold in tTARI (no null tTARI)",
+    !!granted && /10\s*tTARI/.test(granted.detail || "") && !/null\s*tTARI/.test(granted.detail || ""),
+    granted ? (granted.detail || "").slice(0, 100) : "no outcome");
+  check("grant mentions the issued session duration",
+    !!granted && /session was issued/i.test(granted.body || ""),
+    granted ? (granted.body || "").slice(0, 90) : "no outcome");
 
   console.log("\n== console health ==");
   check("no console errors", consoleErrors.length === 0, consoleErrors.slice(0, 3).join(" | "));

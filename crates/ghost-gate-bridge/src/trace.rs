@@ -353,6 +353,20 @@ pub mod ev {
         t.push(EventSource::Bridge, Severity::Error, "access.refused", reason, None);
     }
 
+    /// The proof was verified, but this bridge issues no access session (not registry-backed).
+    /// A distinct event from `access.granted`: conflating "proof verified" with "access
+    /// granted" was the old failure mode — the page showed ACCESS GRANTED while `access` in
+    /// the response was `null`. Events must reflect actual operations.
+    pub fn access_unavailable(t: &mut Trace) {
+        t.push(
+            EventSource::Bridge,
+            Severity::Notice,
+            "access.unavailable",
+            "The proof was verified, but this bridge issues no access session (not registry-backed). No token was issued.",
+            None,
+        );
+    }
+
     pub fn policy_binding(t: &mut Trace) {
         t.push(
             EventSource::Verifier,
