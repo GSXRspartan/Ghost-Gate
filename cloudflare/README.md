@@ -57,7 +57,9 @@ deployment. Secure `__Host-` cookies require HTTPS, including for browser sessio
 ## Current boundary
 
 The Worker and Durable Object are locally tested, including a real local Workerd SQLite issue
-transition. A Rust verifier endpoint that implements the signed contract is not configured or
-started by this repository checkpoint, so live hosted proofs remain fail closed. This is not a
-claim of cross-region production validation; Cloudflare's Durable Object single-object execution
-is the production consistency assumption that still needs staging validation.
+transition. `cargo run -p ghost-gate-verifier --bin ghost-gate-hosted-verifier` implements the
+authenticated signed endpoint, but its current adapter returns only `UNKNOWN` because no hosted
+chain/finality reader has been configured. It is safe to exercise connectivity with synthetic
+secrets, but live hosted proofs remain fail closed. This is not a claim of cross-region production
+validation; Cloudflare's Durable Object single-object execution is the production consistency
+assumption that still needs staging validation.

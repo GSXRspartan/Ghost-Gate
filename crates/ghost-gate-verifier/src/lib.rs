@@ -30,6 +30,7 @@ use ghost_gate_core::Challenge;
 use sha2::{Digest, Sha256};
 
 pub mod display;
+pub mod hosted;
 
 /// How long a prover has to produce a proof after being issued a challenge.
 pub const DEFAULT_CHALLENGE_TTL: Duration = Duration::from_secs(180);
