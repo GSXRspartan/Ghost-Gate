@@ -1,0 +1,17 @@
+name = "ghost-gate"
+main = "src/worker.js"
+compatibility_date = "2026-10-23"
+
+[[durable_objects.bindings]]
+name = "REPLAY_COORDINATOR"
+class_name = "ReplayCoordinator"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ReplayCoordinator"]
+
+# Secrets are set outside source control:
+#   wrangler secret put GG_COORDINATOR_TOKEN
+#   wrangler secret put GG_VERIFIER_TOKEN
+# GG_VERIFIER_ORIGIN is intentionally not supplied here. Until a trusted Rust verifier is deployed
+# and authenticated, proof and session routes fail closed.
