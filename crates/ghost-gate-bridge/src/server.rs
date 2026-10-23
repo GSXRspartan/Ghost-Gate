@@ -107,6 +107,16 @@ pub struct Bridge<
     /// The Minotari base node reader, for L1 evidence. `None` means no L1 verification is possible,
     /// and L1 challenges are then refused at issue time.
     pub xtm_chain: Option<XR>,
+    /// The fixed session commitment component-backed gates share with their deployed component.
+    ///
+    /// A component checks the challenge's session commitment against the value stored in its own
+    /// state at instantiation (`check_challenge`), so a consensus-capable gate and the component it
+    /// binds must agree on ONE deployment-time session. The random per-challenge session the
+    /// credential path uses would be refused on chain (`SessionMismatch`), which is exactly what a
+    /// fixed value here prevents: when set, every Ootle challenge carries it; when `None`, the
+    /// bridge falls back to the random per-challenge session the component-free credential path
+    /// has always used. The 7897 Sapient deployment runs with `None` and is unaffected.
+    pub gate_session: Option<Vec<u8>>,
 }
 
 impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChannel, XR: crate::xtm::XtmChainReader>
@@ -138,6 +148,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             permitted_hosts: default_permitted_hosts(),
             xtm,
             xtm_chain,
+            gate_session: None,
         }
     }
 
@@ -167,6 +178,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             permitted_hosts: default_permitted_hosts(),
             xtm,
             xtm_chain,
+            gate_session: None,
         }
     }
 }
@@ -276,6 +288,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R, crate::xt
             challenge_expires_epoch: DEFAULT_CHALLENGE_EXPIRES_EPOCH,
             xtm: crate::xtm::NoXtm,
             xtm_chain: None,
+            gate_session: None,
         }
     }
 }
@@ -309,6 +322,7 @@ impl<W: WalletChannel, X: crate::xtm::XtmChannel, XR: crate::xtm::XtmChainReader
             challenge_expires_epoch: DEFAULT_CHALLENGE_EXPIRES_EPOCH,
             xtm,
             xtm_chain,
+            gate_session: None,
         }
     }
 }
@@ -341,6 +355,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             challenge_expires_epoch: DEFAULT_CHALLENGE_EXPIRES_EPOCH,
             xtm,
             xtm_chain,
+            gate_session: None,
         }
     }
 }
@@ -788,7 +803,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             self.store_trace(trace);
         }
 
-        let session = random_nonce();
+        let session = self.gate_session.clone().unwrap_or_else(|| random_nonce().to_vec());
         // Registry-backed: bind the challenge to the policy version in force right now, so a
         // replacement cannot be satisfied by an answer computed under the old threshold.
         let minted_under = self.access.as_mut().and_then(|a| a.plane.current_policy_hash(id));
@@ -2619,6 +2634,44 @@ mod tests {
             1,
             "a refused proof must not burn the challenge; the user can try again"
         );
+    }
+
+    /// A configured deployment-time session replaces the random per-challenge session: a
+    /// component checks every challenge's session commitment against the value stored in its
+    /// own state, so a consensus-capable gate and the bridge MUST share one fixed value. The
+    /// component-free credential path keeps the random session when no value is configured —
+    /// the 7897 Sapient deployment runs exactly that way and must not change behaviour.
+    #[tokio::test]
+    async fn a_configured_gate_session_stamps_every_challenge() {
+        let mut b = bridge(FakeWallet::new());
+        b.gate_session = Some(b"esm-gate-session".to_vec());
+        let r = b.handle(&post("/gate/g1/challenge", serde_json::json!({}))).await;
+        assert_eq!(r.status, 200, "{}", r.body);
+        let v: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        // The challenge JSON carries the session in hex; the configured value must appear.
+        let session_hex = hex::encode(b"esm-gate-session");
+        assert_eq!(
+            v["challenge"]["session_commitment"], session_hex,
+            "the configured session must be the one the challenge carries"
+        );
+        // A second challenge carries the SAME value — that is the whole point: the component's
+        // stored session matches every challenge this bridge issues.
+        let r2 = b.handle(&post("/gate/g1/challenge", serde_json::json!({}))).await;
+        let v2: serde_json::Value = serde_json::from_str(&r2.body).unwrap();
+        assert_eq!(v2["challenge"]["session_commitment"], session_hex);
+    }
+
+    #[tokio::test]
+    async fn without_a_configured_session_challenges_stay_random() {
+        let mut b = bridge(FakeWallet::new());
+        let r = b.handle(&post("/gate/g1/challenge", serde_json::json!({}))).await;
+        let v: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        let first = v["challenge"]["session_commitment"].as_str().unwrap().to_string();
+        let r2 = b.handle(&post("/gate/g1/challenge", serde_json::json!({}))).await;
+        let v2: serde_json::Value = serde_json::from_str(&r2.body).unwrap();
+        let second = v2["challenge"]["session_commitment"].as_str().unwrap().to_string();
+        assert_ne!(first, second, "no configured session: per-challenge randomness preserved");
+        assert_eq!(first.len(), 64, "a random session is 32 bytes of hex");
     }
 
     // ------------------------------------------------------------------

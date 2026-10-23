@@ -554,3 +554,48 @@ resume attempt on esm10 against the real 10-tTARI UTXO), three defects were repo
 **Remaining for real sessions:** registry-backed access plane (GG_BINDINGS_PATH + admin
 plane). The live bridge remains indexer-trusted development verification, not production
 security.
+
+## 17. Esmeralda consensus-component deployment preflight (2026-10-22)
+
+**Preflight complete; STOPPED before broadcast per operator instruction.**
+
+- Template source reviewed: `templates/ghost_gate` holds NO funds — `prove_access` reads
+  resource info, runs `qualify` (replay/challenge/epoch/site/session checks), hands the
+  statement to the engine's `stealth_transfer`, burns the nonce, emits the receipt event.
+  Panics abort the whole transaction; nothing is custodyed, locked or moved except the
+  prover's own stealth self-transfer (input → own output, net zero) and the tx fee.
+- Replay/challenge binding verified in `ghost_gate_core::check_challenge` (gate, resource,
+  threshold, network, relying_site, session, epoch, nonce) + on-chain nonce burn.
+- Prior deployment record: GATE3's `component_f222f57…` was LOCALNET-only (GHOSTTEST
+  resource, faucet template). No Esmeralda deployment exists in repo records; the walletd
+  account has never transacted (`is_confirmed_on_chain: false`) and the Esmeralda indexer
+  cannot enumerate templates — fresh publish, no duplicate risk.
+- Compatibility (v0.42-built template → v0.47 Esmeralda engine): `tari_template_abi`
+  IDENTICAL at 0.20.1; metadata SCHEMA_VERSION=1 identical; template binary limit 1 MiB in
+  both (ours 309,381 B); `TransactionSubmitRequest`/`PublishTemplateRequest` serde field
+  sets identical between the v0.42 client the bridge uses and the v0.47 client. Residual
+  risk (inner UnsignedTransaction/instruction serde) is settled by a non-mutating DRY-RUN
+  publish, prepared but not yet run.
+- WASM: `templates/ghost_gate/target/default/wasm32-unknown-unknown/release/ghost_gate_template.wasm`,
+  309,381 bytes, SHA-256 `6117d3abf96844a9238582b8b8ec390eaf241947dd19e4fcf10334f78f7db02c`.
+  Reproducible: fresh cargo rebuild is byte-identical.
+- Template tests: **75/75 engine-backed pass** (adversarial 11, cross_resource 16,
+  gate_engine 30, mvp_and_shape 18) — real WASM, real engine, in-process; shared Localnet
+  untouched.
+- BLOCKER FOUND AND FIXED: `check_challenge` compares the challenge's session commitment
+  against the component's FIXED stored session, but the bridge minted a random per-challenge
+  session — every consensus proof would have died with SessionMismatch. Fix: `GG_GATE_SESSION`
+  env gives the bridge a deployment-time session it stamps into every Ootle challenge; the
+  component is instantiated with the same value. Component-free credential gates (7897
+  Sapient deployment, GG_GATE_SESSION unset) keep the random per-challenge session —
+  behaviour unchanged. Tests: bridge lib **135/135** (2 new session tests). Binary rebuilt;
+  the running 7897/7898 processes keep their old mapped images until deliberately restarted.
+- Walletd test account: "Ghost Gate" `component_21d78ab8…053335`
+  (`otl_esm_1jch9ggpfzed3arjw9kggeajppxaksjvdvpmnscgmuqc8ayqmtsuxqf5fp7599q20s8mpetjpf3r88t7flr0sfdx4tagtekyn7gvhqpszj379t`),
+  **zero balances — unfunded**. Nothing was transferred.
+- Publish fee estimate (v0.47 testnet fee table, worst case UNOPTIMIZED 302 KiB binary):
+  flat publish 0.25 + storage 0.31 + size premium (207 units² × 100 µT) 4.28 + compile
+  points 789.7M/1000 0.79 ≈ **5.6 tTARI**; the walletd's wasm-opt pass may shrink the
+  binary to ~0.7 tTARI total. The dry-run publish returns the exact fee.
+- Funding ask: ~20 tTARI on the "Ghost Gate" walletd account (publish worst case +
+  instantiate + shield 10 tTARI public→private for the proof input + proof fee headroom).

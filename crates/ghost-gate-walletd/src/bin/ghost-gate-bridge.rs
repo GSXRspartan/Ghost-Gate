@@ -82,6 +82,15 @@ fn main() -> ExitCode {
 
     // Connect the wallet before announcing anything, so the startup line below is a report of what is
     // true rather than an intention.
+    // The deployment-time session shared by component-backed gates and their on-chain component:
+    // a component compares every challenge's session commitment against the value stored at
+    // instantiation, so the bridge must stamp the SAME value into its challenges. Read as a
+    // UTF-8 string and held only in this process; the operator sets the identical value when
+    // instantiating the component.
+    let gate_session = std::env::var("GG_GATE_SESSION").ok().filter(|v| !v.trim().is_empty());
+    if let Some(session) = &gate_session {
+        println!("  gate session: configured ({} bytes) — component-backed gates carry it; instantiate the component with the same value", session.len());
+    }
     let mut wallet = match std::env::var("GG_WALLETD_ENDPOINT") {
         Ok(endpoint) if !endpoint.trim().is_empty() => {
             let network = config
@@ -288,6 +297,7 @@ fn main() -> ExitCode {
                             if version.is_empty() { String::new() } else { format!(", indexer {version}") }
                         );
                         let mut bridge = Bridge::assemble_full(registry, wallet, config.origins, reader, xtm_channel, xtm_chain);
+                        bridge.gate_session = gate_session.clone().map(String::into_bytes);
                         if let Err(e) = attach_access_plane(&mut bridge) {
                             eprintln!("ghost-gate-bridge: {e}");
                             return ExitCode::FAILURE;
@@ -304,6 +314,7 @@ fn main() -> ExitCode {
                     Ok(reader) => {
                         println!("  indexer: {endpoint} (credential mode enabled)");
                         let mut bridge = Bridge::assemble_full(registry, wallet, config.origins, reader, xtm_channel, xtm_chain);
+                        bridge.gate_session = gate_session.clone().map(String::into_bytes);
                         if let Err(e) = attach_access_plane(&mut bridge) {
                             eprintln!("ghost-gate-bridge: {e}");
                             return ExitCode::FAILURE;
@@ -323,6 +334,7 @@ fn main() -> ExitCode {
                  wallets) is disabled; the consensus mode through walletd is unaffected."
             );
             let mut bridge = Bridge::<AnyWallet, ghost_gate_bridge::credential::NoChainReader, AnyXtm, _>::with_xtm_full(registry, wallet, config.origins, xtm_channel, xtm_chain);
+            bridge.gate_session = gate_session.clone().map(String::into_bytes);
             if let Err(e) = attach_access_plane(&mut bridge) {
                 eprintln!("ghost-gate-bridge: {e}");
                 return ExitCode::FAILURE;
