@@ -32,7 +32,7 @@ use crate::gate_registry::GateRegistry;
 use crate::http::{Request, Response, Route, parse_request, render};
 use crate::origin::OriginPolicy;
 use crate::policy::{ProveRequest, validate_prove_request};
-use crate::replay_store::{ReplayRecord, ReplayStore, Reservation};
+use crate::replay_store::{PendingProofKind, ReplayRecord, ReplayStore, Reservation};
 use crate::session::{ChallengeBook, IssuedChallenge, ProofJob, ProofStatus, PublicProof, random_nonce};
 use crate::wallet::{StatementRequest, WalletChannel};
 
@@ -152,6 +152,8 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                 .map(|value| value.as_secs()).unwrap_or_default(),
             state: crate::replay_store::ReplayState::Issued,
             proof_job_id: None,
+            pending_transaction_id: None,
+            pending_proof_kind: None,
             authorization_id: None,
             access_token: None,
         }
@@ -580,6 +582,34 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
         let expected = self.replay_record(gate_id, issued);
         let Some(replay) = self.replay.as_mut() else { return; };
         let _ = replay.release_refused(&expected, crate::session::now_unix());
+    }
+
+    /// Rebuild Ootle finality jobs after a process restart. The durable replay record is the
+    /// authority: it supplies a server-created gate, job id and transaction reference. Records
+    /// without a durable reference (or non-Ootle records that need an artifact) deliberately stay
+    /// reserved and cannot be retried into a second transaction.
+    pub async fn recover_pending_jobs(&mut self) -> usize {
+        let records = match self.replay.as_mut() {
+            Some(replay) => match replay.submitted() { Ok(records) => records, Err(_) => return 0 },
+            None => return 0,
+        };
+        let mut recovered = 0;
+        for record in records {
+            if record.expires_unix < crate::session::now_unix()
+                || record.pending_proof_kind != Some(PendingProofKind::OotleTransaction) { continue; }
+            let (Some(job_id), Some(transaction_id)) = (record.proof_job_id.clone(), record.pending_transaction_id.clone()) else { continue; };
+            if self.gates.get(&record.gate).is_none() || self.jobs.iter().any(|job| job.id == job_id) { continue; }
+            self.push_job(ProofJob {
+                id: job_id.clone(), gate_id: record.gate, challenge_nonce: record.nonce,
+                status: ProofStatus::Submitted { transaction_id }, started_at: std::time::SystemTime::now(),
+                xtm_artifact: None,
+            });
+            // A short poll establishes an already-final result at startup. Timeout/Pending remain
+            // submitted and are reconciled by normal status polling; no new wallet action occurs.
+            self.reconcile_job(&job_id, RECONCILE_WAIT).await;
+            recovered += 1;
+        }
+        recovered
     }
 
     /// Issues a verified-access session for an accepted proof on a registry-backed gate, and
@@ -1349,6 +1379,18 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             .await
         {
             Ok(transaction_id) => {
+                // Transaction submission is not recoverable until its reference has reached the
+                // durable coordinator. If this persistence step fails, keep the nonce reserved,
+                // hide the transaction reference from the client and never issue a session from
+                // this in-memory-only job.
+                if let Some(replay) = self.replay.as_mut()
+                    && replay.record_submission(&nonce, &job_id, PendingProofKind::OotleTransaction, &transaction_id).is_err()
+                {
+                    self.set_status(&job_id, ProofStatus::Failed {
+                        reason: "GG: durable replay persistence failed after submission; authorization remains pending for operator reconciliation".into(),
+                    });
+                    return Response::error(503, "GG: proof submission is pending durable reconciliation");
+                }
                 self.set_status(
                     &job_id,
                     ProofStatus::Submitted {
@@ -1520,6 +1562,10 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                             proof_kind: crate::gate_registry::ProofKind::Ootle,
                         },
                     };
+                    // `grant_access_for` uses the durable nonce record to atomically select its
+                    // stable authorization identity before installing/recovering the registry
+                    // session. A restart-recovered job follows exactly this same path.
+                    self.grant_access_for(&gate_id, &hex::encode(nonce), Some(job_id));
                 }
                 Ok(crate::wallet::CommitOutcome::Rejected { reason }) => {
                     self.jobs[index].status = ProofStatus::Refused { reason };
@@ -2111,12 +2157,38 @@ mod tests {
         let reserved = b.replay.as_mut().unwrap().get(&nonce_bytes).unwrap();
         assert_eq!(reserved.state, ReplayState::Submitted);
         assert_eq!(reserved.proof_job_id.as_deref(), Some(first_id.as_str()));
+        assert_eq!(reserved.pending_transaction_id.as_deref(), Some("tx_fake_0001"));
 
         let retry = b.handle(&post("/gate/g1/prove", request)).await;
         let retry_json: serde_json::Value = serde_json::from_str(&retry.body).unwrap();
         assert_eq!(retry.status, 202, "{}", retry.body);
         assert_eq!(retry_json["proof_id"], first_id);
         assert_eq!(b.wallet.submitted.len(), 1, "durable reservation prevents a second submission");
+    }
+
+    #[tokio::test]
+    async fn restart_recovers_a_durable_ootle_job_without_a_second_submission() {
+        use crate::replay_store::{FileReplayStore, ReplayState};
+        let root = std::env::temp_dir().join(format!("gg-restart-recovery-{}-{}", std::process::id(), crate::session::now_unix()));
+        let mut first = bridge(FakeWallet::new());
+        first.set_replay_store(Box::new(FileReplayStore::open(&root).unwrap()));
+        let (nonce, session) = issue(&mut first).await;
+        let response = first.handle(&post("/gate/g1/prove", serde_json::json!({
+            "gate_id":"g1", "challenge_nonce":nonce, "session_commitment":session
+        }))).await;
+        assert_eq!(response.status, 202, "{}", response.body);
+        assert_eq!(first.wallet.submitted.len(), 1);
+        drop(first); // model a process exit after submit and before the first finality poll
+
+        let mut restarted = bridge(FakeWallet::new());
+        restarted.set_replay_store(Box::new(FileReplayStore::open(&root).unwrap()));
+        assert_eq!(restarted.recover_pending_jobs().await, 1);
+        assert!(matches!(restarted.jobs[0].status, ProofStatus::Accepted { .. }));
+        assert!(restarted.wallet.submitted.is_empty(), "recovery may only poll the original transaction");
+        let nonce: [u8; 32] = hex::decode(nonce).unwrap().try_into().unwrap();
+        assert_eq!(restarted.replay.as_mut().unwrap().get(&nonce).unwrap().state, ReplayState::Submitted,
+            "without an access plane recovery remains fail-closed and cannot mint a session");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]

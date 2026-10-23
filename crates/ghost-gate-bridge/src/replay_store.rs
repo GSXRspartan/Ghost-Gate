@@ -26,6 +26,13 @@ const LOCK_ATTEMPTS: usize = 40;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReplayState { Issued, Submitted, Authorized, Revoked }
 
+/// The only pending proof kind that can currently be reconstructed safely from durable data.
+/// An XTM proof also needs its verifier artifact, which is deliberately never serialised here;
+/// it therefore remains pending after a restart rather than being guessed or re-submitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingProofKind { OotleTransaction, MinotariXtm }
+
 /// Server-created challenge facts. Every scope field is rechecked on submission; no browser
 /// field is sufficient to establish a binding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,6 +50,13 @@ pub struct ReplayRecord {
     pub state: ReplayState,
     /// Server-generated id of the first accepted submission; used for same-visitor retries.
     pub proof_job_id: Option<String>,
+    /// The submitted transaction reference, recorded before the browser learns it. It is not
+    /// client input and is sufficient to resume Ootle finality polling after a local restart.
+    #[serde(default)]
+    pub pending_transaction_id: Option<String>,
+    /// See [`PendingProofKind`]. Missing fields in pre-recovery records fail closed as unknown.
+    #[serde(default)]
+    pub pending_proof_kind: Option<PendingProofKind>,
     /// Stable identity of the one authorization this nonce can create.
     pub authorization_id: Option<String>,
     /// Random bearer token held only in server-side storage, reserved before session installation.
@@ -72,6 +86,13 @@ pub trait ReplayStore: Send {
     fn create(&mut self, record: &ReplayRecord) -> Result<(), ReplayError>;
     fn reserve(&mut self, expected: &ReplayRecord, proof_job_id: &str, now_unix: u64)
         -> Result<Reservation, ReplayError>;
+    /// Persist the server-observed transaction reference after submission. If this fails, the
+    /// challenge remains reserved and no session may be issued from the in-memory job alone.
+    fn record_submission(&mut self, nonce: &[u8; 32], proof_job_id: &str,
+        kind: PendingProofKind, transaction_id: &str) -> Result<(), ReplayError>;
+    /// Return unresolved durable records for restart recovery. Implementations must not omit a
+    /// submitted record merely because it lacks a recoverable transaction reference.
+    fn submitted(&mut self) -> Result<Vec<ReplayRecord>, ReplayError>;
     fn authorize(&mut self, nonce: &[u8; 32], authorization_id: &str, access_token: &str, now_unix: u64)
         -> Result<ReplayRecord, ReplayError>;
     fn release_refused(&mut self, expected: &ReplayRecord, now_unix: u64) -> Result<(), ReplayError>;
@@ -84,6 +105,8 @@ pub struct UnavailableReplayStore;
 impl ReplayStore for UnavailableReplayStore {
     fn create(&mut self, _: &ReplayRecord) -> Result<(), ReplayError> { Err(ReplayError::Unavailable) }
     fn reserve(&mut self, _: &ReplayRecord, _: &str, _: u64) -> Result<Reservation, ReplayError> { Err(ReplayError::Unavailable) }
+    fn record_submission(&mut self, _: &[u8; 32], _: &str, _: PendingProofKind, _: &str) -> Result<(), ReplayError> { Err(ReplayError::Unavailable) }
+    fn submitted(&mut self) -> Result<Vec<ReplayRecord>, ReplayError> { Err(ReplayError::Unavailable) }
     fn authorize(&mut self, _: &[u8; 32], _: &str, _: &str, _: u64) -> Result<ReplayRecord, ReplayError> { Err(ReplayError::Unavailable) }
     fn release_refused(&mut self, _: &ReplayRecord, _: u64) -> Result<(), ReplayError> { Err(ReplayError::Unavailable) }
     fn revoke(&mut self, _: &[u8; 32]) -> Result<(), ReplayError> { Err(ReplayError::Unavailable) }
@@ -147,6 +170,16 @@ impl ReplayStore for MemoryReplayStore {
     }
     fn reserve(&mut self, expected: &ReplayRecord, job: &str, now: u64) -> Result<Reservation, ReplayError> {
         reserve_record(self.records.get_mut(&expected.nonce).ok_or(ReplayError::BindingMismatch)?, expected, job, now)
+    }
+    fn record_submission(&mut self, nonce: &[u8; 32], job: &str, kind: PendingProofKind, transaction_id: &str) -> Result<(), ReplayError> {
+        let record = self.records.get_mut(nonce).ok_or(ReplayError::BindingMismatch)?;
+        if record.state != ReplayState::Submitted || record.proof_job_id.as_deref() != Some(job) { return Err(ReplayError::Final); }
+        record.pending_proof_kind = Some(kind);
+        record.pending_transaction_id = Some(transaction_id.to_string());
+        Ok(())
+    }
+    fn submitted(&mut self) -> Result<Vec<ReplayRecord>, ReplayError> {
+        Ok(self.records.values().filter(|record| record.state == ReplayState::Submitted).cloned().collect())
     }
     fn authorize(&mut self, nonce: &[u8; 32], id: &str, token: &str, now: u64) -> Result<ReplayRecord, ReplayError> {
         authorize_record(self.records.get_mut(nonce).ok_or(ReplayError::BindingMismatch)?, id, token, now)
@@ -224,6 +257,28 @@ impl ReplayStore for FileReplayStore {
         self.locked(|| { let mut record = self.read(&expected.nonce)?; let result = reserve_record(&mut record, expected, job, now)?;
             if matches!(result, Reservation::Reserved(_)) { self.write(&self.path(&record.nonce), &record)?; } Ok(result) })
     }
+    fn record_submission(&mut self, nonce: &[u8; 32], job: &str, kind: PendingProofKind, transaction_id: &str) -> Result<(), ReplayError> {
+        self.locked(|| {
+            let mut record = self.read(nonce)?;
+            if record.state != ReplayState::Submitted || record.proof_job_id.as_deref() != Some(job) { return Err(ReplayError::Final); }
+            record.pending_proof_kind = Some(kind);
+            record.pending_transaction_id = Some(transaction_id.to_string());
+            self.write(&self.path(nonce), &record)
+        })
+    }
+    fn submitted(&mut self) -> Result<Vec<ReplayRecord>, ReplayError> {
+        self.locked(|| {
+            let mut records = Vec::new();
+            for entry in fs::read_dir(&self.root).map_err(|_| ReplayError::Unavailable)? {
+                let entry = entry.map_err(|_| ReplayError::Unavailable)?;
+                if entry.path().extension().and_then(|ext| ext.to_str()) != Some("json") { continue; }
+                let record: ReplayRecord = serde_json::from_slice(&fs::read(entry.path()).map_err(|_| ReplayError::Unavailable)?)
+                    .map_err(|_| ReplayError::Unavailable)?;
+                if record.state == ReplayState::Submitted { records.push(record); }
+            }
+            Ok(records)
+        })
+    }
     fn authorize(&mut self, nonce: &[u8; 32], id: &str, token: &str, now: u64) -> Result<ReplayRecord, ReplayError> {
         self.locked(|| { let mut record = self.read(nonce)?; let result = authorize_record(&mut record, id, token, now)?;
             self.write(&self.path(nonce), &record)?; Ok(result) })
@@ -242,7 +297,7 @@ impl ReplayStore for FileReplayStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn record() -> ReplayRecord { ReplayRecord { nonce: [7; 32], tenant: "tenant-a".into(), gate: "gate-a".into(), relying_site: "site-a".into(), visitor_session: vec![1], network: 38, policy_hash: Some("policy-a".into()), expires_unix: 10, state: ReplayState::Issued, proof_job_id: None, authorization_id: None, access_token: None } }
+    fn record() -> ReplayRecord { ReplayRecord { nonce: [7; 32], tenant: "tenant-a".into(), gate: "gate-a".into(), relying_site: "site-a".into(), visitor_session: vec![1], network: 38, policy_hash: Some("policy-a".into()), expires_unix: 10, state: ReplayState::Issued, proof_job_id: None, pending_transaction_id: None, pending_proof_kind: None, authorization_id: None, access_token: None } }
 
     #[test]
     fn identical_retry_gets_original_job_but_another_visitor_cannot() {
@@ -271,5 +326,17 @@ mod tests {
     #[test]
     fn corrupt_durable_record_fails_closed() {
         let root = std::env::temp_dir().join(format!("gg-replay-corrupt-{}-{}", std::process::id(), crate::session::now_unix())); let mut store = FileReplayStore::open(&root).unwrap(); let record = record(); store.create(&record).unwrap(); fs::write(store.path(&record.nonce), b"not json").unwrap(); assert_eq!(store.get(&record.nonce), Err(ReplayError::Unavailable)); let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn durable_submission_reference_survives_reopen_but_cannot_be_replaced() {
+        let root = std::env::temp_dir().join(format!("gg-replay-submission-{}-{}", std::process::id(), crate::session::now_unix()));
+        let mut first = FileReplayStore::open(&root).unwrap(); let record = record();
+        first.create(&record).unwrap(); first.reserve(&record, "job-1", 1).unwrap();
+        first.record_submission(&record.nonce, "job-1", PendingProofKind::OotleTransaction, "tx-1").unwrap();
+        let mut second = FileReplayStore::open(&root).unwrap();
+        let pending = second.submitted().unwrap(); assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].pending_transaction_id.as_deref(), Some("tx-1"));
+        assert_eq!(second.record_submission(&record.nonce, "job-2", PendingProofKind::OotleTransaction, "tx-2"), Err(ReplayError::Final));
+        let _ = fs::remove_dir_all(root);
     }
 }

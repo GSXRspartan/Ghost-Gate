@@ -307,6 +307,8 @@ fn main() -> ExitCode {
                             eprintln!("ghost-gate-bridge: {e}");
                             return ExitCode::FAILURE;
                         }
+                        let recovered = runtime.block_on(bridge.recover_pending_jobs());
+                        if recovered > 0 { println!("  replay recovery: resumed {recovered} durable Ootle finality job(s)"); }
                         runtime.block_on(ghost_gate_bridge::server::serve(&config.bind, bridge))
                     }
                     Err(e) => {
@@ -324,6 +326,8 @@ fn main() -> ExitCode {
                             eprintln!("ghost-gate-bridge: {e}");
                             return ExitCode::FAILURE;
                         }
+                        let recovered = runtime.block_on(bridge.recover_pending_jobs());
+                        if recovered > 0 { println!("  replay recovery: resumed {recovered} durable Ootle finality job(s)"); }
                         runtime.block_on(ghost_gate_bridge::server::serve(&config.bind, bridge))
                     }
                     Err(e) => {
@@ -344,6 +348,8 @@ fn main() -> ExitCode {
                 eprintln!("ghost-gate-bridge: {e}");
                 return ExitCode::FAILURE;
             }
+            let recovered = runtime.block_on(bridge.recover_pending_jobs());
+            if recovered > 0 { println!("  replay recovery: resumed {recovered} durable Ootle finality job(s)"); }
             runtime.block_on(ghost_gate_bridge::server::serve(&config.bind, bridge))
         }
     };
