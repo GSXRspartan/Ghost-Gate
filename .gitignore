@@ -10,6 +10,7 @@ keys.json
 *.key
 .env
 .env.*
+.ghost-gate/
 
 # Editor / OS noise
 .idea/
