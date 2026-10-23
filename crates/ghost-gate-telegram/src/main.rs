@@ -59,7 +59,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
 
 const DEFAULT_BRIDGE: &str = "http://127.0.0.1:7799";
@@ -78,6 +78,10 @@ const FIXTURE_TG_USER: i64 = 42;
 const MAX_PENDING_TOKENS: usize = 512;
 const POLL_INTERVAL: u64 = 3; // seconds between getUpdates calls
 const MAX_ANSWERED_SEEN: usize = 1024;
+const TELEGRAM_HTTP_TIMEOUT: Duration = Duration::from_secs(15);
+/// A failed unban must not turn expiry into an uncontrolled permanent ban. Telegram accepts a
+/// temporary ban longer than thirty seconds, then removes it automatically.
+const TEMPORARY_REMOVAL_SECS: u64 = 60;
 
 /// The gate a receipt names, as the bridge's `CredentialReceipt` serialises it.
 #[derive(Debug, Clone, Deserialize)]
@@ -127,8 +131,6 @@ struct JoinToken {
 #[derive(Debug, Clone)]
 struct Grant {
     expires: Instant,
-    proof_id: String,
-    invite_link: String,
     /// The registry-backed session this grant was issued under, when the bridge has an access
     /// plane. While this is Some, the SERVER decides expiry, revocation and policy validity — the
     /// bot asks on every tick instead of trusting its own clock. `None` is the legacy bridge path:
@@ -151,7 +153,9 @@ struct ServerGrant {
 #[allow(async_fn_in_trait)]
 pub trait TelegramApi: Send {
     async fn send_message(&mut self, user: i64, text: &str) -> Result<(), String>;
-    async fn create_single_seat_invite(&mut self, chat: i64) -> Result<String, String>;
+    async fn create_join_request_invite(&mut self, chat: i64, expires_unix: u64) -> Result<String, String>;
+    async fn approve_join_request(&mut self, chat: i64, user: i64) -> Result<(), String>;
+    async fn decline_join_request(&mut self, chat: i64, user: i64) -> Result<(), String>;
     async fn kick_member(&mut self, chat: i64, user: i64) -> Result<(), String>;
     async fn unban_member(&mut self, chat: i64, user: i64) -> Result<(), String>;
     async fn get_updates(&mut self, offset: u64) -> Result<Vec<TgUpdate>, String>;
@@ -163,6 +167,8 @@ pub struct TgUpdate {
     pub update_id: u64,
     #[serde(default)]
     pub message: Option<TgMessage>,
+    #[serde(default)]
+    pub chat_join_request: Option<TgJoinRequest>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -178,6 +184,17 @@ pub struct TgUser {
     pub id: i64,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct TgChat {
+    pub id: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TgJoinRequest {
+    pub chat: TgChat,
+    pub from: TgUser,
+}
+
 /// A controlled-fixture Telegram client for LOCAL testing only (GG_TG_FIXTURE=1).
 ///
 /// It records every message the bot "sends" to stdout as `[fixture]` lines and answers getUpdates
@@ -191,10 +208,18 @@ impl TelegramApi for FixtureTelegram {
         println!("[fixture] -> tg_user {user}: {text}");
         Ok(())
     }
-    async fn create_single_seat_invite(&mut self, _chat: i64) -> Result<String, String> {
+    async fn create_join_request_invite(&mut self, _chat: i64, _expires_unix: u64) -> Result<String, String> {
         let mut b = [0u8; 8];
         rand::fill(&mut b);
         Ok(format!("https://t.me/fixture/join/{}", hex::encode(b)))
+    }
+    async fn approve_join_request(&mut self, chat: i64, user: i64) -> Result<(), String> {
+        println!("[fixture] approve join request tg_user {user} for {chat}");
+        Ok(())
+    }
+    async fn decline_join_request(&mut self, chat: i64, user: i64) -> Result<(), String> {
+        println!("[fixture] decline join request tg_user {user} for {chat}");
+        Ok(())
     }
     async fn kick_member(&mut self, chat: i64, user: i64) -> Result<(), String> {
         println!("[fixture] kick tg_user {user} from {chat} (ban+unban: seat freed, door open)");
@@ -251,15 +276,27 @@ pub struct TelegramBot {
 impl TelegramBot {
     pub fn new(token: &str) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .timeout(TELEGRAM_HTTP_TIMEOUT)
+                .build()
+                .expect("fixed Telegram HTTP client configuration"),
             token: token.to_string(),
         }
     }
 
     async fn call(&self, method: &str, params: &serde_json::Value) -> Result<serde_json::Value, String> {
         let url = format!("https://api.telegram.org/bot{}/{}", self.token, method);
-        let resp = self.http.post(&url).json(params).send().await.map_err(|e| e.to_string())?;
-        let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+        let resp = self
+            .http
+            .post(&url)
+            .json(params)
+            .send()
+            .await
+            .map_err(|_| format!("telegram {method}: request failed"))?;
+        let v: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|_| format!("telegram {method}: invalid response"))?;
         // The Bot API answers {ok: true, result} or {ok: false, description}. Never log the token:
         // only the method name reaches an error message.
         if v["ok"].as_bool() != Some(true) {
@@ -267,6 +304,42 @@ impl TelegramBot {
         }
         Ok(v["result"].clone())
     }
+
+    /// Read-only preflight. A production bot must be the administrator of one private
+    /// supergroup and have both invite-approval and temporary-removal authority.
+    async fn diagnose_private_supergroup(&self, chat: i64) -> Result<(), String> {
+        let me = self.call("getMe", &json!({})).await?;
+        let bot_id = me["id"].as_i64().ok_or("telegram getMe returned no bot id")?;
+        let configured = self.call("getChat", &json!({ "chat_id": chat })).await?;
+        let membership = self
+            .call("getChatMember", &json!({ "chat_id": chat, "user_id": bot_id }))
+            .await?;
+        validate_private_supergroup(chat, &configured, &membership)
+    }
+}
+
+fn validate_private_supergroup(
+    chat: i64,
+    configured: &serde_json::Value,
+    membership: &serde_json::Value,
+) -> Result<(), String> {
+        if configured["id"].as_i64() != Some(chat)
+            || configured["type"].as_str() != Some("supergroup")
+            || configured["username"].as_str().is_some_and(|name| !name.is_empty())
+        {
+            return Err("configured Telegram chat is not a private supergroup".into());
+        }
+        let status = membership["status"].as_str().unwrap_or("");
+        if status == "creator" {
+            return Ok(());
+        }
+        if status != "administrator"
+            || membership["can_invite_users"].as_bool() != Some(true)
+            || membership["can_restrict_members"].as_bool() != Some(true)
+        {
+            return Err("bot lacks private-supergroup invite approval or member-removal permission".into());
+        }
+        Ok(())
 }
 
 impl TelegramApi for TelegramBot {
@@ -275,11 +348,11 @@ impl TelegramApi for TelegramBot {
             .await
             .map(|_| ())
     }
-    async fn create_single_seat_invite(&mut self, chat: i64) -> Result<String, String> {
+    async fn create_join_request_invite(&mut self, chat: i64, expires_unix: u64) -> Result<String, String> {
         let v = self
             .call(
                 "createChatInviteLink",
-                &json!({ "chat_id": chat, "member_limit": 1, "creates_join_request": false }),
+                &json!({ "chat_id": chat, "expire_date": expires_unix, "creates_join_request": true }),
             )
             .await?;
         v["invite_link"]
@@ -287,9 +360,23 @@ impl TelegramApi for TelegramBot {
             .map(str::to_string)
             .ok_or_else(|| "telegram: no invite link in response".into())
     }
+    async fn approve_join_request(&mut self, chat: i64, user: i64) -> Result<(), String> {
+        self.call("approveChatJoinRequest", &json!({ "chat_id": chat, "user_id": user }))
+            .await
+            .map(|_| ())
+    }
+    async fn decline_join_request(&mut self, chat: i64, user: i64) -> Result<(), String> {
+        self.call("declineChatJoinRequest", &json!({ "chat_id": chat, "user_id": user }))
+            .await
+            .map(|_| ())
+    }
     async fn kick_member(&mut self, chat: i64, user: i64) -> Result<(), String> {
         // Ban then unban = kick with the door left open for a future re-join.
-        self.call("banChatMember", &json!({ "chat_id": chat, "user_id": user })).await?;
+        self.call(
+            "banChatMember",
+            &json!({ "chat_id": chat, "user_id": user, "until_date": now_unix() + TEMPORARY_REMOVAL_SECS }),
+        )
+        .await?;
         self.unban_member(chat, user).await
     }
     async fn unban_member(&mut self, chat: i64, user: i64) -> Result<(), String> {
@@ -301,7 +388,7 @@ impl TelegramApi for TelegramBot {
         let v = self
             .call(
                 "getUpdates",
-                &json!({ "offset": offset, "timeout": POLL_INTERVAL.min(50), "allowed_updates": json!(["message"]) }),
+                &json!({ "offset": offset, "timeout": POLL_INTERVAL.min(50), "allowed_updates": json!(["message", "chat_join_request"]) }),
             )
             .await?;
         serde_json::from_value(v).map_err(|e| e.to_string())
@@ -384,6 +471,10 @@ pub struct Bot<T: TelegramApi, B: BridgeClient> {
     pub gate: String,
     pub join_ttl: Duration,
     pub access_ttl: Duration,
+    /// Only the explicitly configured local fixture may use a non-registry test authorization.
+    /// Live processes require a server-issued access grant and currently remain disabled while the
+    /// Stage 5 consensus bootstrap is untrusted.
+    fixture_authorization: bool,
     tokens: HashMap<String, JoinToken>,
     grants: HashMap<i64, Grant>,
     /// IDs already acted on, so a replayed update (Telegram resends on offset races) cannot mint a
@@ -400,10 +491,17 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
             gate,
             join_ttl: JOIN_TTL,
             access_ttl: ACCESS_TTL,
+            fixture_authorization: false,
             tokens: HashMap::new(),
             grants: HashMap::new(),
             seen_updates: std::collections::BTreeSet::new(),
         }
+    }
+
+    fn new_fixture(telegram: T, bridge: B, chat: i64, gate: String) -> Self {
+        let mut bot = Self::new(telegram, bridge, chat, gate);
+        bot.fixture_authorization = true;
+        bot
     }
 
     /// `/join`: mints a single-use token bound to this Telegram account.
@@ -511,7 +609,6 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
         // the TTL has passed.
         self.tokens.get_mut(token).expect("checked above").used = true;
 
-        let link = self.telegram.create_single_seat_invite(self.chat).await?;
         // The bridge hands back the session the registry issued for this proof, when it has an
         // access plane. From then on the SERVER owns the clock: expiry, revocation and policy
         // replacements all apply to this user the moment they happen, and the session appears in
@@ -521,6 +618,12 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
             application_id: a.application_id,
             expires_unix: a.expires_unix,
         });
+        if server.is_none() && !self.fixture_authorization {
+            return Err(
+                "the bridge accepted a proof but issued no production access session; Telegram admission remains fail-closed"
+                    .into(),
+            );
+        }
         let (expires, minutes) = match &server {
             Some(sg) => {
                 let remaining = sg.expires_unix.saturating_sub(now_unix());
@@ -528,9 +631,20 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
             }
             None => (Instant::now() + self.access_ttl, self.access_ttl.as_secs() / 60),
         };
+        let expires_unix = server
+            .as_ref()
+            .map(|grant| grant.expires_unix)
+            .unwrap_or_else(|| now_unix() + self.access_ttl.as_secs());
+        // Join-request invites cannot use Telegram's member_limit. The bot approves the request
+        // only for the Telegram identity bound to this grant, so a forwarded invite cannot admit
+        // another account.
+        let link = self
+            .telegram
+            .create_join_request_invite(self.chat, expires_unix)
+            .await?;
         self.grants.insert(
             user,
-            Grant { expires, proof_id: proof_id.to_string(), invite_link: link.clone(), server },
+            Grant { expires, server },
         );
         self.telegram
             .send_message(
@@ -587,6 +701,10 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
 
     /// Acts on one update: commands and no-op resends.
     pub async fn handle_update(&mut self, update: TgUpdate, base_url: &str, claim_base: &str) {
+        if let Some(request) = update.chat_join_request {
+            self.handle_join_request(request).await;
+            return;
+        }
         let Some(message) = update.message.clone() else { return };
         let Some(user) = message.from.as_ref().map(|f| f.id) else { return };
         let text = message.text.clone().unwrap_or_default();
@@ -610,8 +728,40 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
         }
     }
 
+    /// Telegram supplies this identity in its own signed/update channel; it is never accepted
+    /// from the browser claim. A forwarded invite reaches this check under the forwarder's own
+    /// Telegram user id and is declined unless that id owns a live grant for this exact chat.
+    async fn handle_join_request(&mut self, request: TgJoinRequest) {
+        if request.chat.id != self.chat {
+            return;
+        }
+        let user = request.from.id;
+        let grant = self.grants.get(&user).cloned();
+        let authorized = match grant {
+            Some(grant) => match grant.server {
+                Some(server) => matches!(
+                    self.bridge
+                        .access_check(&server.application_id, &self.gate, &server.token)
+                        .await,
+                    Ok(true)
+                ),
+                None => self.fixture_authorization && grant.expires > Instant::now(),
+            },
+            None => false,
+        };
+        if authorized {
+            let _ = self.telegram.approve_join_request(self.chat, user).await;
+        } else {
+            let _ = self.telegram.decline_join_request(self.chat, user).await;
+        }
+    }
+
     pub fn grant_count(&self) -> usize {
         self.grants.len()
+    }
+
+    fn admission_label(&self) -> &'static str {
+        if self.fixture_authorization { "test_only" } else { "production" }
     }
 }
 
@@ -673,10 +823,27 @@ async fn run() -> i32 {
     // parameters, never trait objects), and unifying them would need an extra enum for one
     // startup if/else.
     if fixture {
+        let test_chat = match std::env::var("GG_TG_FIXTURE_TEST_CHAT_ID")
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok())
+        {
+            Some(value) if value == chat => value,
+            _ => {
+                eprintln!(
+                    "ghost-gate-telegram: fixture mode requires GG_TG_FIXTURE_TEST_CHAT_ID to equal GG_TG_CHAT_ID; no real Telegram membership is ever changed"
+                );
+                return 1;
+            }
+        };
         FIXTURE_POLL_PAUSE.store(true, std::sync::atomic::Ordering::Relaxed);
         // In fixture mode the bot never reads Telegram, so it mints one join token at startup for
         // the fixture user and prints everything needed to drive the lifecycle by hand.
-        let mut bot = Bot::new(FixtureTelegram, FixtureBridge { gate: gate.clone(), access_authorized: None }, chat, gate.clone());
+        let mut bot = Bot::new_fixture(
+            FixtureTelegram,
+            FixtureBridge { gate: gate.clone(), access_authorized: None },
+            test_chat,
+            gate.clone(),
+        );
         let reply = bot
             .join(FIXTURE_TG_USER, &bridge_base, &format!("http://127.0.0.1:{claim_port}"))
             .await
@@ -698,8 +865,19 @@ async fn run() -> i32 {
         return serve(bot, &bridge_base, &format!("http://127.0.0.1:{claim_port}"), claim_port, &gate).await;
     }
 
-    let bot = Bot::new(TelegramBot::new(&token), HttpBridge::new(&bridge), chat, gate.clone());
-    serve(bot, &bridge_base, &format!("http://127.0.0.1:{claim_port}"), claim_port, &gate).await
+    let telegram = TelegramBot::new(&token);
+    if let Err(error) = telegram.diagnose_private_supergroup(chat).await {
+        eprintln!("ghost-gate-telegram: Telegram diagnostic failed: {error}");
+        return 1;
+    }
+    if std::env::var("GG_TG_DIAGNOSE").ok().as_deref() == Some("1") {
+        eprintln!("ghost-gate-telegram: Telegram identity and private-supergroup permissions verified; diagnostic only");
+        return 0;
+    }
+    eprintln!(
+        "ghost-gate-telegram: production admission is disabled: the Stage 5 consensus trust bootstrap is not independently authenticated"
+    );
+    1
 }
 
 /// The bot's two loops plus the claim listener, wired together.
@@ -877,7 +1055,13 @@ async fn handle_claim_http<T: TelegramApi, B: BridgeClient>(bot: &mut Bot<T, B>,
     }
     match bot.claim(&token, &proof_id).await {
         Ok(link) => {
-            let payload = json!({ "state": "granted", "invite_link": link, "at": now_unix() }).to_string();
+            let payload = json!({
+                "state": "granted",
+                "admission": bot.admission_label(),
+                "invite_link": link,
+                "at": now_unix(),
+            })
+            .to_string();
             format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{cors}\r\n{payload}", payload.len())
         },
         Err(e) => {
@@ -896,6 +1080,8 @@ mod tests {
         invites: Vec<i64>,
         kicked: Vec<i64>,
         unbanned: Vec<i64>,
+        approved: Vec<(i64, i64)>,
+        declined: Vec<(i64, i64)>,
         messages: Vec<(i64, String)>,
         next_link: String,
     }
@@ -906,6 +1092,8 @@ mod tests {
                 invites: Vec::new(),
                 kicked: Vec::new(),
                 unbanned: Vec::new(),
+                approved: Vec::new(),
+                declined: Vec::new(),
                 messages: Vec::new(),
                 next_link: "https://t.me/joinchat/seat1".into(),
             }
@@ -921,10 +1109,18 @@ mod tests {
             self.0.lock().unwrap().messages.push((user, text.to_string()));
             Ok(())
         }
-        async fn create_single_seat_invite(&mut self, chat: i64) -> Result<String, String> {
+        async fn create_join_request_invite(&mut self, chat: i64, _expires_unix: u64) -> Result<String, String> {
             let mut g = self.0.lock().unwrap();
             g.invites.push(chat);
             Ok(g.next_link.clone())
+        }
+        async fn approve_join_request(&mut self, chat: i64, user: i64) -> Result<(), String> {
+            self.0.lock().unwrap().approved.push((chat, user));
+            Ok(())
+        }
+        async fn decline_join_request(&mut self, chat: i64, user: i64) -> Result<(), String> {
+            self.0.lock().unwrap().declined.push((chat, user));
+            Ok(())
         }
         async fn kick_member(&mut self, chat: i64, user: i64) -> Result<(), String> {
             // The real client kicks as ban-then-unban (seat freed, door open); the fake mirrors
@@ -1005,6 +1201,13 @@ mod tests {
     fn bot_owned(bridge: FakeBridge) -> (Bot<Wrap, FakeBridge>, SharedFake) {
         let tg: SharedFake = std::sync::Arc::new(std::sync::Mutex::new(FakeTelegram::new()));
         let t2 = tg.clone();
+        let bot = Bot::new_fixture(Wrap(t2), bridge, -1001234, "crypt".into());
+        (bot, tg)
+    }
+
+    fn production_bot(bridge: FakeBridge) -> (Bot<Wrap, FakeBridge>, SharedFake) {
+        let tg: SharedFake = std::sync::Arc::new(std::sync::Mutex::new(FakeTelegram::new()));
+        let t2 = tg.clone();
         let bot = Bot::new(Wrap(t2), bridge, -1001234, "crypt".into());
         (bot, tg)
     }
@@ -1059,6 +1262,55 @@ mod tests {
         let err = bot.claim(&token, "proof3").await.expect_err("unverified proof");
         assert!(err.contains("does not show this proof as accepted"), "{err}");
         assert_eq!(bot.grant_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_live_bot_requires_a_registry_access_session() {
+        let bridge = FakeBridge { answers: HashMap::from([("proof-live".to_string(), FakeBridge::accepted("crypt"))]), access: None };
+        let (mut bot, tg) = production_bot(bridge);
+        let (token, _) = mint_join(&mut bot, 81).await;
+        let err = bot.claim(&token, "proof-live").await.expect_err("no production session");
+        assert!(err.contains("fail-closed"), "{err}");
+        assert!(tg.lock().unwrap().invites.is_empty());
+    }
+
+    #[test]
+    fn production_diagnostic_requires_a_private_supergroup_and_required_admin_rights() {
+        let private = json!({ "id": -1001234i64, "type": "supergroup" });
+        let admin = json!({
+            "status": "administrator",
+            "can_invite_users": true,
+            "can_restrict_members": true,
+        });
+        assert!(validate_private_supergroup(-1001234, &private, &admin).is_ok());
+        assert!(validate_private_supergroup(
+            -1001234,
+            &json!({ "id": -1001234i64, "type": "supergroup", "username": "public_group" }),
+            &admin,
+        )
+        .is_err());
+        assert!(validate_private_supergroup(
+            -1001234,
+            &private,
+            &json!({ "status": "administrator", "can_invite_users": true, "can_restrict_members": false }),
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn telegram_join_requests_are_bound_to_the_granted_account_and_chat() {
+        let bridge = FakeBridge { answers: HashMap::from([("proof-join".to_string(), FakeBridge::accepted("crypt"))]), access: None };
+        let (mut bot, tg) = bot_owned(bridge);
+        let (token, _) = mint_join(&mut bot, 82).await;
+        bot.claim(&token, "proof-join").await.expect("fixture grant");
+
+        bot.handle_join_request(TgJoinRequest { chat: TgChat { id: -1001234 }, from: TgUser { id: 82 } }).await;
+        bot.handle_join_request(TgJoinRequest { chat: TgChat { id: -1001234 }, from: TgUser { id: 83 } }).await;
+        bot.handle_join_request(TgJoinRequest { chat: TgChat { id: -1009999 }, from: TgUser { id: 82 } }).await;
+
+        let fake = tg.lock().unwrap();
+        assert_eq!(fake.approved, vec![(-1001234, 82)]);
+        assert_eq!(fake.declined, vec![(-1001234, 83)]);
     }
 
     #[tokio::test]
@@ -1173,6 +1425,7 @@ mod tests {
         let response = handle_claim_http(&mut bot, &request).await;
         assert!(response.contains("200 OK"), "{response}");
         assert!(response.contains("granted"), "{response}");
+        assert!(response.contains("test_only"), "fixture responses are never production grants: {response}");
         assert!(
             response.contains("Access-Control-Allow-Origin: http://127.0.0.1:7799"),
             "the preflight names the join page's origin exactly: {response}"

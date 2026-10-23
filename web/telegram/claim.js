@@ -172,9 +172,15 @@ async function main() {
       throw new Error(claim.error || "the bot refused the claim");
     }
     step("claim", "done");
+    if (claim.admission === "test_only") {
+      $("tg-line").textContent =
+        "TEST AUTHORIZATION ONLY — the local fixture accepted this proof. No Telegram membership " +
+        "and no production access were granted.";
+      return;
+    }
     $("tg-line").textContent =
-      "Verified and claimed. Check Telegram — the bot has sent you a one-seat invite link. " +
-      "It expires after a while; the bot will ask for a fresh proof then.";
+      "Access authorized. Check Telegram and submit the join request from your one-time invite; " +
+      "the bot approves only the Telegram account bound to this proof. Expired or revoked access is removed.";
   } catch (e) {
     const msg = e && e.message ? e.message : String(e);
     if (e && e.code === 4001) {

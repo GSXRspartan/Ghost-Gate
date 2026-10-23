@@ -46,9 +46,14 @@
       <li data-step="output">Your wallet creates the proof output — public and permanent (approval in your wallet)</li>
       <li data-step="sign">Your wallet signs the gate's challenge</li>
       <li data-step="verify">The bridge verifies against chain state</li>
-      <li data-step="claim">The bot grants your seat</li>
+      <li data-step="claim">A private-group join request is authorized</li>
     </ol>
     <p class="error" id="tg-error" hidden></p>
+    <p class="hint" style="margin-top:1rem">
+      Proof accepted is not the same as access authorized. Production Telegram admission remains
+      unavailable while Ghost Gate's independent consensus trust bootstrap is pending. In explicit
+      local fixture mode, results are labelled test-only and never change Telegram membership.
+    </p>
     <p class="hint" style="margin-top:1rem">
       You'll be asked for one wallet approval to create a publicly-auditable proof output (a public
       minimum, never a balance), and one to sign a challenge. No seed, no keys, no exact balance —
