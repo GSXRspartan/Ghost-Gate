@@ -9,6 +9,7 @@
 //! There is deliberately no `anchor_on_first_use` or automatic re-anchor API here.
 
 use std::collections::BTreeMap;
+use std::str::FromStr;
 
 use serde::Deserialize;
 
@@ -23,7 +24,7 @@ use tari_ootle_light_client::{LightClientError, TrustedValidatorSet, TrustedVali
 
 /// Audit metadata extracted only after the official v0.47 verifier has accepted an inclusion
 /// proof and its quorum-signed block proof. This is not a browser assertion.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct VerifiedEvidence {
     pub network: u8,
     pub epoch: u64,
@@ -31,6 +32,32 @@ pub struct VerifiedEvidence {
     pub height: u64,
     pub block_id: String,
     pub state_merkle_root: String,
+}
+
+/// The only proof material accepted from a sidecar caller. All values remain untrusted until
+/// [`PinnedConsensusVerifier::verify_request`] validates them against its preconfigured anchor.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConsensusProofRequest {
+    pub substate_id: String,
+    pub version: SubstateVersion,
+    pub value: SubstateValue,
+    pub proof: SubstateProof,
+    pub committee: ValidatorSetCommittee,
+    #[serde(default)]
+    pub handovers: Vec<EpochCheckpointEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ChainVerdict { ChainVerified, ChainInvalid, ChainStale, ChainPending, AnchorUntrusted, EvidenceUnavailable }
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsensusProofResult {
+    pub verdict: ChainVerdict,
+    pub evidence: Option<VerifiedEvidence>,
+    pub reason: &'static str,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -143,6 +170,38 @@ impl PinnedConsensusVerifier {
         self.verify_substate(substate_id, version, value, proof, committee)
     }
 
+    /// Advance only through supplied signed handovers, then verify one inclusion proof. An
+    /// indexer cannot replace the root: non-contiguous, forged, wrong-network, or malformed
+    /// handovers cause `CHAIN_INVALID`; absence of a needed handover stays `CHAIN_PENDING`.
+    pub fn verify_request(
+        &mut self,
+        max_proof_age_epochs: u64,
+        request: &ConsensusProofRequest,
+    ) -> ConsensusProofResult {
+        const MAX_HANDOVERS: usize = 64;
+        if request.handovers.len() > MAX_HANDOVERS {
+            return ConsensusProofResult { verdict: ChainVerdict::EvidenceUnavailable, evidence: None, reason: "handover_limit" };
+        }
+        for handover in &request.handovers {
+            if handover.epoch != self.latest.epoch() {
+                return ConsensusProofResult { verdict: ChainVerdict::ChainInvalid, evidence: None, reason: "handover_epoch" };
+            }
+            if self.advance(handover).is_err() {
+                return ConsensusProofResult { verdict: ChainVerdict::ChainInvalid, evidence: None, reason: "handover_invalid" };
+            }
+        }
+        let id = match SubstateId::from_str(&request.substate_id) {
+            Ok(id) => id,
+            Err(_) => return ConsensusProofResult { verdict: ChainVerdict::ChainInvalid, evidence: None, reason: "substate_id" },
+        };
+        match self.verify_substate_fresh(max_proof_age_epochs, &id, request.version, &request.value, &request.proof, &request.committee) {
+            Ok(evidence) => ConsensusProofResult { verdict: ChainVerdict::ChainVerified, evidence: Some(evidence), reason: "verified" },
+            Err(ConsensusError::StaleEvidence) => ConsensusProofResult { verdict: ChainVerdict::ChainStale, evidence: None, reason: "stale" },
+            Err(ConsensusError::EpochNotTrusted) => ConsensusProofResult { verdict: ChainVerdict::ChainPending, evidence: None, reason: "handover_needed" },
+            Err(_) => ConsensusProofResult { verdict: ChainVerdict::ChainInvalid, evidence: None, reason: "proof_invalid" },
+        }
+    }
+
     /// Verify exactly one next-epoch handover. The official implementation checks checkpoint
     /// network, epoch, walked shard group, quorum signatures and the next committee/set proof.
     /// A failure leaves this adapter unchanged.
@@ -234,6 +293,19 @@ mod tests {
         let proof = substate_proof(&set, &id, SubstateVersion::ZERO, &value);
         let wrong = SubstateValue::ClaimedOutputTombstone(ClaimedOutputTombstone { value: 8 });
         assert!(verifier.verify_substate(&id, SubstateVersion::ZERO, &wrong, &proof, &set.committee(low())).is_err());
+    }
+
+    #[test]
+    fn fixture_request_returns_chain_verified_only_for_authenticated_evidence() {
+        let (mut verifier, set, id, value) = fixture();
+        let request = ConsensusProofRequest {
+            substate_id: id.to_string(), version: SubstateVersion::ZERO, value,
+            proof: substate_proof(&set, &id, SubstateVersion::ZERO, &SubstateValue::ClaimedOutputTombstone(ClaimedOutputTombstone { value: 7 })),
+            committee: set.committee(low()), handovers: vec![],
+        };
+        let result = verifier.verify_request(1, &request);
+        assert_eq!(result.verdict, ChainVerdict::ChainVerified);
+        assert_eq!(result.evidence.unwrap().network, NETWORK.as_byte());
     }
 
     #[test]
