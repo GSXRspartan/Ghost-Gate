@@ -84,6 +84,7 @@ impl From<BookError> for ProofRefusal {
             BookError::Expired => Self::Expired,
             BookError::Consumed => Self::AlreadyAnswered,
             BookError::SessionMismatch => Self::SessionMismatch,
+            BookError::InProgress => Self::AlreadyAnswered,
             BookError::Superseded => Self::PolicyReplaced,
             // A saturated book is not a property of *this* challenge; it surfaces on issue, never
             // on validate. Mapped here so the conversion stays total.
@@ -108,7 +109,9 @@ pub fn validate_prove_request(
 
     // Liveness and single-use first: there is no point comparing a challenge that was never ours, or
     // one that has already been spent, against the gate's policy.
-    book.check_live(&nonce, &session)?;
+    // A submitted challenge still needs full origin/session/policy validation for an idempotent
+    // retry. Only `reserve_for_submission` decides whether a new proof job may be created.
+    book.check_current(&nonce, &session)?;
 
     let issued = book.peek(&nonce).map_err(ProofRefusal::from)?;
 
@@ -544,6 +547,7 @@ mod tests {
             challenge: challenge(3),
             expires_at: std::time::SystemTime::now(),
             issued_to_origin: None,
+            state: crate::session::ChallengeState::Issued,
         };
         let gate = binding();
         assert_eq!(issued.challenge.ootle_resource(), Some(*gate.resource().unwrap()));

@@ -3,10 +3,14 @@
 
 //! Fresh, single-use challenges and the jobs that answer them.
 //!
-//! One challenge yields at most one session. That is enforced here as well as on chain, and the two
-//! are not redundant: the gate burns the nonce in committed state, so a replay cannot mint a second
-//! session even against a bridge that forgot. This side exists so a bridge that *does* forget still
-//! cannot, and so an in-flight answer is not mistaken for a second one.
+//! One challenge yields at most one submission and one session. That is enforced here as well as on
+//! chain, and the two are not redundant: the gate burns the nonce in committed state, so a replay
+//! cannot mint a second session even against a bridge that forgot. This side exists so a bridge
+//! that *does* forget still cannot, and so an in-flight answer is not mistaken for a second one.
+//!
+//! The book is intentionally process-local. A restart or a request sent to a different bridge
+//! process finds no issued nonce and is refused; deployments that need availability across those
+//! boundaries must put this state machine behind an atomic durable store before load balancing.
 //!
 //! Expiry is wall-clock, not epoch. The gate compares epochs itself and is the layer that actually
 //! enforces it; the bridge's clock bounds how long *it* will keep trying, and is deliberately the
@@ -125,6 +129,20 @@ pub struct IssuedChallenge {
     /// challenge is outstanding, the old threshold is no longer the rule, so the answer is refused
     /// and a fresh challenge must be minted. `None` for a gate that is not registry-backed.
     pub policy_hash: Option<String>,
+    /// The explicit replay state. A submitted challenge remains in the book so finality can be
+    /// reconciled, but cannot create a second wallet or base-layer submission.
+    pub state: ChallengeState,
+}
+
+/// The bridge-side lifecycle for a one-shot challenge.
+///
+/// `Consumed` lives in `ChallengeBook::answered` rather than on an `IssuedChallenge`, because the
+/// live entry is removed when access is granted. The resulting state machine is
+/// `Issued -> Submitted -> Consumed`, with `Submitted -> Issued` only after an unverified failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChallengeState {
+    Issued,
+    Submitted,
 }
 
 /// Why a challenge was refused.
@@ -138,6 +156,8 @@ pub enum BookError {
     Consumed,
     #[error("GG: challenge belongs to a different browser session")]
     SessionMismatch,
+    #[error("GG: a proof for this challenge is already being processed")]
+    InProgress,
     #[error("GG: too many live challenges; wait for one to be answered or expire")]
     TooManyChallenges,
     /// The gate's policy was replaced while this challenge was outstanding: the answer proves the
@@ -227,6 +247,7 @@ impl ChallengeBook {
                 expires_at: SystemTime::now() + ttl,
                 issued_to_origin,
                 policy_hash,
+                state: ChallengeState::Issued,
             },
         );
         Ok(())
@@ -273,10 +294,56 @@ impl ChallengeBook {
     /// who was declined because they were one unit short should be able to try again against the same
     /// session; burning the nonce on failure would turn every mistake into a support ticket.
     pub fn check_live(&self, nonce: &[u8; 32], session_commitment: &[u8]) -> Result<(), BookError> {
+        self.check_current(nonce, session_commitment)?;
+        if self.entries.get(nonce).expect("checked above").state == ChallengeState::Submitted {
+            return Err(BookError::InProgress);
+        }
+        Ok(())
+    }
+
+    /// Confirms a challenge exists and is owned by this browser session, including one that is
+    /// already submitted. Policy validation uses this so an idempotent retry is still origin- and
+    /// session-bound before the caller learns its existing job id.
+    pub fn check_current(&self, nonce: &[u8; 32], session_commitment: &[u8]) -> Result<(), BookError> {
         let entry = self.peek(nonce)?;
         if entry.challenge.session_commitment() != session_commitment {
             return Err(BookError::SessionMismatch);
         }
+        Ok(())
+    }
+
+    /// Atomically reserves an issued challenge for one proof submission.
+    ///
+    /// The caller must subsequently either consume it after a verified acceptance or release it
+    /// after an unverified failure. A second caller gets `InProgress`, rather than starting a
+    /// competing transaction for the same nonce.
+    pub fn reserve_for_submission(
+        &mut self,
+        nonce: &[u8; 32],
+        session_commitment: &[u8],
+    ) -> Result<(), BookError> {
+        self.check_current(nonce, session_commitment)?;
+        let entry = self.entries.get_mut(nonce).expect("checked above");
+        if entry.state == ChallengeState::Submitted {
+            return Err(BookError::InProgress);
+        }
+        entry.state = ChallengeState::Submitted;
+        Ok(())
+    }
+
+    /// Makes a failed, unverified submission retryable again. This is deliberately narrower than
+    /// deletion: it preserves the original nonce, policy binding, browser-origin binding and TTL.
+    pub fn release_submission(
+        &mut self,
+        nonce: &[u8; 32],
+        session_commitment: &[u8],
+    ) -> Result<(), BookError> {
+        self.check_current(nonce, session_commitment)?;
+        let entry = self.entries.get_mut(nonce).expect("checked above");
+        if entry.state != ChallengeState::Submitted {
+            return Err(BookError::InProgress);
+        }
+        entry.state = ChallengeState::Issued;
         Ok(())
     }
 
@@ -290,7 +357,7 @@ impl ChallengeBook {
         nonce: &[u8; 32],
         session_commitment: &[u8],
     ) -> Result<IssuedChallenge, BookError> {
-        self.check_live(nonce, session_commitment)?;
+        self.check_current(nonce, session_commitment)?;
         self.answered.insert(*nonce, SystemTime::now());
         // The answered set exists so a replayed challenge answers `AlreadyAnswered` rather than
         // `Unknown`. It is also state a loop of *successful* proofs grows, so it is capped like the
@@ -465,6 +532,32 @@ mod tests {
             "a second answer finds nothing, and is told it was already answered rather than \
              that it does not exist -- the more useful of the two refusals"
         );
+    }
+
+    #[test]
+    fn only_one_submission_can_reserve_a_challenge() {
+        let mut book = ChallengeBook::new();
+        book.insert(challenge(1), TTL, None).unwrap();
+
+        book.reserve_for_submission(&[1u8; 32], b"session-1").unwrap();
+        assert_eq!(
+            book.reserve_for_submission(&[1u8; 32], b"session-1").unwrap_err(),
+            BookError::InProgress,
+            "the check and reservation are one state transition"
+        );
+        assert_eq!(
+            book.check_live(&[1u8; 32], b"session-1").unwrap_err(),
+            BookError::InProgress,
+        );
+    }
+
+    #[test]
+    fn an_unverified_failure_releases_the_original_challenge_for_retry() {
+        let mut book = ChallengeBook::new();
+        book.insert(challenge(1), TTL, None).unwrap();
+        book.reserve_for_submission(&[1u8; 32], b"session-1").unwrap();
+        book.release_submission(&[1u8; 32], b"session-1").unwrap();
+        assert!(book.check_live(&[1u8; 32], b"session-1").is_ok());
     }
 
     #[test]

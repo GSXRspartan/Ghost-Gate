@@ -347,6 +347,7 @@ impl GateRegistry {
             expires_at: now + expires_in,
             issued_to_origin,
             policy_hash,
+            state: crate::session::ChallengeState::Issued,
         })
     }
 }

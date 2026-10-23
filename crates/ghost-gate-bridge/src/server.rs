@@ -951,6 +951,14 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             }
         };
 
+        // Credential verification can await an indexer. Reserve before that await so a duplicate
+        // delivery cannot verify the same challenge twice and race its eventual authorization.
+        let nonce = challenge.nonce().into_array();
+        let session_commitment = challenge.session_commitment().to_vec();
+        if let Err(error) = self.challenges.reserve_for_submission(&nonce, &session_commitment) {
+            return Response::error(409, error.to_string());
+        }
+
         // The challenge string the wallet signed is the exact string the challenge route returned
         // and the page passed through: the lowercase hex of the nonce. Reconstruction, not trust.
         let nonce_hex = crate::policy::nonce_to_hex(&challenge.nonce());
@@ -1050,6 +1058,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                 )
             }
             Err(refusal) => {
+                let _ = self.challenges.release_submission(&nonce, &session_commitment);
                 // The refusal is a real operation too — record it in the attempt's trace so
                 // the inspector shows why the credential was refused, without leaking
                 // secrets (Trace::push sanitizes every detail at the boundary).
@@ -1118,6 +1127,24 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                 );
             }
         };
+
+        let nonce = challenge.nonce().into_array();
+        let session_commitment = challenge.session_commitment().to_vec();
+        match self.challenges.reserve_for_submission(&nonce, &session_commitment) {
+            Ok(()) => {}
+            Err(crate::session::BookError::InProgress) => {
+                // Validation above still bound this retry to the original browser origin/session.
+                if let Some(job) = self.jobs.iter().find(|job| job.challenge_nonce == nonce) {
+                    let mut body = serde_json::json!({ "proof_id": job.id, "idempotent": true });
+                    if let crate::session::ProofStatus::Submitted { transaction_id } = &job.status {
+                        body["transaction_id"] = serde_json::Value::String(transaction_id.clone());
+                    }
+                    return Response::json(202, &body);
+                }
+                return Response::error(409, "GG: a proof for this challenge is already being processed");
+            }
+            Err(error) => return Response::error(409, error.to_string()),
+        }
 
         // Dispatch on the gate's typed condition, not on a string: the two proof paths share the
         // challenge bookkeeping and nothing else. The job id is minted once here so both paths
@@ -1196,6 +1223,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                         reason: e.to_string(),
                     },
                 );
+                let _ = self.challenges.release_submission(&nonce, challenge.session_commitment.as_slice());
                 return Response::json(202, &serde_json::json!({ "proof_id": job_id }));
             }
         };
@@ -1229,6 +1257,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                         reason: e.to_string(),
                     },
                 );
+                let _ = self.challenges.release_submission(&nonce, challenge.session_commitment.as_slice());
                 Response::json(202, &serde_json::json!({ "proof_id": job_id }))
             }
         }
@@ -1284,6 +1313,10 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                     ProofStatus::Failed {
                         reason: e.to_string(),
                     },
+                );
+                let _ = self.challenges.release_submission(
+                    &xtm_challenge.nonce.into_array(),
+                    xtm_challenge.session_commitment.as_slice(),
                 );
                 Response::json(202, &serde_json::json!({ "proof_id": job_id }))
             }
@@ -1373,12 +1406,20 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                 }
                 Ok(crate::wallet::CommitOutcome::Rejected { reason }) => {
                     self.jobs[index].status = ProofStatus::Refused { reason };
+                    if let Ok(issued) = self.challenges.peek(&nonce) {
+                        let session = issued.challenge.session_commitment().to_vec();
+                        let _ = self.challenges.release_submission(&nonce, &session);
+                    }
                 }
                 Ok(crate::wallet::CommitOutcome::Pending) => {}
                 Err(e) => {
                     self.jobs[index].status = ProofStatus::Failed {
                         reason: e.to_string(),
                     };
+                    if let Ok(issued) = self.challenges.peek(&nonce) {
+                        let session = issued.challenge.session_commitment().to_vec();
+                        let _ = self.challenges.release_submission(&nonce, &session);
+                    }
                 }
             }
     }
@@ -1461,6 +1502,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                 self.jobs[index].status = ProofStatus::Refused {
                     reason: other.to_string(),
                 };
+                let _ = self.challenges.release_submission(&nonce, xtm_challenge.session_commitment.as_slice());
             },
         }
     }
@@ -1902,6 +1944,31 @@ mod tests {
             "the request carries no UTXO and no destination: an empty Named means the adapter picks an \
              input of the gate's own resource itself, locally"
         );
+    }
+
+    #[tokio::test]
+    async fn duplicate_prove_delivery_reuses_the_pending_job_without_a_second_wallet_submission() {
+        let mut b = bridge(FakeWallet::new());
+        let (nonce, session) = issue(&mut b).await;
+        let request = serde_json::json!({
+            "gate_id": "g1",
+            "challenge_nonce": nonce,
+            "session_commitment": session,
+        });
+
+        let first = b.handle(&post("/gate/g1/prove", request.clone())).await;
+        assert_eq!(first.status, 202, "{}", first.body);
+        let first_id = serde_json::from_str::<serde_json::Value>(&first.body).unwrap()["proof_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let retry = b.handle(&post("/gate/g1/prove", request)).await;
+        assert_eq!(retry.status, 202, "{}", retry.body);
+        let retry_json: serde_json::Value = serde_json::from_str(&retry.body).unwrap();
+        assert_eq!(retry_json["proof_id"], first_id);
+        assert_eq!(retry_json["idempotent"], true);
+        assert_eq!(b.wallet.submitted.len(), 1, "one nonce must create at most one wallet submission while pending");
     }
 
     #[tokio::test]
