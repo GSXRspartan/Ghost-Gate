@@ -1,16 +1,33 @@
-//! Durable replay-state boundary.
+//! Durable, fail-closed replay coordination.
 //!
-//! `ChallengeBook` is deliberately process-local and is suitable only for the localhost bridge.
-//! A hosted verifier must put this trait behind a strongly consistent implementation (for example a
-//! single-owner Durable Object). Until one is configured, `UnavailableReplayStore` refuses every
-//! mutation rather than pretending that an in-memory mutex coordinates multiple processes.
+//! `ChallengeBook` is process-local and supplies the full challenge payload while a bridge is
+//! alive. It is not evidence of cross-process coordination. This module is the authority for
+//! replay decisions when a durable access plane is configured; it never falls back to memory on
+//! an I/O or parse error.
+//!
+//! `FileReplayStore` coordinates independent bridge processes on one local filesystem through a
+//! create-new lock and same-directory atomic replacement. It is not a cross-machine coordinator:
+//! do not place it on a Windows/WSL shared mount or a network filesystem and call it distributed
+//! storage. A hosted deployment needs a single-owner strongly-consistent coordinator.
 
-use std::{collections::HashMap, fs::{self, OpenOptions}, path::{Path, PathBuf}};
+use std::{
+    collections::HashMap,
+    fs::{self, OpenOptions},
+    io::Write,
+    path::{Path, PathBuf},
+    time::{Duration, SystemTime},
+};
+
 use serde::{Deserialize, Serialize};
+
+const STALE_LOCK_AFTER: Duration = Duration::from_secs(30);
+const LOCK_ATTEMPTS: usize = 40;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReplayState { Issued, Submitted, Authorized, Revoked }
 
+/// Server-created challenge facts. Every scope field is rechecked on submission; no browser
+/// field is sufficient to establish a binding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplayRecord {
     pub nonce: [u8; 32],
@@ -18,85 +35,237 @@ pub struct ReplayRecord {
     pub gate: String,
     pub relying_site: String,
     pub visitor_session: Vec<u8>,
+    pub network: u8,
     pub expires_unix: u64,
     pub state: ReplayState,
+    /// Server-generated id of the first accepted submission; used for same-visitor retries.
+    pub proof_job_id: Option<String>,
+    /// Stable identity of the one authorization this nonce can create.
     pub authorization_id: Option<String>,
+    /// Random bearer token held only in server-side storage, reserved before session installation.
+    pub access_token: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reservation {
+    Reserved(ReplayRecord),
+    Pending { proof_job_id: String },
+    Authorized(ReplayRecord),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ReplayError {
     #[error("GG: durable replay protection is unavailable; refusing proof processing")]
     Unavailable,
-    #[error("GG: challenge is unknown, expired, or bound to another visitor/gate")]
+    #[error("GG: challenge is unknown, expired, or bound to another visitor/gate/network")]
     BindingMismatch,
-    #[error("GG: challenge submission is already pending")]
-    Pending,
     #[error("GG: challenge authorization is already final")]
     Final,
 }
 
-/// A storage boundary that must make each transition atomic across verifier instances.
-pub trait ReplayStore {
-    fn reserve(&mut self, expected: &ReplayRecord, now_unix: u64) -> Result<ReplayRecord, ReplayError>;
-    fn authorize(&mut self, nonce: &[u8; 32], authorization_id: &str, now_unix: u64) -> Result<(), ReplayError>;
-    fn release_ambiguous(&mut self, nonce: &[u8; 32], now_unix: u64) -> Result<(), ReplayError>;
+/// Each mutation must be atomic across bridge processes. There is intentionally no operation that
+/// releases an ambiguous network result: it stays Submitted until reconciliation.
+pub trait ReplayStore: Send {
+    fn create(&mut self, record: &ReplayRecord) -> Result<(), ReplayError>;
+    fn reserve(&mut self, expected: &ReplayRecord, proof_job_id: &str, now_unix: u64)
+        -> Result<Reservation, ReplayError>;
+    fn authorize(&mut self, nonce: &[u8; 32], authorization_id: &str, access_token: &str, now_unix: u64)
+        -> Result<ReplayRecord, ReplayError>;
+    fn release_refused(&mut self, expected: &ReplayRecord, now_unix: u64) -> Result<(), ReplayError>;
     fn revoke(&mut self, nonce: &[u8; 32]) -> Result<(), ReplayError>;
+    fn get(&mut self, nonce: &[u8; 32]) -> Result<ReplayRecord, ReplayError>;
 }
 
-/// Explicit fail-closed default for a hosted configuration without durable storage.
+/// Explicit fail-closed default. Production code must opt in to a configured durable store.
 pub struct UnavailableReplayStore;
 impl ReplayStore for UnavailableReplayStore {
-    fn reserve(&mut self, _: &ReplayRecord, _: u64) -> Result<ReplayRecord, ReplayError> { Err(ReplayError::Unavailable) }
-    fn authorize(&mut self, _: &[u8; 32], _: &str, _: u64) -> Result<(), ReplayError> { Err(ReplayError::Unavailable) }
-    fn release_ambiguous(&mut self, _: &[u8; 32], _: u64) -> Result<(), ReplayError> { Err(ReplayError::Unavailable) }
+    fn create(&mut self, _: &ReplayRecord) -> Result<(), ReplayError> { Err(ReplayError::Unavailable) }
+    fn reserve(&mut self, _: &ReplayRecord, _: &str, _: u64) -> Result<Reservation, ReplayError> { Err(ReplayError::Unavailable) }
+    fn authorize(&mut self, _: &[u8; 32], _: &str, _: &str, _: u64) -> Result<ReplayRecord, ReplayError> { Err(ReplayError::Unavailable) }
+    fn release_refused(&mut self, _: &ReplayRecord, _: u64) -> Result<(), ReplayError> { Err(ReplayError::Unavailable) }
     fn revoke(&mut self, _: &[u8; 32]) -> Result<(), ReplayError> { Err(ReplayError::Unavailable) }
+    fn get(&mut self, _: &[u8; 32]) -> Result<ReplayRecord, ReplayError> { Err(ReplayError::Unavailable) }
 }
 
-/// Test/local implementation. It is intentionally not presented as multi-process durable storage.
+/// Test/local-only implementation. It is never selected by bridge startup.
 #[derive(Default)]
 pub struct MemoryReplayStore { records: HashMap<[u8; 32], ReplayRecord> }
 impl MemoryReplayStore { pub fn insert(&mut self, record: ReplayRecord) { self.records.insert(record.nonce, record); } }
-impl ReplayStore for MemoryReplayStore {
-    fn reserve(&mut self, expected: &ReplayRecord, now: u64) -> Result<ReplayRecord, ReplayError> {
-        let record = self.records.get_mut(&expected.nonce).ok_or(ReplayError::BindingMismatch)?;
-        if record.expires_unix < now || record.tenant != expected.tenant || record.gate != expected.gate || record.relying_site != expected.relying_site || record.visitor_session != expected.visitor_session { return Err(ReplayError::BindingMismatch); }
-        match record.state { ReplayState::Issued => { record.state = ReplayState::Submitted; Ok(record.clone()) }, ReplayState::Submitted => Err(ReplayError::Pending), ReplayState::Authorized | ReplayState::Revoked => Err(ReplayError::Final) }
-    }
-    fn authorize(&mut self, nonce: &[u8; 32], id: &str, now: u64) -> Result<(), ReplayError> {
-        let record = self.records.get_mut(nonce).ok_or(ReplayError::BindingMismatch)?;
-        if record.expires_unix < now { return Err(ReplayError::BindingMismatch); }
-        if record.state != ReplayState::Submitted { return Err(ReplayError::Final); }
-        record.state = ReplayState::Authorized; record.authorization_id = Some(id.into()); Ok(())
-    }
-    fn release_ambiguous(&mut self, _: &[u8; 32], _: u64) -> Result<(), ReplayError> { Err(ReplayError::Unavailable) }
-    fn revoke(&mut self, nonce: &[u8; 32]) -> Result<(), ReplayError> { let r=self.records.get_mut(nonce).ok_or(ReplayError::BindingMismatch)?; r.state=ReplayState::Revoked; Ok(()) }
+
+fn matches(record: &ReplayRecord, expected: &ReplayRecord, now: u64) -> bool {
+    record.expires_unix >= now
+        && record.tenant == expected.tenant
+        && record.gate == expected.gate
+        && record.relying_site == expected.relying_site
+        && record.visitor_session == expected.visitor_session
+        && record.network == expected.network
 }
 
-/// Local durable store using an exclusive create lock and atomic record replacement.
-/// A stale lock after a crash deliberately blocks new decisions until an operator investigates;
-/// availability is sacrificed rather than guessing an ambiguous transaction outcome.
+fn reserve_record(record: &mut ReplayRecord, expected: &ReplayRecord, job: &str, now: u64)
+    -> Result<Reservation, ReplayError>
+{
+    if !matches(record, expected, now) { return Err(ReplayError::BindingMismatch); }
+    match record.state {
+        ReplayState::Issued => {
+            record.state = ReplayState::Submitted;
+            record.proof_job_id = Some(job.to_string());
+            Ok(Reservation::Reserved(record.clone()))
+        }
+        ReplayState::Submitted => record.proof_job_id.clone()
+            .map(|proof_job_id| Reservation::Pending { proof_job_id })
+            .ok_or(ReplayError::Unavailable),
+        ReplayState::Authorized => Ok(Reservation::Authorized(record.clone())),
+        ReplayState::Revoked => Err(ReplayError::Final),
+    }
+}
+
+fn authorize_record(record: &mut ReplayRecord, id: &str, token: &str, now: u64)
+    -> Result<ReplayRecord, ReplayError>
+{
+    if record.expires_unix < now { return Err(ReplayError::BindingMismatch); }
+    match record.state {
+        ReplayState::Submitted => {
+            record.state = ReplayState::Authorized;
+            record.authorization_id = Some(id.to_string());
+            record.access_token = Some(token.to_string());
+            Ok(record.clone())
+        }
+        ReplayState::Authorized if record.authorization_id.as_deref() == Some(id) => Ok(record.clone()),
+        ReplayState::Authorized | ReplayState::Revoked | ReplayState::Issued => Err(ReplayError::Final),
+    }
+}
+
+impl ReplayStore for MemoryReplayStore {
+    fn create(&mut self, record: &ReplayRecord) -> Result<(), ReplayError> {
+        if self.records.contains_key(&record.nonce) { return Err(ReplayError::Final); }
+        self.records.insert(record.nonce, record.clone());
+        Ok(())
+    }
+    fn reserve(&mut self, expected: &ReplayRecord, job: &str, now: u64) -> Result<Reservation, ReplayError> {
+        reserve_record(self.records.get_mut(&expected.nonce).ok_or(ReplayError::BindingMismatch)?, expected, job, now)
+    }
+    fn authorize(&mut self, nonce: &[u8; 32], id: &str, token: &str, now: u64) -> Result<ReplayRecord, ReplayError> {
+        authorize_record(self.records.get_mut(nonce).ok_or(ReplayError::BindingMismatch)?, id, token, now)
+    }
+    fn release_refused(&mut self, expected: &ReplayRecord, now: u64) -> Result<(), ReplayError> {
+        let record = self.records.get_mut(&expected.nonce).ok_or(ReplayError::BindingMismatch)?;
+        if !matches(record, expected, now) || record.state != ReplayState::Submitted { return Err(ReplayError::Final); }
+        record.state = ReplayState::Issued;
+        record.proof_job_id = None;
+        Ok(())
+    }
+    fn revoke(&mut self, nonce: &[u8; 32]) -> Result<(), ReplayError> {
+        let record = self.records.get_mut(nonce).ok_or(ReplayError::BindingMismatch)?;
+        record.state = ReplayState::Revoked;
+        Ok(())
+    }
+    fn get(&mut self, nonce: &[u8; 32]) -> Result<ReplayRecord, ReplayError> {
+        self.records.get(nonce).cloned().ok_or(ReplayError::BindingMismatch)
+    }
+}
+
+/// A durable local store. Lock holders only read/write a record; no chain or wallet operation runs
+/// under this lock. A stale lock is reclaimed after a bounded lease to recover from a crashed local
+/// bridge, at the cost of availability rather than an ambiguous replay decision.
 pub struct FileReplayStore { root: PathBuf }
 impl FileReplayStore {
-    pub fn open(root: impl Into<PathBuf>) -> Result<Self, ReplayError> { let root=root.into(); fs::create_dir_all(&root).map_err(|_| ReplayError::Unavailable)?; Ok(Self { root }) }
-    fn path(&self, nonce: &[u8;32]) -> PathBuf { self.root.join(format!("{}.json", hex::encode(nonce))) }
-    fn locked<T>(&self, action: impl FnOnce() -> Result<T, ReplayError>) -> Result<T, ReplayError> {
-        let lock=self.root.join("replay.lock"); let guard=OpenOptions::new().write(true).create_new(true).open(&lock).map_err(|_| ReplayError::Unavailable)?;
-        let result=action(); drop(guard); let _=fs::remove_file(lock); result
+    pub fn open(root: impl Into<PathBuf>) -> Result<Self, ReplayError> {
+        let root = root.into();
+        fs::create_dir_all(&root).map_err(|_| ReplayError::Unavailable)?;
+        Ok(Self { root })
     }
-    pub fn create(&self, record: &ReplayRecord) -> Result<(), ReplayError> { self.locked(|| { let path=self.path(&record.nonce); if path.exists() { return Err(ReplayError::Final); } self.write(&path, record) }) }
-    fn read(&self, nonce:&[u8;32]) -> Result<ReplayRecord, ReplayError> { serde_json::from_slice(&fs::read(self.path(nonce)).map_err(|_|ReplayError::BindingMismatch)?).map_err(|_|ReplayError::Unavailable) }
-    fn write(&self, path:&Path, record:&ReplayRecord) -> Result<(), ReplayError> { let tmp=path.with_extension("tmp"); fs::write(&tmp,serde_json::to_vec(record).map_err(|_|ReplayError::Unavailable)?).map_err(|_|ReplayError::Unavailable)?; fs::rename(tmp,path).map_err(|_|ReplayError::Unavailable) }
-}
-impl ReplayStore for FileReplayStore {
- fn reserve(&mut self,e:&ReplayRecord,now:u64)->Result<ReplayRecord,ReplayError>{ self.locked(||{let mut r=self.read(&e.nonce)?; if r.expires_unix<now||r.tenant!=e.tenant||r.gate!=e.gate||r.relying_site!=e.relying_site||r.visitor_session!=e.visitor_session{return Err(ReplayError::BindingMismatch)}; match r.state {ReplayState::Issued=>{r.state=ReplayState::Submitted;self.write(&self.path(&r.nonce),&r)?;Ok(r)},ReplayState::Submitted=>Err(ReplayError::Pending),_=>Err(ReplayError::Final)}}) }
- fn authorize(&mut self,n:&[u8;32],id:&str,now:u64)->Result<(),ReplayError>{self.locked(||{let mut r=self.read(n)?;if r.expires_unix<now{return Err(ReplayError::BindingMismatch)}if r.state!=ReplayState::Submitted{return Err(ReplayError::Final)}r.state=ReplayState::Authorized;r.authorization_id=Some(id.into());self.write(&self.path(n),&r)})}
- fn release_ambiguous(&mut self,_:&[u8;32],_:u64)->Result<(),ReplayError>{Err(ReplayError::Unavailable)}
- fn revoke(&mut self,n:&[u8;32])->Result<(),ReplayError>{self.locked(||{let mut r=self.read(n)?;r.state=ReplayState::Revoked;self.write(&self.path(n),&r)})}
+    fn path(&self, nonce: &[u8; 32]) -> PathBuf { self.root.join(format!("{}.json", hex::encode(nonce))) }
+    fn locked<T>(&self, action: impl FnOnce() -> Result<T, ReplayError>) -> Result<T, ReplayError> {
+        let lock = self.root.join("replay.lock");
+        for attempt in 0..LOCK_ATTEMPTS {
+            match OpenOptions::new().write(true).create_new(true).open(&lock) {
+                Ok(mut guard) => {
+                    let _ = writeln!(guard, "pid={} started_unix={}", std::process::id(), crate::session::now_unix());
+                    let _ = guard.sync_all();
+                    let result = action();
+                    drop(guard);
+                    let _ = fs::remove_file(&lock);
+                    return result;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let stale = fs::metadata(&lock).and_then(|m| m.modified()).ok()
+                        .and_then(|at| SystemTime::now().duration_since(at).ok())
+                        .map(|age| age > STALE_LOCK_AFTER).unwrap_or(false);
+                    if stale { let _ = fs::remove_file(&lock); continue; }
+                    std::thread::sleep(Duration::from_millis(10 + (attempt as u64 % 5) * 5));
+                }
+                Err(_) => return Err(ReplayError::Unavailable),
+            }
+        }
+        Err(ReplayError::Unavailable)
+    }
+    fn read(&self, nonce: &[u8; 32]) -> Result<ReplayRecord, ReplayError> {
+        serde_json::from_slice(&fs::read(self.path(nonce)).map_err(|_| ReplayError::BindingMismatch)?)
+            .map_err(|_| ReplayError::Unavailable)
+    }
+    fn write(&self, path: &Path, record: &ReplayRecord) -> Result<(), ReplayError> {
+        let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+        let data = serde_json::to_vec(record).map_err(|_| ReplayError::Unavailable)?;
+        { let mut file = fs::File::create(&tmp).map_err(|_| ReplayError::Unavailable)?;
+          file.write_all(&data).and_then(|_| file.sync_all()).map_err(|_| ReplayError::Unavailable)?; }
+        fs::rename(&tmp, path).map_err(|_| ReplayError::Unavailable)
+    }
 }
 
-#[cfg(test)] mod tests { use super::*;
- fn record() -> ReplayRecord { ReplayRecord { nonce:[7;32],tenant:"a".into(),gate:"g".into(),relying_site:"site".into(),visitor_session:vec![1],expires_unix:10,state:ReplayState::Issued,authorization_id:None } }
- #[test] fn duplicate_reservation_and_authorization_are_atomic_at_the_store_boundary() { let mut s=MemoryReplayStore::default(); let r=record(); s.insert(r.clone()); assert!(s.reserve(&r,1).is_ok()); assert_eq!(s.reserve(&r,1),Err(ReplayError::Pending)); assert!(s.authorize(&r.nonce,"grant",1).is_ok()); assert_eq!(s.authorize(&r.nonce,"grant2",1),Err(ReplayError::Final)); }
- #[test] fn unavailable_storage_fails_closed() { let mut s=UnavailableReplayStore; assert_eq!(s.reserve(&record(),1),Err(ReplayError::Unavailable)); }
- #[test] fn file_store_survives_reopen_and_coordinates_two_instances() { let root=std::env::temp_dir().join(format!("gg-replay-{}",std::process::id())); let mut a=FileReplayStore::open(&root).unwrap(); let mut b=FileReplayStore::open(&root).unwrap(); let r=record(); a.create(&r).unwrap(); a.reserve(&r,1).unwrap(); assert_eq!(b.reserve(&r,1),Err(ReplayError::Pending)); b.authorize(&r.nonce,"grant",1).unwrap(); assert_eq!(a.authorize(&r.nonce,"again",1),Err(ReplayError::Final)); let _=fs::remove_dir_all(root); }
+impl ReplayStore for FileReplayStore {
+    fn create(&mut self, record: &ReplayRecord) -> Result<(), ReplayError> {
+        self.locked(|| { let path = self.path(&record.nonce); if path.exists() { return Err(ReplayError::Final); } self.write(&path, record) })
+    }
+    fn reserve(&mut self, expected: &ReplayRecord, job: &str, now: u64) -> Result<Reservation, ReplayError> {
+        self.locked(|| { let mut record = self.read(&expected.nonce)?; let result = reserve_record(&mut record, expected, job, now)?;
+            if matches!(result, Reservation::Reserved(_)) { self.write(&self.path(&record.nonce), &record)?; } Ok(result) })
+    }
+    fn authorize(&mut self, nonce: &[u8; 32], id: &str, token: &str, now: u64) -> Result<ReplayRecord, ReplayError> {
+        self.locked(|| { let mut record = self.read(nonce)?; let result = authorize_record(&mut record, id, token, now)?;
+            self.write(&self.path(nonce), &record)?; Ok(result) })
+    }
+    fn release_refused(&mut self, expected: &ReplayRecord, now: u64) -> Result<(), ReplayError> {
+        self.locked(|| { let mut record = self.read(&expected.nonce)?;
+            if !matches(&record, expected, now) || record.state != ReplayState::Submitted { return Err(ReplayError::Final); }
+            record.state = ReplayState::Issued; record.proof_job_id = None; self.write(&self.path(&record.nonce), &record) })
+    }
+    fn revoke(&mut self, nonce: &[u8; 32]) -> Result<(), ReplayError> {
+        self.locked(|| { let mut record = self.read(nonce)?; record.state = ReplayState::Revoked; self.write(&self.path(nonce), &record) })
+    }
+    fn get(&mut self, nonce: &[u8; 32]) -> Result<ReplayRecord, ReplayError> { self.locked(|| self.read(nonce)) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn record() -> ReplayRecord { ReplayRecord { nonce: [7; 32], tenant: "tenant-a".into(), gate: "gate-a".into(), relying_site: "site-a".into(), visitor_session: vec![1], network: 38, expires_unix: 10, state: ReplayState::Issued, proof_job_id: None, authorization_id: None, access_token: None } }
+
+    #[test]
+    fn identical_retry_gets_original_job_but_another_visitor_cannot() {
+        let mut store = MemoryReplayStore::default(); let record = record(); store.create(&record).unwrap();
+        assert!(matches!(store.reserve(&record, "job-1", 1), Ok(Reservation::Reserved(_))));
+        assert_eq!(store.reserve(&record, "job-2", 1), Ok(Reservation::Pending { proof_job_id: "job-1".into() }));
+        let mut other = record.clone(); other.visitor_session = vec![9];
+        assert_eq!(store.reserve(&other, "job-3", 1), Err(ReplayError::BindingMismatch));
+    }
+    #[test]
+    fn authorization_is_idempotent_but_never_mints_a_second_token() {
+        let mut store = MemoryReplayStore::default(); let record = record(); store.create(&record).unwrap(); store.reserve(&record, "job-1", 1).unwrap();
+        assert_eq!(store.authorize(&record.nonce, "auth-1", "token-1", 1).unwrap().access_token.as_deref(), Some("token-1"));
+        assert_eq!(store.authorize(&record.nonce, "auth-1", "token-2", 1).unwrap().access_token.as_deref(), Some("token-1"));
+        assert_eq!(store.authorize(&record.nonce, "auth-2", "token-2", 1), Err(ReplayError::Final));
+    }
+    #[test]
+    fn unavailable_storage_fails_closed() { let mut store = UnavailableReplayStore; assert_eq!(store.create(&record()), Err(ReplayError::Unavailable)); assert_eq!(store.reserve(&record(), "job", 1), Err(ReplayError::Unavailable)); }
+    #[test]
+    fn file_store_survives_reopen_and_coordinates_independent_instances() {
+        let root = std::env::temp_dir().join(format!("gg-replay-{}-{}", std::process::id(), crate::session::now_unix())); let mut first = FileReplayStore::open(&root).unwrap(); let mut second = FileReplayStore::open(&root).unwrap(); let record = record();
+        first.create(&record).unwrap(); first.reserve(&record, "job-1", 1).unwrap();
+        assert_eq!(second.reserve(&record, "job-2", 1), Ok(Reservation::Pending { proof_job_id: "job-1".into() }));
+        second.authorize(&record.nonce, "auth-1", "token-1", 1).unwrap(); assert_eq!(first.authorize(&record.nonce, "auth-2", "token-2", 1), Err(ReplayError::Final)); assert_eq!(first.get(&record.nonce).unwrap().state, ReplayState::Authorized); let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn corrupt_durable_record_fails_closed() {
+        let root = std::env::temp_dir().join(format!("gg-replay-corrupt-{}-{}", std::process::id(), crate::session::now_unix())); let mut store = FileReplayStore::open(&root).unwrap(); let record = record(); store.create(&record).unwrap(); fs::write(store.path(&record.nonce), b"not json").unwrap(); assert_eq!(store.get(&record.nonce), Err(ReplayError::Unavailable)); let _ = fs::remove_dir_all(root);
+    }
 }
