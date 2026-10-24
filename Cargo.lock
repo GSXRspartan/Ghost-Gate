@@ -2948,8 +2948,10 @@ name = "ghost-gate-ggbp1-spike"
 version = "0.1.0"
 dependencies = [
  "rand 0.10.3",
+ "sha2 0.10.9",
  "tari_crypto",
  "tari_script",
+ "tari_utilities",
  "thiserror 2.0.21",
 ]
 

@@ -5,6 +5,7 @@
 //! a deterministic fixture shape for the standard `PushPubKey` Tari script only; it is not a
 //! `TransactionOutput` and cannot establish that a real UTXO is confirmed or unspent.
 
+use sha2::{Digest, Sha256};
 use tari_crypto::{
     commitment::{ExtensionDegree, HomomorphicCommitmentFactory},
     compressed_key::CompressedKey,
@@ -23,6 +24,7 @@ use tari_crypto::{
     },
 };
 use tari_script::{TariScript, push_pubkey_script};
+use tari_utilities::ByteArray;
 use thiserror::Error;
 
 // This is deliberately distinct from the native Tari `CheckSigHashDomain` used for scripts.
@@ -35,8 +37,21 @@ hash_domain!(
 /// GGBP-1 uses Tari's Ristretto Schnorr implementation with a proof-only domain.
 pub type Ggbp1AuthoritySignature = RistrettoSchnorrWithDomain<Ggbp1BalanceProofDomain>;
 
+// A subject must authenticate its binding separately from each output authority. This is not a Tari
+// transaction or script-signing domain.
+hash_domain!(
+    Ggbp1SubjectBindingDomain,
+    "com.ghost-gate.ggbp1.subject_binding",
+    1
+);
+
+pub type Ggbp1SubjectSignature = RistrettoSchnorrWithDomain<Ggbp1SubjectBindingDomain>;
+
 pub const GGBP1_EXPERIMENTAL_VERSION: u8 = 1;
 pub const GGBP1_MAX_OUTPUTS: usize = 16;
+pub const GGBP1_MAX_PROOF_BYTES: usize = 8 * 1024;
+pub const GGBP1_STANDARD_SCRIPT_BYTES: usize = 33;
+const GGBP1_WIRE_MAGIC: &[u8; 6] = b"GGBP1R";
 
 /// Fixed-width, canonical challenge fields for the experimental fixture format.
 ///
@@ -47,33 +62,70 @@ pub struct Ggbp1Challenge {
     pub genesis_hash: [u8; 32],
     pub origin_hash: [u8; 32],
     pub gate_id: [u8; 16],
+    pub gate_configuration_version: u64,
     pub subject_id: [u8; 16],
+    pub subject_authentication_public_key: RistrettoPublicKey,
     pub threshold_micro_xtm: u64,
     pub nonce: [u8; 32],
     pub expires_at_unix_seconds: u64,
+    /// A hash of the concrete generators selected by Tari's default commitment factory.
+    pub commitment_generator_fingerprint: [u8; 32],
 }
 
 impl Ggbp1Challenge {
-    fn canonical_message(&self, output_hashes: &[[u8; 32]]) -> Result<Vec<u8>, Ggbp1Error> {
+    pub fn canonical_message(&self, output_hashes: &[[u8; 32]]) -> Result<Vec<u8>, Ggbp1Error> {
         validate_output_hashes(output_hashes)?;
 
-        let mut message =
-            Vec::with_capacity(1 + 32 + 32 + 16 + 16 + 8 + 32 + 8 + 1 + output_hashes.len() * 32);
+        let mut message = Vec::with_capacity(
+            1 + 32 + 32 + 16 + 8 + 16 + 32 + 8 + 32 + 8 + 32 + 1 + output_hashes.len() * 32,
+        );
         message.extend_from_slice(b"GGBP1");
         message.push(GGBP1_EXPERIMENTAL_VERSION);
         message.push(self.network);
         message.extend_from_slice(&self.genesis_hash);
         message.extend_from_slice(&self.origin_hash);
         message.extend_from_slice(&self.gate_id);
+        message.extend_from_slice(&self.gate_configuration_version.to_le_bytes());
         message.extend_from_slice(&self.subject_id);
+        message.extend_from_slice(self.subject_authentication_public_key.as_bytes());
         message.extend_from_slice(&self.threshold_micro_xtm.to_le_bytes());
         message.extend_from_slice(&self.nonce);
         message.extend_from_slice(&self.expires_at_unix_seconds.to_le_bytes());
+        message.extend_from_slice(&self.commitment_generator_fingerprint);
         message.push(output_hashes.len() as u8);
         for output_hash in output_hashes {
             message.extend_from_slice(output_hash);
         }
         Ok(message)
+    }
+}
+
+/// Computes a compatibility value from the actual default Tari Pedersen generators. A response
+/// carrying a different value is rejected before any commitment arithmetic is trusted.
+pub fn expected_commitment_generator_fingerprint() -> [u8; 32] {
+    let factory = ExtendedPedersenCommitmentFactory::default();
+    let masking_generator = factory.commit_value(&RistrettoSecretKey::from(1u64), 0);
+    let value_generator = factory.commit_value(&RistrettoSecretKey::default(), 1);
+    let mut hasher = Sha256::new();
+    hasher.update(b"GGBP1 tari default extended Pedersen generators v1");
+    hasher.update(masking_generator.as_bytes());
+    hasher.update(value_generator.as_bytes());
+    hasher.finalize().into()
+}
+
+/// A synthetic-only authenticated subject. Its secret never appears in a proof response.
+#[derive(Clone)]
+pub struct SyntheticSubjectWitness {
+    secret_key: RistrettoSecretKey,
+}
+
+impl SyntheticSubjectWitness {
+    pub fn new(secret_key: RistrettoSecretKey) -> Self {
+        Self { secret_key }
+    }
+
+    pub fn public_key(&self) -> RistrettoPublicKey {
+        RistrettoPublicKey::from_secret_key(&self.secret_key)
     }
 }
 
@@ -128,6 +180,7 @@ impl SyntheticOutputWitness {
 pub struct Ggbp1Proof {
     pub outputs: Vec<SyntheticStandardOutput>,
     pub authority_signatures: Vec<Ggbp1AuthoritySignature>,
+    pub subject_signature: Ggbp1SubjectSignature,
     pub aggregate_commitment: PedersenCommitment,
     pub aggregate_minimum_proof: Vec<u8>,
 }
@@ -148,10 +201,20 @@ pub enum Ggbp1Error {
     UnsupportedScript,
     #[error("authority signature count does not match the output count")]
     SignatureCount,
+    #[error("the commitment-generator fingerprint is not supported by this Tari build")]
+    CommitmentGeneratorMismatch,
     #[error("a proof signature does not establish authority for its standard script key")]
     InvalidAuthoritySignature,
+    #[error("the subject signature does not authenticate the challenge binding")]
+    InvalidSubjectSignature,
     #[error("proof aggregate commitment does not equal the sum of public commitments")]
     AggregateCommitmentMismatch,
+    #[error("proof material exceeds its bounded experimental encoding")]
+    ProofTooLarge,
+    #[error("unsupported GGBP-1 proof encoding version")]
+    UnsupportedWireVersion,
+    #[error("proof material is not a canonical GGBP-1 response")]
+    MalformedWire,
     #[error("Bulletproofs+ minimum proof rejected: {0}")]
     InvalidMinimumProof(String),
 }
@@ -159,9 +222,14 @@ pub enum Ggbp1Error {
 /// Produces a synthetic, non-transactional proof from local test witnesses.
 pub fn prove_synthetic<R: rand::Rng + rand::CryptoRng>(
     challenge: &Ggbp1Challenge,
+    subject: &SyntheticSubjectWitness,
     outputs: &[SyntheticOutputWitness],
     rng: &mut R,
 ) -> Result<Ggbp1Proof, Ggbp1Error> {
+    check_generator_compatibility(challenge)?;
+    if subject.public_key() != challenge.subject_authentication_public_key {
+        return Err(Ggbp1Error::InvalidSubjectSignature);
+    }
     let output_hashes = outputs
         .iter()
         .map(|output| output.public.output_hash)
@@ -207,10 +275,15 @@ pub fn prove_synthetic<R: rand::Rng + rand::CryptoRng>(
     let aggregate_minimum_proof = range_proof_service
         .construct_extended_proof(vec![witness], None)
         .map_err(|error| Ggbp1Error::InvalidMinimumProof(error.to_string()))?;
+    if aggregate_minimum_proof.len() > GGBP1_MAX_PROOF_BYTES {
+        return Err(Ggbp1Error::ProofTooLarge);
+    }
 
     Ok(Ggbp1Proof {
         outputs: outputs.iter().map(|output| output.public.clone()).collect(),
         authority_signatures,
+        subject_signature: Ggbp1SubjectSignature::sign(&subject.secret_key, &message, rng)
+            .expect("Ristretto Schnorr signing with a synthetic key is infallible"),
         aggregate_commitment,
         aggregate_minimum_proof,
     })
@@ -218,6 +291,7 @@ pub fn prove_synthetic<R: rand::Rng + rand::CryptoRng>(
 
 /// Independent public verifier for the synthetic fixture format.
 pub fn verify_synthetic(challenge: &Ggbp1Challenge, proof: &Ggbp1Proof) -> Result<(), Ggbp1Error> {
+    check_generator_compatibility(challenge)?;
     let output_hashes = proof
         .outputs
         .iter()
@@ -226,6 +300,9 @@ pub fn verify_synthetic(challenge: &Ggbp1Challenge, proof: &Ggbp1Proof) -> Resul
     let message = challenge.canonical_message(&output_hashes)?;
     if proof.authority_signatures.len() != proof.outputs.len() {
         return Err(Ggbp1Error::SignatureCount);
+    }
+    if proof.aggregate_minimum_proof.len() > GGBP1_MAX_PROOF_BYTES {
+        return Err(Ggbp1Error::ProofTooLarge);
     }
 
     let commitment_factory = ExtendedPedersenCommitmentFactory::default();
@@ -236,6 +313,12 @@ pub fn verify_synthetic(challenge: &Ggbp1Challenge, proof: &Ggbp1Proof) -> Resul
             return Err(Ggbp1Error::InvalidAuthoritySignature);
         }
         aggregate_commitment = &aggregate_commitment + &output.commitment;
+    }
+    if !proof
+        .subject_signature
+        .verify(&challenge.subject_authentication_public_key, &message)
+    {
+        return Err(Ggbp1Error::InvalidSubjectSignature);
     }
     if aggregate_commitment != proof.aggregate_commitment {
         return Err(Ggbp1Error::AggregateCommitmentMismatch);
@@ -251,6 +334,13 @@ pub fn verify_synthetic(challenge: &Ggbp1Challenge, proof: &Ggbp1Proof) -> Resul
     range_proof_service
         .verify_batch(vec![&proof.aggregate_minimum_proof], vec![&statement])
         .map_err(|error| Ggbp1Error::InvalidMinimumProof(error.to_string()))
+}
+
+fn check_generator_compatibility(challenge: &Ggbp1Challenge) -> Result<(), Ggbp1Error> {
+    if challenge.commitment_generator_fingerprint != expected_commitment_generator_fingerprint() {
+        return Err(Ggbp1Error::CommitmentGeneratorMismatch);
+    }
+    Ok(())
 }
 
 fn validate_output_hashes(output_hashes: &[[u8; 32]]) -> Result<(), Ggbp1Error> {
@@ -276,6 +366,289 @@ fn check_standard_script(output: &SyntheticStandardOutput) -> Result<(), Ggbp1Er
     Ok(())
 }
 
+/// The versioned, bounded public response encoding. It includes every challenge field so that a
+/// receiving server can compare it to its server-held challenge before it verifies crypto.
+#[derive(Clone, Debug)]
+pub struct Ggbp1WireProof {
+    pub challenge: Ggbp1Challenge,
+    pub proof: Ggbp1Proof,
+}
+
+impl Ggbp1WireProof {
+    /// Serializes exactly one canonical proof response. The fixed-size supported script encoding
+    /// prevents alternative script encodings or attacker-selected length fields.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, Ggbp1Error> {
+        check_generator_compatibility(&self.challenge)?;
+        let output_hashes = self
+            .proof
+            .outputs
+            .iter()
+            .map(|output| output.output_hash)
+            .collect::<Vec<_>>();
+        validate_output_hashes(&output_hashes)?;
+        if self.proof.authority_signatures.len() != self.proof.outputs.len() {
+            return Err(Ggbp1Error::SignatureCount);
+        }
+        if self.proof.aggregate_minimum_proof.len() > GGBP1_MAX_PROOF_BYTES {
+            return Err(Ggbp1Error::ProofTooLarge);
+        }
+        let proof_len = u16::try_from(self.proof.aggregate_minimum_proof.len())
+            .map_err(|_| Ggbp1Error::ProofTooLarge)?;
+
+        let mut bytes = Vec::with_capacity(
+            6 + 1
+                + 1
+                + 32
+                + 32
+                + 32
+                + 16
+                + 8
+                + 16
+                + 32
+                + 8
+                + 32
+                + 8
+                + 32
+                + 1
+                + self.proof.outputs.len() * (32 + 32 + GGBP1_STANDARD_SCRIPT_BYTES + 32 + 64)
+                + 64
+                + 32
+                + 2
+                + self.proof.aggregate_minimum_proof.len(),
+        );
+        bytes.extend_from_slice(GGBP1_WIRE_MAGIC);
+        bytes.push(GGBP1_EXPERIMENTAL_VERSION);
+        append_challenge(&mut bytes, &self.challenge);
+        bytes.push(self.proof.outputs.len() as u8);
+
+        for (output, signature) in self
+            .proof
+            .outputs
+            .iter()
+            .zip(&self.proof.authority_signatures)
+        {
+            check_standard_script(output)?;
+            let script = output.script.to_bytes();
+            if script.len() != GGBP1_STANDARD_SCRIPT_BYTES {
+                return Err(Ggbp1Error::UnsupportedScript);
+            }
+            bytes.extend_from_slice(&output.output_hash);
+            bytes.extend_from_slice(output.commitment.as_bytes());
+            bytes.extend_from_slice(&script);
+            bytes.extend_from_slice(output.script_public_key.as_bytes());
+            append_authority_signature(&mut bytes, signature);
+        }
+        append_subject_signature(&mut bytes, &self.proof.subject_signature);
+        bytes.extend_from_slice(self.proof.aggregate_commitment.as_bytes());
+        bytes.extend_from_slice(&proof_len.to_le_bytes());
+        bytes.extend_from_slice(&self.proof.aggregate_minimum_proof);
+        Ok(bytes)
+    }
+
+    /// Parses only the canonical bounded response grammar. This performs no authorization; callers
+    /// must compare [`Self::challenge`] to their issued challenge and then call
+    /// [`verify_synthetic`].
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Ggbp1Error> {
+        if bytes.len() > maximum_wire_size() {
+            return Err(Ggbp1Error::ProofTooLarge);
+        }
+        let mut reader = WireReader::new(bytes);
+        if reader.take_array::<6>()? != *GGBP1_WIRE_MAGIC {
+            return Err(Ggbp1Error::MalformedWire);
+        }
+        if reader.byte()? != GGBP1_EXPERIMENTAL_VERSION {
+            return Err(Ggbp1Error::UnsupportedWireVersion);
+        }
+        let challenge = read_challenge(&mut reader)?;
+        let output_count = usize::from(reader.byte()?);
+        if output_count == 0 || output_count > GGBP1_MAX_OUTPUTS {
+            return Err(Ggbp1Error::MalformedWire);
+        }
+
+        let mut outputs = Vec::with_capacity(output_count);
+        let mut authority_signatures = Vec::with_capacity(output_count);
+        for _ in 0..output_count {
+            let output_hash = reader.take_array::<32>()?;
+            let commitment = PedersenCommitment::from_canonical_bytes(&reader.take_array::<32>()?)
+                .map_err(|_| Ggbp1Error::MalformedWire)?;
+            let script =
+                TariScript::from_bytes(&reader.take_array::<GGBP1_STANDARD_SCRIPT_BYTES>()?)
+                    .map_err(|_| Ggbp1Error::MalformedWire)?;
+            let script_public_key =
+                RistrettoPublicKey::from_canonical_bytes(&reader.take_array::<32>()?)
+                    .map_err(|_| Ggbp1Error::MalformedWire)?;
+            authority_signatures.push(read_authority_signature(&mut reader)?);
+            outputs.push(SyntheticStandardOutput {
+                output_hash,
+                commitment,
+                script,
+                script_public_key,
+            });
+        }
+        let subject_signature = read_subject_signature(&mut reader)?;
+        let aggregate_commitment =
+            PedersenCommitment::from_canonical_bytes(&reader.take_array::<32>()?)
+                .map_err(|_| Ggbp1Error::MalformedWire)?;
+        let proof_len = usize::from(u16::from_le_bytes(reader.take_array::<2>()?));
+        if proof_len > GGBP1_MAX_PROOF_BYTES || reader.remaining() != proof_len {
+            return Err(Ggbp1Error::MalformedWire);
+        }
+        let aggregate_minimum_proof = reader.take(proof_len)?.to_vec();
+        if reader.remaining() != 0 {
+            return Err(Ggbp1Error::MalformedWire);
+        }
+
+        let output_hashes = outputs
+            .iter()
+            .map(|output| output.output_hash)
+            .collect::<Vec<_>>();
+        validate_output_hashes(&output_hashes)?;
+        Ok(Self {
+            challenge,
+            proof: Ggbp1Proof {
+                outputs,
+                authority_signatures,
+                subject_signature,
+                aggregate_commitment,
+                aggregate_minimum_proof,
+            },
+        })
+    }
+}
+
+fn maximum_wire_size() -> usize {
+    6 + 1
+        + 1
+        + 32
+        + 32
+        + 32
+        + 16
+        + 8
+        + 16
+        + 32
+        + 8
+        + 32
+        + 8
+        + 32
+        + 1
+        + GGBP1_MAX_OUTPUTS * (32 + 32 + GGBP1_STANDARD_SCRIPT_BYTES + 32 + 64)
+        + 64
+        + 32
+        + 2
+        + GGBP1_MAX_PROOF_BYTES
+}
+
+fn append_challenge(bytes: &mut Vec<u8>, challenge: &Ggbp1Challenge) {
+    bytes.push(challenge.network);
+    bytes.extend_from_slice(&challenge.genesis_hash);
+    bytes.extend_from_slice(&challenge.origin_hash);
+    bytes.extend_from_slice(&challenge.gate_id);
+    bytes.extend_from_slice(&challenge.gate_configuration_version.to_le_bytes());
+    bytes.extend_from_slice(&challenge.subject_id);
+    bytes.extend_from_slice(challenge.subject_authentication_public_key.as_bytes());
+    bytes.extend_from_slice(&challenge.threshold_micro_xtm.to_le_bytes());
+    bytes.extend_from_slice(&challenge.nonce);
+    bytes.extend_from_slice(&challenge.expires_at_unix_seconds.to_le_bytes());
+    bytes.extend_from_slice(&challenge.commitment_generator_fingerprint);
+}
+
+fn read_challenge(reader: &mut WireReader<'_>) -> Result<Ggbp1Challenge, Ggbp1Error> {
+    let network = reader.byte()?;
+    let genesis_hash = reader.take_array::<32>()?;
+    let origin_hash = reader.take_array::<32>()?;
+    let gate_id = reader.take_array::<16>()?;
+    let gate_configuration_version = u64::from_le_bytes(reader.take_array::<8>()?);
+    let subject_id = reader.take_array::<16>()?;
+    let subject_authentication_public_key =
+        RistrettoPublicKey::from_canonical_bytes(&reader.take_array::<32>()?)
+            .map_err(|_| Ggbp1Error::MalformedWire)?;
+    let threshold_micro_xtm = u64::from_le_bytes(reader.take_array::<8>()?);
+    let nonce = reader.take_array::<32>()?;
+    let expires_at_unix_seconds = u64::from_le_bytes(reader.take_array::<8>()?);
+    let commitment_generator_fingerprint = reader.take_array::<32>()?;
+    Ok(Ggbp1Challenge {
+        network,
+        genesis_hash,
+        origin_hash,
+        gate_id,
+        gate_configuration_version,
+        subject_id,
+        subject_authentication_public_key,
+        threshold_micro_xtm,
+        nonce,
+        expires_at_unix_seconds,
+        commitment_generator_fingerprint,
+    })
+}
+
+fn append_authority_signature(bytes: &mut Vec<u8>, signature: &Ggbp1AuthoritySignature) {
+    bytes.extend_from_slice(signature.get_public_nonce().as_bytes());
+    bytes.extend_from_slice(signature.get_signature().as_bytes());
+}
+
+fn append_subject_signature(bytes: &mut Vec<u8>, signature: &Ggbp1SubjectSignature) {
+    bytes.extend_from_slice(signature.get_public_nonce().as_bytes());
+    bytes.extend_from_slice(signature.get_signature().as_bytes());
+}
+
+fn read_authority_signature(
+    reader: &mut WireReader<'_>,
+) -> Result<Ggbp1AuthoritySignature, Ggbp1Error> {
+    let nonce = RistrettoPublicKey::from_canonical_bytes(&reader.take_array::<32>()?)
+        .map_err(|_| Ggbp1Error::MalformedWire)?;
+    let scalar = RistrettoSecretKey::from_canonical_bytes(&reader.take_array::<32>()?)
+        .map_err(|_| Ggbp1Error::MalformedWire)?;
+    Ok(Ggbp1AuthoritySignature::new(nonce, scalar))
+}
+
+fn read_subject_signature(
+    reader: &mut WireReader<'_>,
+) -> Result<Ggbp1SubjectSignature, Ggbp1Error> {
+    let nonce = RistrettoPublicKey::from_canonical_bytes(&reader.take_array::<32>()?)
+        .map_err(|_| Ggbp1Error::MalformedWire)?;
+    let scalar = RistrettoSecretKey::from_canonical_bytes(&reader.take_array::<32>()?)
+        .map_err(|_| Ggbp1Error::MalformedWire)?;
+    Ok(Ggbp1SubjectSignature::new(nonce, scalar))
+}
+
+struct WireReader<'a> {
+    bytes: &'a [u8],
+    cursor: usize,
+}
+
+impl<'a> WireReader<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, cursor: 0 }
+    }
+
+    fn remaining(&self) -> usize {
+        self.bytes.len().saturating_sub(self.cursor)
+    }
+
+    fn byte(&mut self) -> Result<u8, Ggbp1Error> {
+        Ok(self.take_array::<1>()?[0])
+    }
+
+    fn take(&mut self, len: usize) -> Result<&'a [u8], Ggbp1Error> {
+        let end = self
+            .cursor
+            .checked_add(len)
+            .ok_or(Ggbp1Error::MalformedWire)?;
+        let value = self
+            .bytes
+            .get(self.cursor..end)
+            .ok_or(Ggbp1Error::MalformedWire)?;
+        self.cursor = end;
+        Ok(value)
+    }
+
+    fn take_array<const N: usize>(&mut self) -> Result<[u8; N], Ggbp1Error> {
+        let mut value = [0u8; N];
+        value.copy_from_slice(self.take(N)?);
+        Ok(value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rand::{SeedableRng, rngs::StdRng};
@@ -287,16 +660,23 @@ mod tests {
         RistrettoSecretKey::from(n)
     }
 
+    fn subject() -> SyntheticSubjectWitness {
+        SyntheticSubjectWitness::new(key(31))
+    }
+
     fn challenge(threshold_micro_xtm: u64) -> Ggbp1Challenge {
         Ggbp1Challenge {
             network: 42,
             genesis_hash: [1; 32],
             origin_hash: [2; 32],
             gate_id: [3; 16],
+            gate_configuration_version: 7,
             subject_id: [4; 16],
+            subject_authentication_public_key: subject().public_key(),
             threshold_micro_xtm,
             nonce: [5; 32],
             expires_at_unix_seconds: 1_800_000_000,
+            commitment_generator_fingerprint: expected_commitment_generator_fingerprint(),
         }
     }
 
@@ -309,17 +689,18 @@ mod tests {
         let below = output(1, 99, 11, 21);
         let equal = output(1, 100, 12, 22);
         let above = output(1, 101, 13, 23);
+        let subject = subject();
         let mut rng = StdRng::from_seed([7; 32]);
 
         assert_eq!(
-            prove_synthetic(&challenge(100), &[below], &mut rng).unwrap_err(),
+            prove_synthetic(&challenge(100), &subject, &[below], &mut rng).unwrap_err(),
             Ggbp1Error::BelowThreshold
         );
 
-        let equal_proof = prove_synthetic(&challenge(100), &[equal], &mut rng).unwrap();
+        let equal_proof = prove_synthetic(&challenge(100), &subject, &[equal], &mut rng).unwrap();
         verify_synthetic(&challenge(100), &equal_proof).unwrap();
 
-        let above_proof = prove_synthetic(&challenge(100), &[above], &mut rng).unwrap();
+        let above_proof = prove_synthetic(&challenge(100), &subject, &[above], &mut rng).unwrap();
         verify_synthetic(&challenge(100), &above_proof).unwrap();
     }
 
@@ -328,8 +709,9 @@ mod tests {
         let first = output(1, 45, 11, 21);
         let second = output(2, 55, 12, 22);
         let witnesses = [first, second];
+        let subject = subject();
         let mut rng = StdRng::from_seed([8; 32]);
-        let proof = prove_synthetic(&challenge(100), &witnesses, &mut rng).unwrap();
+        let proof = prove_synthetic(&challenge(100), &subject, &witnesses, &mut rng).unwrap();
 
         verify_synthetic(&challenge(100), &proof).unwrap();
         assert_eq!(
@@ -356,6 +738,9 @@ mod tests {
             )
             .unwrap(),
         ];
+        threshold_substitution.subject_signature =
+            Ggbp1SubjectSignature::sign(&subject.secret_key, &substituted_message, &mut rng)
+                .unwrap();
         assert!(matches!(
             verify_synthetic(&substituted_challenge, &threshold_substitution),
             Err(Ggbp1Error::InvalidMinimumProof(_))
@@ -366,14 +751,15 @@ mod tests {
     fn verifier_rejects_tampering_and_noncanonical_inputs() {
         let first = output(1, 45, 11, 21);
         let second = output(2, 55, 12, 22);
+        let subject = subject();
         let mut rng = StdRng::from_seed([9; 32]);
         let challenge = challenge(100);
-        let proof = prove_synthetic(&challenge, &[first, second], &mut rng).unwrap();
+        let proof = prove_synthetic(&challenge, &subject, &[first, second], &mut rng).unwrap();
 
         let mut invalid_opening = output(1, 100, 11, 21);
         invalid_opening.mask = key(98);
         assert_eq!(
-            prove_synthetic(&challenge, &[invalid_opening], &mut rng).unwrap_err(),
+            prove_synthetic(&challenge, &subject, &[invalid_opening], &mut rng).unwrap_err(),
             Ggbp1Error::AggregateCommitmentMismatch
         );
 
@@ -420,9 +806,10 @@ mod tests {
     fn overflow_and_cross_domain_signature_use_are_rejected() {
         let largest = output(1, u64::MAX, 11, 21);
         let one = output(2, 1, 12, 22);
+        let subject = subject();
         let mut rng = StdRng::from_seed([10; 32]);
         assert_eq!(
-            prove_synthetic(&challenge(1), &[largest, one], &mut rng).unwrap_err(),
+            prove_synthetic(&challenge(1), &subject, &[largest, one], &mut rng).unwrap_err(),
             Ggbp1Error::AggregateOverflow
         );
 
@@ -436,5 +823,65 @@ mod tests {
         );
         assert!(proof_signature.verify(&public, message));
         assert!(!script_signature.verify(&public, message));
+    }
+
+    #[test]
+    fn canonical_wire_response_round_trips_without_witness_material() {
+        let subject = subject();
+        let challenge = challenge(100);
+        let mut rng = StdRng::from_seed([11; 32]);
+        let proof = prove_synthetic(
+            &challenge,
+            &subject,
+            &[output(1, 45, 11, 21), output(2, 55, 12, 22)],
+            &mut rng,
+        )
+        .unwrap();
+
+        let encoded = Ggbp1WireProof {
+            challenge: challenge.clone(),
+            proof,
+        }
+        .to_bytes()
+        .unwrap();
+        let decoded = Ggbp1WireProof::from_bytes(&encoded).unwrap();
+        assert_eq!(decoded.challenge, challenge);
+        verify_synthetic(&decoded.challenge, &decoded.proof).unwrap();
+
+        let mut trailing_byte = encoded;
+        trailing_byte.push(0);
+        assert_eq!(
+            Ggbp1WireProof::from_bytes(&trailing_byte).unwrap_err(),
+            Ggbp1Error::MalformedWire
+        );
+    }
+
+    #[test]
+    fn generator_and_subject_binding_are_not_client_selectable() {
+        let subject = subject();
+        let mut invalid_generator = challenge(100);
+        invalid_generator.commitment_generator_fingerprint = [0; 32];
+        let mut rng = StdRng::from_seed([12; 32]);
+        assert_eq!(
+            prove_synthetic(
+                &invalid_generator,
+                &subject,
+                &[output(1, 100, 11, 21)],
+                &mut rng
+            )
+            .unwrap_err(),
+            Ggbp1Error::CommitmentGeneratorMismatch
+        );
+
+        let challenge = challenge(100);
+        let mut proof =
+            prove_synthetic(&challenge, &subject, &[output(1, 100, 11, 21)], &mut rng).unwrap();
+        let message = challenge.canonical_message(&[[1; 32]]).unwrap();
+        proof.subject_signature =
+            Ggbp1SubjectSignature::sign(&key(99), &message, &mut rng).unwrap();
+        assert_eq!(
+            verify_synthetic(&challenge, &proof).unwrap_err(),
+            Ggbp1Error::InvalidSubjectSignature
+        );
     }
 }

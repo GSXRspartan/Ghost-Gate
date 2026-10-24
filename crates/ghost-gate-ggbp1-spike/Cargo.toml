@@ -13,6 +13,8 @@ tari_crypto = "0.23.4"
 tari_script = "6.0.1-pre.2"
 thiserror.workspace = true
 rand.workspace = true
+sha2.workspace = true
+tari_utilities.workspace = true
 
 [lib]
 path = "src/lib.rs"
