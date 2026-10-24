@@ -79,9 +79,13 @@ const MAX_PENDING_TOKENS: usize = 512;
 const POLL_INTERVAL: u64 = 3; // seconds between getUpdates calls
 const MAX_ANSWERED_SEEN: usize = 1024;
 const TELEGRAM_HTTP_TIMEOUT: Duration = Duration::from_secs(15);
-/// A failed unban must not turn expiry into an uncontrolled permanent ban. Telegram accepts a
-/// temporary ban longer than thirty seconds, then removes it automatically.
-const TEMPORARY_REMOVAL_SECS: u64 = 60;
+/// Telegram interprets an expiry less than 30 seconds away as permanent. Ten minutes leaves a
+/// deliberately large margin for clock skew and request latency, while bounding the worst case
+/// if the process crashes before it can explicitly unban the member.
+const TEMPORARY_REMOVAL_SECS: u64 = 600;
+/// Recovery is bounded: when a ban/unban request has an ambiguous outcome we retain the user and
+/// retry `unbanChatMember`; never discard that recovery work just to accept unbounded input.
+const MAX_PENDING_UNBANS: usize = 512;
 
 /// The gate a receipt names, as the bridge's `CredentialReceipt` serialises it.
 #[derive(Debug, Clone, Deserialize)]
@@ -316,6 +320,19 @@ impl TelegramBot {
             .await?;
         validate_private_supergroup(chat, &configured, &membership)
     }
+
+    /// Read the final Telegram-side member state after an operator-controlled test. This is
+    /// intentionally diagnostic-only: API success from approve/ban is not itself evidence that
+    /// Telegram has applied the membership transition.
+    async fn diagnose_member_status(&self, chat: i64, user: i64) -> Result<String, String> {
+        let membership = self
+            .call("getChatMember", &json!({ "chat_id": chat, "user_id": user }))
+            .await?;
+        membership["status"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or("telegram getChatMember returned no status".into())
+    }
 }
 
 fn validate_private_supergroup(
@@ -477,6 +494,9 @@ pub struct Bot<T: TelegramApi, B: BridgeClient> {
     fixture_authorization: bool,
     tokens: HashMap<String, JoinToken>,
     grants: HashMap<i64, Grant>,
+    /// A `banChatMember` request may have succeeded even when its response was lost. Keep a
+    /// bounded explicit-unban recovery queue rather than risking a permanent exclusion.
+    pending_unbans: std::collections::BTreeSet<i64>,
     /// IDs already acted on, so a replayed update (Telegram resends on offset races) cannot mint a
     /// second grant.
     seen_updates: std::collections::BTreeSet<u64>,
@@ -494,6 +514,7 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
             fixture_authorization: false,
             tokens: HashMap::new(),
             grants: HashMap::new(),
+            pending_unbans: std::collections::BTreeSet::new(),
             seen_updates: std::collections::BTreeSet::new(),
         }
     }
@@ -635,6 +656,7 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
             .as_ref()
             .map(|grant| grant.expires_unix)
             .unwrap_or_else(|| now_unix() + self.access_ttl.as_secs());
+        let is_fixture_grant = self.fixture_authorization && server.is_none();
         // Join-request invites cannot use Telegram's member_limit. The bot approves the request
         // only for the Telegram identity bound to this grant, so a forwarded invite cannot admit
         // another account.
@@ -646,23 +668,50 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
             user,
             Grant { expires, server },
         );
-        self.telegram
-            .send_message(
-                user,
-                &format!(
-                    "Verified: the network attested at least the threshold, and I never learned a balance. Doors open for {} minute(s). I'll ask for a fresh proof when it lapses.",
-                    minutes
-                ),
+        let message = if is_fixture_grant {
+            format!(
+                "TEST ONLY: a local fixture authorized this test-group request for {} minute(s). No consensus-verified production access was granted.",
+                minutes
             )
+        } else {
+            format!(
+                "Verified: the network attested at least the threshold, and I never learned a balance. Doors open for {} minute(s). I'll ask for a fresh proof when it lapses.",
+                minutes
+            )
+        };
+        self.telegram
+            .send_message(user, &message)
             .await
             .ok();
         Ok(link)
+    }
+
+    async fn retry_pending_unbans(&mut self) {
+        let pending = self.pending_unbans.iter().copied().collect::<Vec<_>>();
+        for user in pending {
+            if self.telegram.unban_member(self.chat, user).await.is_ok() {
+                self.pending_unbans.remove(&user);
+            }
+        }
+    }
+
+    async fn remove_member(&mut self, user: i64) {
+        // `kick_member` is ban-then-unban. An error is ambiguous: its ban may have reached
+        // Telegram while the response or follow-up unban did not. Queue recovery even for an
+        // apparent ban failure; `only_if_banned` makes the extra unban harmless.
+        if self.telegram.kick_member(self.chat, user).await.is_err() {
+            if self.pending_unbans.contains(&user) || self.pending_unbans.len() < MAX_PENDING_UNBANS {
+                self.pending_unbans.insert(user);
+                self.retry_pending_unbans().await;
+            }
+        }
     }
 
     /// The re-verification ticker: revoke expired grants, tell the user how to rejoin.
     ///
     /// Runs in one place (the caller's loop) so no two ticks can race the same user's revocation.
     pub async fn tick(&mut self) {
+        self.retry_pending_unbans().await;
         let now = Instant::now();
         // Tokens whose TTL passed — used or not — are state nobody can act on any more.
         self.tokens.retain(|_, t| t.expires > now);
@@ -685,8 +734,10 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
         }
         for user in expired {
             let grant = self.grants.remove(&user).expect("just filtered");
-            // Kick (ban+unban) so the seat frees and re-joining is possible after re-verification.
-            self.telegram.kick_member(self.chat, user).await.ok();
+            // Kick (temporary ban + explicit unban) so the seat frees and re-joining remains
+            // possible after re-verification. Ambiguous failures enter durable-in-process
+            // unban recovery; the temporary ban is itself bounded to ten minutes.
+            self.remove_member(user).await;
             self.telegram
                 .send_message(
                     user,
@@ -796,6 +847,14 @@ async fn run() -> i32 {
     // Fixture mode, for LOCAL lifecycle testing without Telegram. It is explicitly labelled in
     // every log line; a fixture grant is never a real membership.
     let fixture = std::env::var("GG_TG_FIXTURE").ok().as_deref() == Some("1");
+    // This is deliberately distinct from the local no-Telegram fixture. It permits a controlled
+    // Bot API exercise only for an operator-configured private test supergroup; it cannot create
+    // a production authorization because it uses FixtureBridge and carries `test_only` results.
+    let real_test_mode = std::env::var("GG_TG_TEST_MODE").ok().as_deref() == Some("1");
+    if fixture && real_test_mode {
+        eprintln!("ghost-gate-telegram: GG_TG_FIXTURE and GG_TG_TEST_MODE cannot be combined");
+        return 1;
+    }
     let token = match (fixture, std::env::var("GG_TG_BOT_TOKEN")) {
         (true, _) => String::new(),
         (false, Ok(t)) if !t.trim().is_empty() => t,
@@ -870,9 +929,45 @@ async fn run() -> i32 {
         eprintln!("ghost-gate-telegram: Telegram diagnostic failed: {error}");
         return 1;
     }
+    if let Some(test_member) = std::env::var("GG_TG_TEST_MEMBER_ID")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+    {
+        match telegram.diagnose_member_status(chat, test_member).await {
+            Ok(status) => eprintln!("ghost-gate-telegram: Telegram test-member state: {status}"),
+            Err(error) => {
+                eprintln!("ghost-gate-telegram: Telegram test-member diagnostic failed: {error}");
+                return 1;
+            }
+        }
+    }
     if std::env::var("GG_TG_DIAGNOSE").ok().as_deref() == Some("1") {
         eprintln!("ghost-gate-telegram: Telegram identity and private-supergroup permissions verified; diagnostic only");
         return 0;
+    }
+    if real_test_mode {
+        let test_chat = match std::env::var("GG_TG_TEST_CHAT_ID")
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok())
+        {
+            Some(value) if value == chat => value,
+            _ => {
+                eprintln!(
+                    "ghost-gate-telegram: test mode requires GG_TG_TEST_CHAT_ID to equal GG_TG_CHAT_ID; it can only operate on the explicitly configured private test group"
+                );
+                return 1;
+            }
+        };
+        eprintln!(
+            "ghost-gate-telegram: TEST MODE — real Telegram test group only; fixture authorization is not consensus-verified and can never grant production access"
+        );
+        let bot = Bot::new_fixture(
+            telegram,
+            FixtureBridge { gate: gate.clone(), access_authorized: None },
+            test_chat,
+            gate.clone(),
+        );
+        return serve(bot, &bridge_base, &format!("http://127.0.0.1:{claim_port}"), claim_port, &gate).await;
     }
     eprintln!(
         "ghost-gate-telegram: production admission is disabled: the Stage 5 consensus trust bootstrap is not independently authenticated"
@@ -1084,6 +1179,8 @@ mod tests {
         declined: Vec<(i64, i64)>,
         messages: Vec<(i64, String)>,
         next_link: String,
+        kick_ambiguous: bool,
+        unban_fails: bool,
     }
 
     impl FakeTelegram {
@@ -1096,6 +1193,8 @@ mod tests {
                 declined: Vec::new(),
                 messages: Vec::new(),
                 next_link: "https://t.me/joinchat/seat1".into(),
+                kick_ambiguous: false,
+                unban_fails: false,
             }
         }
     }
@@ -1127,12 +1226,19 @@ mod tests {
             // both effects so tests assert what actually happens to the member.
             let mut g = self.0.lock().unwrap();
             g.kicked.push(user);
+            if g.kick_ambiguous {
+                return Err("ambiguous Telegram ban result".into());
+            }
             g.unbanned.push(user);
             let _ = chat;
             Ok(())
         }
         async fn unban_member(&mut self, chat: i64, user: i64) -> Result<(), String> {
-            self.0.lock().unwrap().unbanned.push(user);
+            let mut g = self.0.lock().unwrap();
+            if g.unban_fails {
+                return Err("Telegram unban unavailable".into());
+            }
+            g.unbanned.push(user);
             let _ = chat;
             Ok(())
         }
@@ -1343,6 +1449,32 @@ mod tests {
             fake.messages.iter().any(|(u, m)| *u == 10 && m.contains("/join")),
             "the user is told how to re-verify"
         );
+    }
+
+    #[tokio::test]
+    async fn ambiguous_member_removal_retries_explicit_unban_without_a_permanent_ban() {
+        let bridge = FakeBridge { answers: HashMap::from([("proof-unban".to_string(), FakeBridge::accepted("crypt"))]), access: None };
+        let (mut bot, tg) = bot_owned(bridge);
+        bot.access_ttl = Duration::from_millis(1);
+        {
+            let mut fake = tg.lock().unwrap();
+            fake.kick_ambiguous = true;
+            fake.unban_fails = true;
+        }
+        let (token, _) = mint_join(&mut bot, 24).await;
+        bot.claim(&token, "proof-unban").await.expect("fixture grant");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        bot.tick().await;
+        assert_eq!(bot.grant_count(), 0, "logical authorization is revoked immediately");
+        assert!(bot.pending_unbans.contains(&24), "ambiguous ban gets explicit recovery");
+        {
+            let mut fake = tg.lock().unwrap();
+            fake.kick_ambiguous = false;
+            fake.unban_fails = false;
+        }
+        bot.tick().await;
+        assert!(!bot.pending_unbans.contains(&24), "a later unban clears recovery");
+        assert!(tg.lock().unwrap().unbanned.contains(&24));
     }
 
     #[tokio::test]
