@@ -178,6 +178,7 @@ impl SyntheticOutputWitness {
     /// Available only to the experimental wallet-core adapter while it selects synthetic
     /// fixtures. This is deliberately crate-private: proof callers never receive a value,
     /// mask, script key, seed, or a generic signing capability.
+    #[allow(dead_code)] // Used only by the feature-disabled wallet-core fixture contract.
     pub(crate) fn value_for_wallet_selection(&self) -> u64 {
         self.value_micro_xtm
     }
@@ -186,6 +187,21 @@ impl SyntheticOutputWitness {
     /// primitive to the adapter.
     pub(crate) fn is_supported_standard_output(&self) -> bool {
         check_standard_script(&self.public).is_ok()
+    }
+
+    /// Verifies that the wallet-held opening still matches the public commitment. The adapter uses
+    /// this only as an internal consistency check; it never receives the opening material.
+    pub(crate) fn opening_matches_public_commitment(&self) -> bool {
+        ExtendedPedersenCommitmentFactory::default().open_value(
+            &self.mask,
+            self.value_micro_xtm,
+            &self.public.commitment,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn corrupt_mask_for_fixture_test(&mut self, replacement: RistrettoSecretKey) {
+        self.mask = replacement;
     }
 }
 
@@ -771,13 +787,8 @@ mod tests {
 
         let mut encoded = Ggbp1WireProof {
             challenge: valid_challenge,
-            proof: prove_synthetic(
-                &challenge(1),
-                &subject,
-                &[output(1, 1, 11, 21)],
-                &mut rng,
-            )
-            .unwrap(),
+            proof: prove_synthetic(&challenge(1), &subject, &[output(1, 1, 11, 21)], &mut rng)
+                .unwrap(),
         }
         .to_bytes()
         .unwrap();

@@ -272,6 +272,8 @@ struct GrantRecord {
     challenge: Ggbp1Challenge,
     outputs: Vec<SyntheticStandardOutput>,
     verification: Ggbp1ExperimentalVerification,
+    /// A result being rechecked is deliberately not observable as current experimental evidence.
+    rechecking: bool,
 }
 
 #[derive(Default)]
@@ -433,6 +435,7 @@ impl<C: Ggbp1ChainView> Ggbp1ExperimentalServer<C> {
                 challenge: wire.challenge,
                 outputs: wire.proof.outputs,
                 verification: verification.clone(),
+                rechecking: false,
             },
         );
         let entry = state
@@ -447,34 +450,39 @@ impl<C: Ggbp1ChainView> Ggbp1ExperimentalServer<C> {
     /// changes the in-memory audit status to `Revoked`; it never changes a production grant.
     pub async fn recheck(&self, now_unix_seconds: u64) -> usize {
         let checks = {
-            let state = self.state.lock().await;
+            let mut state = self.state.lock().await;
             state
                 .grants
-                .iter()
-                .filter(|(_, grant)| {
-                    grant.verification.status
-                        == Ggbp1ExperimentalVerificationStatus::VerifiedNotAuthorized
+                .iter_mut()
+                .filter_map(|(nonce, grant)| {
+                    if grant.rechecking
+                        || grant.verification.status
+                            != Ggbp1ExperimentalVerificationStatus::VerifiedNotAuthorized
+                    {
+                        return None;
+                    }
+                    grant.rechecking = true;
+                    Some((*nonce, grant.challenge.clone(), grant.outputs.clone()))
                 })
-                .map(|(nonce, grant)| (*nonce, grant.challenge.clone(), grant.outputs.clone()))
                 .collect::<Vec<_>>()
         };
         let mut revoked = Vec::new();
-        for (nonce, challenge, outputs) in checks {
+        for (nonce, challenge, outputs) in &checks {
             if self
                 .checked_outputs(&challenge, &outputs, now_unix_seconds)
                 .await
                 .is_err()
             {
-                revoked.push(nonce);
+                revoked.push(*nonce);
             }
         }
-        if revoked.is_empty() {
-            return 0;
-        }
         let mut state = self.state.lock().await;
-        for nonce in &revoked {
+        for (nonce, _, _) in &checks {
             if let Some(grant) = state.grants.get_mut(nonce) {
-                grant.verification.status = Ggbp1ExperimentalVerificationStatus::Revoked;
+                grant.rechecking = false;
+                if revoked.contains(nonce) {
+                    grant.verification.status = Ggbp1ExperimentalVerificationStatus::Revoked;
+                }
             }
         }
         revoked.len()
@@ -486,7 +494,7 @@ impl<C: Ggbp1ChainView> Ggbp1ExperimentalServer<C> {
             .await
             .grants
             .get(&nonce)
-            .map(|grant| grant.verification.clone())
+            .and_then(|grant| (!grant.rechecking).then(|| grant.verification.clone()))
     }
 
     async fn restore_active(&self, nonce: [u8; 32]) {
@@ -582,7 +590,7 @@ impl<C: Ggbp1ChainView> Ggbp1ExperimentalServer<C> {
             return Err(Ggbp1ServerError::UnsupportedOutputFormat);
         }
         match observed.covenant_is_supported {
-            Some(true) => {},
+            Some(true) => {}
             Some(false) => return Err(Ggbp1ServerError::UnsupportedCovenant),
             None => return Err(Ggbp1ServerError::IncompleteOutputEvidence),
         }
@@ -782,6 +790,26 @@ mod tests {
             Ggbp1ServerError::ChallengeRedeemed.to_string()
         );
 
+        // A chain recheck fail-closes visibility instead of leaving a stale "verified" result
+        // observable while a revocation decision is pending.
+        server
+            .state
+            .lock()
+            .await
+            .grants
+            .get_mut(&challenge.nonce)
+            .unwrap()
+            .rechecking = true;
+        assert!(server.verification(challenge.nonce).await.is_none());
+        server
+            .state
+            .lock()
+            .await
+            .grants
+            .get_mut(&challenge.nonce)
+            .unwrap()
+            .rechecking = false;
+
         view.outputs
             .lock()
             .await
@@ -900,6 +928,16 @@ mod tests {
         assert!(matches!(
             server.submit_response(&response, now + 1).await,
             Err(Ggbp1ServerError::ContradictoryLockHeight)
+        ));
+
+        let mut output = view.outputs.lock().await;
+        let observed = output.get_mut(&[1; 32]).unwrap();
+        observed.effective_lock_height = Some(observed.maturity_height);
+        observed.confirmations = 10;
+        drop(output);
+        assert!(matches!(
+            server.submit_response(&response, now + 1).await,
+            Err(Ggbp1ServerError::ContradictoryConfirmations)
         ));
 
         view.snapshot.lock().await.as_mut().unwrap().is_synced = false;

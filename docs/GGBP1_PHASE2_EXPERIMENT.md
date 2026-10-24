@@ -13,16 +13,19 @@ wallet attachment, no Telegram integration, and no live Esmeralda claim.**
 - `crates/ghost-gate-minotari/src/ggbp1_experiment.rs` is an in-memory experimental verifier. A
   success has the explicit status `VerifiedNotAuthorized`; no type from this module can create a
   session, bridge grant, or Telegram grant.
-- `crates/ghost-gate-minotari/src/ggbp1_chain_view.rs` is a read-only adapter for an explicitly
-  operator-controlled Minotari base node. It is available only with `experimental-ggbp1`.
+- `crates/ghost-gate-minotari/src/ggbp1_chain_view.rs` is a read-only **diagnostic-only** adapter
+  for arbitrary base-node RPC endpoints. It is available only with `experimental-ggbp1` and
+  produces `UntrustedBaseNodeRpc`, which the verifier refuses as positive evidence.
 - `SyntheticWalletProver` is a synthetic-only wallet-owned API shape. It accepts a complete
   challenge and emits a bounded public response. It offers no raw signing, secret export,
   transaction creation, network call, or existing-wallet constructor.
-- `ggbp1_wallet_adapter.rs` is the next, still synthetic-only wallet-core boundary. It binds
-  network and genesis, filters deterministic confirmed/mature/unspent standard fixtures, obtains
-  explicit approval over the exact origin/gate/threshold/output references, and returns only the
-  same bounded public response. It is not connected to `OutputManagerHandle`, key-manager APIs,
-  wallet files, WASM, or any authorization surface.
+- `ggbp1_wallet_adapter.rs` is a synthetic-only wallet-core boundary. It canonicalizes an HTTPS
+  origin, checks the origin/network/genesis/subject/generator binding, atomically reserves only
+  eligible fixtures, and gives the wallet foreground path an opaque prepared request. An opaque
+  approval is tied to the exact request fingerprint and lease; callers cannot supply an approval
+  trait, raw signing callback, key, seed, mask, or value. Before generating the bounded response,
+  it revalidates fixture state and commitment openings. It is not connected to
+  `OutputManagerHandle`, key-manager APIs, wallet files, WASM, or any authorization surface.
 
 ## Protocol hardening
 
@@ -59,12 +62,21 @@ The pinned official source is `minotari_app_grpc-6.0.1-pre.2/proto/base_node.pro
   current UTXO set; absence after verified historical inclusion is treated as spent, not as an
   acceptable proof.
 
-The RPC has no portable MMR inclusion proof or authenticated third-party response envelope.
-Consequently this adapter is valid only as evidence from a trusted locally controlled, fully
-synced node. A public RPC endpoint is intentionally not an eligible `Ggbp1EvidenceSource`.
-Before and after output queries, the verifier checks an unchanged fresh tip; any change rejects
-the attempt. Later rechecks revoke the experiment's audit record if an output is spent or leaves
-the best chain.
+Every value returned by the current RPC adapter is an assertion by the node, not an authenticated
+proof: `GetTipInfo` supplies sync/tip metadata, `GetVersion` supplies network, `GetBlocks` supplies
+the asserted genesis/header, `SearchUtxos` supplies asserted inclusion/output fields, and
+`FetchMatchingUtxos` supplies asserted UTXO presence. The protocol supplies neither a transferable
+MMR inclusion proof nor a signed response binding those facts to an independent verifier. The
+adapter therefore emits only `UntrustedBaseNodeRpc`; a public endpoint and an arbitrary local
+endpoint are equally ineligible for a positive result.
+
+The live-policy shape requires `OperatorPinnedAuthenticatedBaseNode`, which the current adapter
+does not emit. A future connector must enforce an operator-configured TLS/mTLS identity or key
+pin before it exposes that source, and must independently provide parsed covenant support and the
+effective maximum of maturity and script lock height. Missing scripts, unsupported covenants,
+missing/contradictory lock evidence, stale tips, unsynced nodes, changed tips, and incomplete
+output evidence all fail closed. Synthetic fixtures are a distinct opt-in source usable only by
+the isolated tests.
 
 ## Experimental server state machine
 
@@ -74,6 +86,12 @@ then atomically changes the challenge from `Active` to `Redeeming`. Only the hol
 it can complete public proof and chain checks; concurrent attempts fail rather than creating two
 results. A successful response permanently registers every output hash against the challenge and
 records `VerifiedNotAuthorized`. A later recheck can only change that audit record to `Revoked`.
+While a record is being rechecked, the server returns no current verification for it; a chain-check
+error resolves to revocation rather than leaving stale experimental evidence observable.
+
+State remains deliberately in-memory. A future live experiment needs atomic durable
+challenge/output-use records, restart recovery, and immediate revalidation after recovery; it
+must fail closed until those records and current chain observations are available.
 
 Malformed responses, expiry, an origin/gate/configuration/subject mismatch, stale or unsynced
 chain evidence, changed output fields, insufficient confirmation, immaturity, unsupported output
@@ -133,7 +151,7 @@ the cryptographic or key-access operation separately.
 | --- | --- |
 | Synthetic Tari cryptography | Verified by the isolated harness. |
 | Synthetic ChainView/server lifecycle | Verified by an isolated fixture. |
-| Locally trusted base-node evidence | Adapter implemented; requires a separately run, controlled synced node. |
+| Authenticated/pinned base-node evidence | Not implemented; current RPC adapter is diagnostic-only and fail-closed. |
 | Genuine Esmeralda tXTM output | Not verified. No live node or wallet was contacted. |
 | Web Universe proof generation | Not ready; public surface lacks the required L1 wallet-core operation. |
 | Production authorization | Not implemented or reviewed. |

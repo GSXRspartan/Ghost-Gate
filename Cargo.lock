@@ -2948,6 +2948,7 @@ name = "ghost-gate-ggbp1-spike"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "hmac",
  "rand 0.10.3",
  "sha2 0.10.9",
  "tari_crypto",
@@ -2967,6 +2968,7 @@ dependencies = [
  "ghost-gate-bridge",
  "ghost-gate-core",
  "hex",
+ "hmac",
  "log",
  "minotari_app_grpc",
  "minotari_node",

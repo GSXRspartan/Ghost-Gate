@@ -8,17 +8,23 @@ contact a node, create a transaction, or expose an RPC/WASM/mobile API.**
 `crates/ghost-gate-minotari/src/ggbp1_wallet_adapter.rs` is a minimal, testable model of the
 required *wallet-internal* operation. It owns synthetic output witnesses and can only:
 
-1. bind a request to the configured network and genesis hash;
-2. deterministically select at most 16 synthetic `PushPubKey` outputs that are unspent,
-   confirmed, mature, and sufficiently confirmed;
-3. show a `Ggbp1WalletApprovalPrompt` containing the relying origin hash, gate/configuration,
-   subject, threshold, expiry, and public selected-output references;
-4. proceed only when a wallet-owned approval port returns `Approved`; and
-5. return the pre-existing bounded canonical GGBP-1 response.
+1. accept only a runtime-authenticated synthetic request whose strict canonical HTTPS origin,
+   network, genesis, generator, subject, threshold, and expiry are checked;
+2. atomically select and lease at most 16 eligible synthetic `PushPubKey` outputs, excluding
+   pending, encumbered, spent, invalid, immature, locked, unsupported-covenant, missing-script,
+   and commitment-opening-inconsistent fixtures;
+3. show a `Ggbp1WalletApprovalPrompt` containing canonical origin, network/genesis,
+   gate/configuration, subject identity, threshold, expiry, selected public output references,
+   and an exact request fingerprint;
+4. generate an opaque foreground approval bound to that exact lease—there is no caller-provided
+   approval trait, callback, signing handle, or Boolean; and
+5. revalidate state/openings before proof creation and return only the pre-existing bounded
+   canonical GGBP-1 response.
 
 The adapter cannot return values, masks, script/spending keys, seeds, view keys, generic
-signatures, or a transaction. It makes no claim about an actual Minotari output. Its passing test
-uses only in-memory synthetic fixtures and the independent Tari-primitive verifier.
+signatures, a reusable approval capability, or a transaction. It makes no claim about an actual
+Minotari output. Its passing tests use only in-memory synthetic fixtures and the independent
+Tari-primitive verifier.
 
 ## Pinned implementation findings
 
@@ -30,6 +36,7 @@ The review target is the exact dependency cohort in `Cargo.lock`:
 | `tari_transaction_components` | `6.0.1-pre.2` | `src/key_manager/interface.rs`, `key_manager/manager.rs` |
 | `tari_transaction_key_manager` | `6.0.1-pre.2` | `src/legacy_key_manager/inner.rs` |
 | `tari_crypto` | `0.23.4` | Extended Pedersen and Bulletproofs+ primitives used by the synthetic verifier |
+| `hmac` | `0.12.1` | Synthetic runtime-only opaque request/approval capability tags; not a relying-party protocol |
 
 The existing output manager already has the wallet-local information an internal operation needs:
 `OutputManagerHandle::get_unspent_outputs` returns `DbWalletOutput`; that record carries the
@@ -51,14 +58,18 @@ do not add a raw-signing method or key/mask getter. Names below are intentionall
 
 ```rust
 // Wallet-core/private module; not gRPC, FFI, WASM, or a public dApp trait.
+fn authenticate_ggbp1_request(
+    envelope: BoundedCanonicalRequestEnvelope,
+    relying_party: OperatorPinnedHttpsIdentity,
+) -> Result<AuthenticatedGgbp1Request, Ggbp1Error>;
+
 fn prepare_ggbp1_proof(
-    request: CanonicalGgbp1Request,
+    request: AuthenticatedGgbp1Request,
     current_tip: TrustedTip,
 ) -> Result<Ggbp1ApprovalPreview, Ggbp1Error>;
 
 fn approve_and_create_ggbp1_proof(
     prepared: PreparedGgbp1Proof,
-    user_approval: ForegroundWalletApproval,
 ) -> Result<CanonicalGgbp1Response, Ggbp1Error>;
 ```
 
@@ -69,13 +80,20 @@ status is unspent and unencumbered; maturity and confirmation policy are met; th
 mask verifies against its stored value and commitment; and the aggregate fits the specified
 scalar/value bounds. Selection must be deterministic and limited to the GGBP-1 response maximum.
 
-`approve_and_create` must be foreground-only and show the entire preview, including the relying
-origin, network/genesis, gate/configuration, threshold, expiry, output-reference disclosure, and
-the explicit fact that it sends no transaction. After approval it must recheck/atomically reserve
-the selected outputs, construct the dedicated-domain authority and subject signatures internally,
-sum the real commitment openings, construct the reviewed aggregate minimum proof, serialize the
-bounded canonical response, and release the reservation. It must return neither handles nor
-secret material.
+`prepare` must atomically compare-and-reserve selected records in a separate durable proof-lease
+registry. It must not hold an output-manager database transaction or wallet lock across the human
+approval interaction. The normal transaction path must consult that registry before encumbering
+or spending; expiry, cancellation, restart recovery, and a failed proof must release or safely
+revalidate the lease without changing transaction encumbrance state.
+
+`approve_and_create` must be foreground-only and owned entirely by the wallet runtime; it takes
+no caller-supplied approval object. The UI must show the entire preview, including the canonical
+origin, network/genesis, gate/configuration, authenticated subject, threshold, expiry,
+output-reference disclosure, request fingerprint, and the fact that it sends no transaction.
+After approval it must recheck the lease/output state and commitment-opening consistency, then
+construct the dedicated-domain authority and subject signatures internally, sum the real
+commitment openings, construct the reviewed aggregate minimum proof, serialize the bounded
+canonical response, and release the reservation. It returns neither handles nor secret material.
 
 The current wallet source can supply selection data and key IDs internally. The smallest missing
 contract is therefore this high-level, all-or-nothing operation plus its aggregate-opening and
@@ -86,8 +104,8 @@ dedicated-authority-signature implementations. It must not be composed from publ
 
 1. Is the proposed eligibility predicate complete for `DbWalletOutput` status, encumbrance,
    maturity, output version/range-proof type, and wallet recovery states?
-2. Which private wallet subsystem can safely retain/revalidate the selected outputs between UI
-   approval and proof construction without treating the proof as a transaction reservation?
+2. Where should the durable proof-lease registry live so that output-manager transaction
+   selection atomically respects it without treating a proof as a transaction encumbrance?
 3. What exact relation between a standard `PushPubKey` output's script key and its spending
    authority should the new GGBP-1-only signer attest, and what domain/transcript is acceptable?
 4. Can the lower-level Bulletproofs+ service accept one aggregate mask derived inside the key
@@ -117,9 +135,10 @@ does not yet provide this native-L1 operation, so no integration is enabled by t
 
 ## Verification and current verdict
 
-`cargo test -p ghost-gate-ggbp1-spike` passes 11 isolated tests, including approval refusal,
-network mismatch, confirmation filtering, spent-fixture filtering, canonical response decoding,
-and independent proof verification. `cargo check -p ghost-gate-minotari --features
+`cargo test -p ghost-gate-ggbp1-spike` passes 17 isolated tests, including forged request/approval
+refusal, wrong origin/subject refusal, atomic competing reservations, spend conflict, cancellation,
+lease expiry, synthetic restart recovery, post-approval state/opening revalidation, restricted
+fixture filtering, canonical response decoding, and independent proof verification. `cargo check -p ghost-gate-minotari --features
 experimental-ggbp1 --lib` compiles the feature surface. Existing unrelated warnings remain
 outside this patch.
 
