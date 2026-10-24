@@ -47,7 +47,12 @@ hash_domain!(
 
 pub type Ggbp1SubjectSignature = RistrettoSchnorrWithDomain<Ggbp1SubjectBindingDomain>;
 
-pub const GGBP1_EXPERIMENTAL_VERSION: u8 = 1;
+/// Version 2 binds every public output record to the authority and subject signatures.
+///
+/// Version 1 bound only the ordered output hashes. It is deliberately not accepted because an
+/// aggregate-preserving replacement of individual commitments was possible without changing the
+/// aggregate Bulletproofs+ statement.
+pub const GGBP1_EXPERIMENTAL_VERSION: u8 = 2;
 pub const GGBP1_MAX_OUTPUTS: usize = 16;
 pub const GGBP1_MAX_PROOF_BYTES: usize = 8 * 1024;
 pub const GGBP1_STANDARD_SCRIPT_BYTES: usize = 33;
@@ -263,11 +268,11 @@ pub fn prove_synthetic<R: rand::Rng + rand::CryptoRng>(
     if subject.public_key() != challenge.subject_authentication_public_key {
         return Err(Ggbp1Error::InvalidSubjectSignature);
     }
-    let output_hashes = outputs
+    let public_outputs = outputs
         .iter()
-        .map(|output| output.public.output_hash)
+        .map(|output| output.public.clone())
         .collect::<Vec<_>>();
-    let message = challenge.canonical_message(&output_hashes)?;
+    let transcript = canonical_output_transcript(challenge, &public_outputs)?;
 
     let commitment_factory = ExtendedPedersenCommitmentFactory::default();
     let mut aggregate_commitment = commitment_factory.zero();
@@ -275,7 +280,7 @@ pub fn prove_synthetic<R: rand::Rng + rand::CryptoRng>(
     let mut aggregate_value = 0u64;
     let mut authority_signatures = Vec::with_capacity(outputs.len());
 
-    for output in outputs {
+    for (index, output) in outputs.iter().enumerate() {
         check_standard_script(&output.public)?;
         aggregate_value = aggregate_value
             .checked_add(output.value_micro_xtm)
@@ -283,8 +288,12 @@ pub fn prove_synthetic<R: rand::Rng + rand::CryptoRng>(
         aggregate_commitment = &aggregate_commitment + &output.public.commitment;
         aggregate_mask = &aggregate_mask + &output.mask;
         authority_signatures.push(
-            Ggbp1AuthoritySignature::sign(&output.script_secret_key, &message, rng)
-                .expect("Ristretto Schnorr signing with a synthetic key is infallible"),
+            Ggbp1AuthoritySignature::sign(
+                &output.script_secret_key,
+                &authority_signature_message(&transcript, index)?,
+                rng,
+            )
+            .expect("Ristretto Schnorr signing with a synthetic key is infallible"),
         );
     }
 
@@ -313,10 +322,14 @@ pub fn prove_synthetic<R: rand::Rng + rand::CryptoRng>(
     }
 
     Ok(Ggbp1Proof {
-        outputs: outputs.iter().map(|output| output.public.clone()).collect(),
+        outputs: public_outputs,
         authority_signatures,
-        subject_signature: Ggbp1SubjectSignature::sign(&subject.secret_key, &message, rng)
-            .expect("Ristretto Schnorr signing with a synthetic key is infallible"),
+        subject_signature: Ggbp1SubjectSignature::sign(
+            &subject.secret_key,
+            &subject_signature_message(&transcript),
+            rng,
+        )
+        .expect("Ristretto Schnorr signing with a synthetic key is infallible"),
         aggregate_commitment,
         aggregate_minimum_proof,
     })
@@ -326,12 +339,7 @@ pub fn prove_synthetic<R: rand::Rng + rand::CryptoRng>(
 pub fn verify_synthetic(challenge: &Ggbp1Challenge, proof: &Ggbp1Proof) -> Result<(), Ggbp1Error> {
     validate_challenge(challenge)?;
     check_generator_compatibility(challenge)?;
-    let output_hashes = proof
-        .outputs
-        .iter()
-        .map(|output| output.output_hash)
-        .collect::<Vec<_>>();
-    let message = challenge.canonical_message(&output_hashes)?;
+    let transcript = canonical_output_transcript(challenge, &proof.outputs)?;
     if proof.authority_signatures.len() != proof.outputs.len() {
         return Err(Ggbp1Error::SignatureCount);
     }
@@ -341,17 +349,25 @@ pub fn verify_synthetic(challenge: &Ggbp1Challenge, proof: &Ggbp1Proof) -> Resul
 
     let commitment_factory = ExtendedPedersenCommitmentFactory::default();
     let mut aggregate_commitment = commitment_factory.zero();
-    for (output, signature) in proof.outputs.iter().zip(&proof.authority_signatures) {
+    for (index, (output, signature)) in proof
+        .outputs
+        .iter()
+        .zip(&proof.authority_signatures)
+        .enumerate()
+    {
         check_standard_script(output)?;
-        if !signature.verify(&output.script_public_key, &message) {
+        if !signature.verify(
+            &output.script_public_key,
+            &authority_signature_message(&transcript, index)?,
+        ) {
             return Err(Ggbp1Error::InvalidAuthoritySignature);
         }
         aggregate_commitment = &aggregate_commitment + &output.commitment;
     }
-    if !proof
-        .subject_signature
-        .verify(&challenge.subject_authentication_public_key, &message)
-    {
+    if !proof.subject_signature.verify(
+        &challenge.subject_authentication_public_key,
+        &subject_signature_message(&transcript),
+    ) {
         return Err(Ggbp1Error::InvalidSubjectSignature);
     }
     if aggregate_commitment != proof.aggregate_commitment {
@@ -407,6 +423,66 @@ fn check_standard_script(output: &SyntheticStandardOutput) -> Result<(), Ggbp1Er
     Ok(())
 }
 
+/// Returns the exact, bounded public-output transcript signed by this experimental protocol.
+///
+/// The synthetic fixture carries precisely four immutable public output fields: its identifier,
+/// commitment, canonical standard-script bytes, and script public key. Every one is serialized in
+/// output-hash order. A future trusted chain resolver must compare its resolved output data to
+/// these signed fields exactly; it must not treat the aggregate commitment as a replacement for an
+/// individual commitment.
+fn canonical_output_transcript(
+    challenge: &Ggbp1Challenge,
+    outputs: &[SyntheticStandardOutput],
+) -> Result<Vec<u8>, Ggbp1Error> {
+    let output_hashes = outputs
+        .iter()
+        .map(|output| output.output_hash)
+        .collect::<Vec<_>>();
+    let challenge_message = challenge.canonical_message(&output_hashes)?;
+    let mut transcript = Vec::with_capacity(
+        b"GGBP1/output-transcript".len()
+            + challenge_message.len()
+            + 1
+            + outputs.len() * (1 + 32 + 32 + GGBP1_STANDARD_SCRIPT_BYTES + 32),
+    );
+    transcript.extend_from_slice(b"GGBP1/output-transcript");
+    transcript.extend_from_slice(&challenge_message);
+    transcript.push(outputs.len() as u8);
+
+    for (index, output) in outputs.iter().enumerate() {
+        check_standard_script(output)?;
+        let script = output.script.to_bytes();
+        if script.len() != GGBP1_STANDARD_SCRIPT_BYTES {
+            return Err(Ggbp1Error::UnsupportedScript);
+        }
+        transcript.push(index as u8);
+        transcript.extend_from_slice(&output.output_hash);
+        transcript.extend_from_slice(output.commitment.as_bytes());
+        transcript.extend_from_slice(&script);
+        transcript.extend_from_slice(output.script_public_key.as_bytes());
+    }
+    Ok(transcript)
+}
+
+/// Makes the authority signature specific to one index in the already canonical output table.
+/// The GGBP-1 Schnorr domain itself remains dedicated and distinct from Tari script signing.
+fn authority_signature_message(transcript: &[u8], index: usize) -> Result<Vec<u8>, Ggbp1Error> {
+    let index = u8::try_from(index).map_err(|_| Ggbp1Error::TooManyOutputs)?;
+    let mut message = Vec::with_capacity(b"GGBP1/output-authority".len() + 1 + transcript.len());
+    message.extend_from_slice(b"GGBP1/output-authority");
+    message.push(index);
+    message.extend_from_slice(transcript);
+    Ok(message)
+}
+
+/// Binds the authenticated subject to the same complete output table as the authority signatures.
+fn subject_signature_message(transcript: &[u8]) -> Vec<u8> {
+    let mut message = Vec::with_capacity(b"GGBP1/subject-binding".len() + transcript.len());
+    message.extend_from_slice(b"GGBP1/subject-binding");
+    message.extend_from_slice(transcript);
+    message
+}
+
 /// The versioned, bounded public response encoding. It includes every challenge field so that a
 /// receiving server can compare it to its server-held challenge before it verifies crypto.
 #[derive(Clone, Debug)]
@@ -421,13 +497,9 @@ impl Ggbp1WireProof {
     pub fn to_bytes(&self) -> Result<Vec<u8>, Ggbp1Error> {
         validate_challenge(&self.challenge)?;
         check_generator_compatibility(&self.challenge)?;
-        let output_hashes = self
-            .proof
-            .outputs
-            .iter()
-            .map(|output| output.output_hash)
-            .collect::<Vec<_>>();
-        validate_output_hashes(&output_hashes)?;
+        // Use the same canonical record validator that verifier-side transcript reconstruction
+        // uses. Serialization must not admit an alternate public-output representation.
+        canonical_output_transcript(&self.challenge, &self.proof.outputs)?;
         if self.proof.authority_signatures.len() != self.proof.outputs.len() {
             return Err(Ggbp1Error::SignatureCount);
         }
@@ -817,26 +889,29 @@ mod tests {
 
         let mut threshold_substitution = proof.clone();
         let substituted_challenge = challenge(101);
-        let substituted_message = substituted_challenge
-            .canonical_message(&[[1; 32], [2; 32]])
-            .unwrap();
+        let substituted_transcript =
+            canonical_output_transcript(&substituted_challenge, &threshold_substitution.outputs)
+                .unwrap();
         threshold_substitution.authority_signatures = vec![
             Ggbp1AuthoritySignature::sign(
                 &witnesses[0].script_secret_key,
-                &substituted_message,
+                &authority_signature_message(&substituted_transcript, 0).unwrap(),
                 &mut rng,
             )
             .unwrap(),
             Ggbp1AuthoritySignature::sign(
                 &witnesses[1].script_secret_key,
-                &substituted_message,
+                &authority_signature_message(&substituted_transcript, 1).unwrap(),
                 &mut rng,
             )
             .unwrap(),
         ];
-        threshold_substitution.subject_signature =
-            Ggbp1SubjectSignature::sign(&subject.secret_key, &substituted_message, &mut rng)
-                .unwrap();
+        threshold_substitution.subject_signature = Ggbp1SubjectSignature::sign(
+            &subject.secret_key,
+            &subject_signature_message(&substituted_transcript),
+            &mut rng,
+        )
+        .unwrap();
         assert!(matches!(
             verify_synthetic(&substituted_challenge, &threshold_substitution),
             Err(Ggbp1Error::InvalidMinimumProof(_))
@@ -860,9 +935,13 @@ mod tests {
         );
 
         let mut wrong_signature = proof.clone();
-        let message = challenge.canonical_message(&[[1; 32], [2; 32]]).unwrap();
-        wrong_signature.authority_signatures[0] =
-            Ggbp1AuthoritySignature::sign(&key(99), &message, &mut rng).unwrap();
+        let transcript = canonical_output_transcript(&challenge, &wrong_signature.outputs).unwrap();
+        wrong_signature.authority_signatures[0] = Ggbp1AuthoritySignature::sign(
+            &key(99),
+            &authority_signature_message(&transcript, 0).unwrap(),
+            &mut rng,
+        )
+        .unwrap();
         assert_eq!(
             verify_synthetic(&challenge, &wrong_signature).unwrap_err(),
             Ggbp1Error::InvalidAuthoritySignature
@@ -873,7 +952,7 @@ mod tests {
             ExtendedPedersenCommitmentFactory::default().commit_value(&key(99), 45);
         assert_eq!(
             verify_synthetic(&challenge, &wrong_commitment).unwrap_err(),
-            Ggbp1Error::AggregateCommitmentMismatch
+            Ggbp1Error::InvalidAuthoritySignature
         );
 
         let mut wrong_script = proof.clone();
@@ -896,6 +975,115 @@ mod tests {
             verify_synthetic(&challenge, &malformed_range_proof),
             Err(Ggbp1Error::InvalidMinimumProof(_))
         ));
+    }
+
+    #[test]
+    fn aggregate_preserving_per_output_commitment_rewrite_is_rejected() {
+        let subject = subject();
+        let challenge = challenge(100);
+        let mut rng = StdRng::from_seed([91; 32]);
+        let mut proof = prove_synthetic(
+            &challenge,
+            &subject,
+            &[output(1, 45, 11, 21), output(2, 55, 12, 22)],
+            &mut rng,
+        )
+        .unwrap();
+
+        // The audit reproduction preserves C1' + C2' = C1 + C2. Version 1 signed only the
+        // output hashes, so its aggregate proof remained valid. Version 2 signs the exact
+        // canonical public output records, so an unchanged authority signature now rejects it.
+        let first_commitment = proof.outputs[0].commitment.clone();
+        proof.outputs[0].commitment = &proof.outputs[0].commitment + &first_commitment;
+        proof.outputs[1].commitment = &proof.outputs[1].commitment - &first_commitment;
+
+        assert_eq!(
+            verify_synthetic(&challenge, &proof).unwrap_err(),
+            Ggbp1Error::InvalidAuthoritySignature
+        );
+    }
+
+    #[test]
+    fn output_record_reordering_duplication_and_mismatching_are_rejected() {
+        let subject = subject();
+        let challenge = challenge(100);
+        let mut rng = StdRng::from_seed([92; 32]);
+        let proof = prove_synthetic(
+            &challenge,
+            &subject,
+            &[output(1, 45, 11, 21), output(2, 55, 12, 22)],
+            &mut rng,
+        )
+        .unwrap();
+
+        let mut reordered = proof.clone();
+        reordered.outputs.swap(0, 1);
+        reordered.authority_signatures.swap(0, 1);
+        assert_eq!(
+            verify_synthetic(&challenge, &reordered).unwrap_err(),
+            Ggbp1Error::NonCanonicalOutputHashes
+        );
+
+        let mut duplicated = proof.clone();
+        duplicated.outputs[1] = duplicated.outputs[0].clone();
+        duplicated.authority_signatures[1] = duplicated.authority_signatures[0].clone();
+        assert_eq!(
+            verify_synthetic(&challenge, &duplicated).unwrap_err(),
+            Ggbp1Error::NonCanonicalOutputHashes
+        );
+
+        let mut mismatched = proof;
+        let replacement_key = key(99);
+        let replacement_public_key = RistrettoPublicKey::from_secret_key(&replacement_key);
+        mismatched.outputs[0].script_public_key = replacement_public_key.clone();
+        mismatched.outputs[0].script =
+            push_pubkey_script(&CompressedKey::new_from_pk(replacement_public_key));
+        assert_eq!(
+            verify_synthetic(&challenge, &mismatched).unwrap_err(),
+            Ggbp1Error::InvalidAuthoritySignature
+        );
+    }
+
+    #[test]
+    fn opening_or_observer_knowledge_cannot_replace_output_authority() {
+        let subject = subject();
+        let challenge = challenge(100);
+        let mut rng = StdRng::from_seed([93; 32]);
+        let proof =
+            prove_synthetic(&challenge, &subject, &[output(1, 100, 11, 21)], &mut rng).unwrap();
+
+        // This fixture has no Tari view-key model. An observer is represented by an unrelated
+        // secret, and an attacker with an alternative known commitment opening is represented by
+        // this replacement commitment. Neither possesses the output's script authority.
+        let mut opening_only_substitution = proof.clone();
+        opening_only_substitution.outputs[0].commitment =
+            ExtendedPedersenCommitmentFactory::default().commit_value(&key(99), 100);
+        let transcript =
+            canonical_output_transcript(&challenge, &opening_only_substitution.outputs).unwrap();
+        opening_only_substitution.subject_signature = Ggbp1SubjectSignature::sign(
+            &subject.secret_key,
+            &subject_signature_message(&transcript),
+            &mut rng,
+        )
+        .unwrap();
+        assert_eq!(
+            verify_synthetic(&challenge, &opening_only_substitution).unwrap_err(),
+            Ggbp1Error::InvalidAuthoritySignature
+        );
+
+        let mut observer_signature = proof;
+        let transcript =
+            canonical_output_transcript(&challenge, &observer_signature.outputs).unwrap();
+        observer_signature.authority_signatures[0] = Ggbp1AuthoritySignature::sign(
+            &key(99),
+            &authority_signature_message(&transcript, 0).unwrap(),
+            &mut rng,
+        )
+        .unwrap();
+        assert_eq!(
+            verify_synthetic(&challenge, &observer_signature).unwrap_err(),
+            Ggbp1Error::InvalidAuthoritySignature
+        );
     }
 
     #[test]
@@ -944,6 +1132,13 @@ mod tests {
         assert_eq!(decoded.challenge, challenge);
         verify_synthetic(&decoded.challenge, &decoded.proof).unwrap();
 
+        let mut old_version = encoded.clone();
+        old_version[6] = 1;
+        assert_eq!(
+            Ggbp1WireProof::from_bytes(&old_version).unwrap_err(),
+            Ggbp1Error::UnsupportedWireVersion
+        );
+
         let mut trailing_byte = encoded;
         trailing_byte.push(0);
         assert_eq!(
@@ -972,9 +1167,13 @@ mod tests {
         let challenge = challenge(100);
         let mut proof =
             prove_synthetic(&challenge, &subject, &[output(1, 100, 11, 21)], &mut rng).unwrap();
-        let message = challenge.canonical_message(&[[1; 32]]).unwrap();
-        proof.subject_signature =
-            Ggbp1SubjectSignature::sign(&key(99), &message, &mut rng).unwrap();
+        let transcript = canonical_output_transcript(&challenge, &proof.outputs).unwrap();
+        proof.subject_signature = Ggbp1SubjectSignature::sign(
+            &key(99),
+            &subject_signature_message(&transcript),
+            &mut rng,
+        )
+        .unwrap();
         assert_eq!(
             verify_synthetic(&challenge, &proof).unwrap_err(),
             Ggbp1Error::InvalidSubjectSignature

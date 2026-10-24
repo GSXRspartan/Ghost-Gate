@@ -29,7 +29,16 @@ This spike is pinned to the local crate sources resolved by `Cargo.lock`, rather
 For each fixture, the prover uses Tari's `ExtendedPedersenCommitmentFactory::default()` to form
 `C_i = r_i.G + v_i.H`, and attaches the exact standard `tari_script::push_pubkey_script` form to a public script key. The proof-side private witness holds `r_i`, `v_i`, and the matching synthetic script private key. None is placed in the proof object.
 
-Each script key signs a canonical request containing the experimental version, network, genesis, origin, gate, subject, threshold, nonce, expiry, count, and ordered output identifiers. The signature uses the new Tari hash domain `com.ghost-gate.ggbp1.balance_proof/v1`, not the native script `CheckSigHashDomain`. The verifier requires that the advertised public key occurs in the exact supported `PushPubKey` script before verifying that signature.
+Version 2's signed transcript contains the complete canonical challenge (experimental version,
+network, genesis, origin, gate, subject, threshold, nonce, expiry, and ordered output hashes),
+then every indexed synthetic output record: output hash, commitment, exact `PushPubKey` script
+bytes, and script public key. Each script key signs that full table with its own index. The subject
+also signs the full table in its separate subject-binding domain. Thus replacing a commitment
+while preserving the aggregate commitment, changing a supported script identity, reordering, or
+duplicating a record invalidates the corresponding authority transcript. The signature uses the
+new Tari hash domain `com.ghost-gate.ggbp1.balance_proof/v1`, not the native script
+`CheckSigHashDomain`. The verifier independently reconstructs the transcript and requires that
+the advertised public key occurs in the exact supported `PushPubKey` script before verifying it.
 
 For multiple outputs the prover performs checked `u64` addition of values, adds their masks in the Ristretto scalar field, and adds their public commitments. It then proves a minimum value against **one aggregate commitment**:
 
@@ -48,7 +57,12 @@ The initial isolated crypto harness passed six tests covering:
 - a value below the threshold refusing to produce a proof, with equal and above-threshold single outputs verifying;
 - two `45 + 55` synthetic outputs verifying against threshold `100`;
 - challenge-threshold substitution failing first at the bound authority signatures, and still failing the Bulletproofs+ verification when synthetic authority signatures are regenerated for the altered threshold;
-- invalid opening mask, invalid authority signature, changed commitment, non-standard script, duplicate output identifier, malformed proof bytes, and `u64` aggregate overflow rejecting;
+- invalid opening mask, invalid authority signature, changed commitment, non-standard script,
+  reordered/duplicate output identifiers, malformed proof bytes, and `u64` aggregate overflow
+  rejecting;
+- the audit's aggregate-preserving `C1' = 2C1`, `C2' = C2 - C1` substitution now rejecting at the
+  independently reconstructed authority transcript, while the aggregate Bulletproofs+ check is
+  retained;
 - a GGBP-1 signature failing verification when reinterpreted under Tari's `CheckSigHashDomain`.
 
 The same harness now has three additional Phase 2 tests for an isolated server/challenge/ChainView

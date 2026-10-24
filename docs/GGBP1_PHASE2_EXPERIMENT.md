@@ -29,15 +29,18 @@ wallet attachment, no Telegram integration, and no live Esmeralda claim.**
 
 ## Protocol hardening
 
-The response encoding starts with `GGBP1R` and protocol version 1. It has one fixed grammar and
+The response encoding starts with `GGBP1R` and protocol version 2. Version 1 is refused because
+it signed only output hashes and did not bind individual public output records. Version 2 has one
+fixed grammar and
 strictly limits outputs to 16 and the aggregate minimum proof to 8 KiB. It includes network,
 genesis, origin, gate identifier, gate configuration version, subject identifier, subject public
 key, threshold, nonce, expiry, and a fingerprint of Tari's actual default commitment generators.
 Output hashes must be strictly ascending and unique.
 
 Each supported synthetic output has the exact `PushPubKey` script form. Its script key produces a
-GGBP-1 output-authority signature over the complete canonical challenge and ordered outputs. The
-authenticated subject independently signs the same message in
+GGBP-1 output-authority signature over the complete canonical challenge, the ordered and indexed
+table of exact output hashes, commitments, script bytes, and script public keys, and its own table
+index. The authenticated subject independently signs the same complete output table in
 `com.ghost-gate.ggbp1.subject_binding/v1`. Neither signature uses Tari's script-signing domain;
 the test suite reconstructs the first signature under `CheckSigHashDomain` and proves that it
 does not verify there.
