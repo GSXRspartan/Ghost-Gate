@@ -16,7 +16,7 @@ The loopback sidecar accepts a JSON document only when all of these fields are p
 {
   "network": 38,
   "anchorEpoch": 0,
-  "walkShard": 0,
+  "walkShard": 1,
   "validatorSetHash": "<official Tari JSON encoding>",
   "walkedCommittee": { "<official Tari ValidatorSetCommittee encoding>": "..." },
   "provenance": "<authenticated source, retrieval method, and evidence digest>",
@@ -40,7 +40,8 @@ because the v0.47 verifier proves it against the approved hash.
 ## Reviewer checklist
 
 1. Confirm the Tari source release tag and commit above using an authenticated release process.
-2. Confirm network byte `38` is Esmeralda, and record how the epoch, walk shard, validator-set
+2. Confirm network byte `38` is Esmeralda, and record how the epoch, walk shard (exactly `1`;
+   shard `0` is Tari's reserved global shard), validator-set
    hash and committee proof were obtained.
 3. Retain the signed/source evidence and a digest beside the approval record.
 4. Validate the committee through `PinnedConsensusVerifier::pinned`; it must cover the selected

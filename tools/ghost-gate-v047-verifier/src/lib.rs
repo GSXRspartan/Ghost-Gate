@@ -178,6 +178,10 @@ impl PinnedAnchorConfig {
         if self.review_status != "approved" || self.provenance.trim().is_empty()
             || self.reviewed_at.trim().is_empty() || self.reviewed_by.trim().is_empty()
             || self.upstream_commit != "9dabb2a76a9ad5c6e99dfa180ab7bbbcb1a05a47"
+            // Ghost Gate walks Esmeralda's 1..=256 committee through shard 1. In Tari, shard 0
+            // is the reserved global shard; accepting it here would turn a configuration typo
+            // into a confusing downstream committee failure.
+            || self.walk_shard != Shard::first().as_u32()
         { return Err(ConsensusError::UntrustedAnchor); }
         let network = Network::try_from(self.network).map_err(|_| ConsensusError::UntrustedAnchor)?;
         let hash = serde_json::from_value::<ValidatorSetHash>(self.validator_set_hash)
@@ -194,7 +198,7 @@ impl PinnedAnchorConfig {
         }
         let committee = serde_json::from_value::<ValidatorSetCommittee>(self.walked_committee)
             .map_err(|_| ConsensusError::UntrustedAnchor)?;
-        let verifier = PinnedConsensusVerifier::pinned(network, Shard::from(self.walk_shard), Epoch(self.anchor_epoch), &hash, &committee)?;
+        let verifier = PinnedConsensusVerifier::pinned(network, Shard::first(), Epoch(self.anchor_epoch), &hash, &committee)?;
         Ok((verifier, self.max_proof_age_epochs))
     }
 }
@@ -669,5 +673,26 @@ mod tests {
         wrong_tag.release_bootstrap.as_mut().unwrap().release_tag = "v0.47.1".into();
         assert!(matches!(wrong_tag.into_verifier(), Err(ConsensusError::UntrustedAnchor)));
         assert_ne!(hash, derive_esmeralda_v047_release_validator_set_hash(Epoch(12_635)));
+    }
+
+    #[test]
+    fn esmeralda_anchor_rejects_global_shard_zero() {
+        let epoch = Epoch(12_634);
+        let set = ValidatorSetFixture::new(epoch.as_u64());
+        let config = PinnedAnchorConfig {
+            network: NETWORK.as_byte(),
+            anchor_epoch: epoch.as_u64(),
+            walk_shard: 0,
+            validator_set_hash: serde_json::to_value(set.hash()).unwrap(),
+            walked_committee: serde_json::to_value(set.committee(low())).unwrap(),
+            provenance: "test only".into(),
+            reviewed_at: "2026-10-23T00:00:00Z".into(),
+            reviewed_by: "test".into(),
+            upstream_commit: ESMERALDA_V047_RELEASE_COMMIT.into(),
+            review_status: "approved".into(),
+            release_bootstrap: None,
+            max_proof_age_epochs: 1,
+        };
+        assert!(matches!(config.into_verifier(), Err(ConsensusError::UntrustedAnchor)));
     }
 }
