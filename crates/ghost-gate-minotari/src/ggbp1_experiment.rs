@@ -19,12 +19,17 @@ use crate::ggbp1::{
     SyntheticStandardOutput, SyntheticSubjectWitness, prove_synthetic, verify_synthetic,
 };
 
-/// The only two evidence modes this experiment models. A public endpoint is intentionally not an
-/// eligible verifier source: the gRPC protocol supplies data, not a portable authenticated proof.
+/// How a chain view obtained its observations. These are a verifier policy input, not a claim
+/// that base-node RPC data is a portable cryptographic proof.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ggbp1EvidenceSource {
     SyntheticFixture,
-    LocallyControlledBaseNode,
+    /// gRPC has no transferable response authentication or inclusion proof. This source can be
+    /// used only for diagnostics and is never eligible for a positive experimental result.
+    UntrustedBaseNodeRpc,
+    /// Reserved for a future connector that authenticates the transport or verifies a configured
+    /// operator pin before exposing a `Ggbp1ChainView`. It is not emitted by the current adapter.
+    OperatorPinnedAuthenticatedBaseNode,
 }
 
 /// A point-in-time assertion about the base chain.
@@ -54,6 +59,11 @@ pub struct Ggbp1ObservedOutput {
     pub output_version: u32,
     pub output_type: u32,
     pub range_proof_type: u32,
+    /// `None` means the chain view did not provide enough data to decide covenant support.
+    pub covenant_is_supported: Option<bool>,
+    /// The effective maximum of output maturity and wallet-observed script lock height. `None`
+    /// means the evidence is incomplete and must fail closed.
+    pub effective_lock_height: Option<u64>,
     pub is_unspent: bool,
     pub is_in_best_chain: bool,
 }
@@ -80,18 +90,21 @@ pub struct Ggbp1ChainPolicy {
     pub required_output_version: u32,
     pub required_output_type: u32,
     pub required_range_proof_type: u32,
+    /// The one evidence source eligible for a positive experimental record.
+    pub required_evidence_source: Ggbp1EvidenceSource,
     /// Tests opt in to fixtures. Any process configured for a node must leave this false.
     pub permit_synthetic_fixtures: bool,
 }
 
 impl Ggbp1ChainPolicy {
-    pub fn locally_controlled_node() -> Self {
+    pub fn operator_pinned_authenticated_node() -> Self {
         Self {
             minimum_confirmations: 6,
             maximum_tip_age_seconds: 10 * 60,
             required_output_version: 0,
             required_output_type: 0,
             required_range_proof_type: 0,
+            required_evidence_source: Ggbp1EvidenceSource::OperatorPinnedAuthenticatedBaseNode,
             permit_synthetic_fixtures: false,
         }
     }
@@ -103,6 +116,7 @@ impl Ggbp1ChainPolicy {
             required_output_version: 0,
             required_output_type: 0,
             required_range_proof_type: 0,
+            required_evidence_source: Ggbp1EvidenceSource::SyntheticFixture,
             permit_synthetic_fixtures: true,
         }
     }
@@ -203,6 +217,8 @@ pub enum Ggbp1ServerError {
     ChainNotSynced,
     #[error("synthetic evidence is not permitted by this verifier configuration")]
     SyntheticEvidenceNotPermitted,
+    #[error("the configured chain evidence source is not trusted for experimental verification")]
+    UntrustedChainEvidence,
     #[error("the chain network or genesis does not match the server configuration")]
     ChainBindingMismatch,
     #[error("the chain tip is stale or has a future timestamp")]
@@ -225,6 +241,12 @@ pub enum Ggbp1ServerError {
     InsufficientConfirmations,
     #[error("a referenced output has an unsupported consensus format")]
     UnsupportedOutputFormat,
+    #[error("a referenced output has an unsupported covenant")]
+    UnsupportedCovenant,
+    #[error("the chain view omitted required output lock or covenant evidence")]
+    IncompleteOutputEvidence,
+    #[error("the chain view supplied an effective lock lower than output maturity")]
+    ContradictoryLockHeight,
     #[error("an output has already been used by another experimental proof")]
     OutputAlreadyRegistered,
     #[error(transparent)]
@@ -484,6 +506,9 @@ impl<C: Ggbp1ChainView> Ggbp1ExperimentalServer<C> {
         if !snapshot.is_synced {
             return Err(Ggbp1ServerError::ChainNotSynced);
         }
+        if snapshot.source != self.config.chain_policy.required_evidence_source {
+            return Err(Ggbp1ServerError::UntrustedChainEvidence);
+        }
         if snapshot.source == Ggbp1EvidenceSource::SyntheticFixture
             && !self.config.chain_policy.permit_synthetic_fixtures
         {
@@ -556,6 +581,17 @@ impl<C: Ggbp1ChainView> Ggbp1ExperimentalServer<C> {
         {
             return Err(Ggbp1ServerError::UnsupportedOutputFormat);
         }
+        match observed.covenant_is_supported {
+            Some(true) => {},
+            Some(false) => return Err(Ggbp1ServerError::UnsupportedCovenant),
+            None => return Err(Ggbp1ServerError::IncompleteOutputEvidence),
+        }
+        let effective_lock_height = observed
+            .effective_lock_height
+            .ok_or(Ggbp1ServerError::IncompleteOutputEvidence)?;
+        if effective_lock_height < observed.maturity_height {
+            return Err(Ggbp1ServerError::ContradictoryLockHeight);
+        }
         let confirmations = snapshot
             .tip_height
             .checked_sub(observed.mined_height)
@@ -564,7 +600,7 @@ impl<C: Ggbp1ChainView> Ggbp1ExperimentalServer<C> {
         if confirmations != observed.confirmations {
             return Err(Ggbp1ServerError::ContradictoryConfirmations);
         }
-        if snapshot.tip_height < observed.maturity_height {
+        if snapshot.tip_height < effective_lock_height {
             return Err(Ggbp1ServerError::OutputImmature);
         }
         if confirmations < self.config.chain_policy.minimum_confirmations {
@@ -671,6 +707,8 @@ mod tests {
             output_version: 0,
             output_type: 0,
             range_proof_type: 0,
+            covenant_is_supported: Some(true),
+            effective_lock_height: Some(191),
             is_unspent: true,
             is_in_best_chain: true,
         }
@@ -801,6 +839,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn verifier_fails_closed_on_zero_threshold_or_incomplete_chain_evidence() {
+        let now = 1_800_000_000;
+        let view = Arc::new(FixtureChainView::default());
+        let mut zero_threshold = configuration();
+        zero_threshold.threshold_micro_xtm = 0;
+        assert!(matches!(
+            Ggbp1ExperimentalServer::new(zero_threshold, view.clone()),
+            Err(Ggbp1ServerError::ZeroThreshold)
+        ));
+
+        let (server, challenge) = server_and_challenge(view.clone(), now).await;
+        let witnesses = [witness(1, 100, 11, 21)];
+        let response = encoded_proof(&challenge, &witnesses).await;
+        view.outputs
+            .lock()
+            .await
+            .insert([1; 32], observed(&witnesses[0].public));
+
+        view.snapshot.lock().await.as_mut().unwrap().source =
+            Ggbp1EvidenceSource::UntrustedBaseNodeRpc;
+        assert!(matches!(
+            server.submit_response(&response, now + 1).await,
+            Err(Ggbp1ServerError::UntrustedChainEvidence)
+        ));
+        view.snapshot.lock().await.as_mut().unwrap().source = Ggbp1EvidenceSource::SyntheticFixture;
+
+        view.outputs
+            .lock()
+            .await
+            .get_mut(&[1; 32])
+            .unwrap()
+            .covenant_is_supported = None;
+        assert!(matches!(
+            server.submit_response(&response, now + 1).await,
+            Err(Ggbp1ServerError::IncompleteOutputEvidence)
+        ));
+        let mut output = view.outputs.lock().await;
+        output.get_mut(&[1; 32]).unwrap().covenant_is_supported = Some(false);
+        drop(output);
+        assert!(matches!(
+            server.submit_response(&response, now + 1).await,
+            Err(Ggbp1ServerError::UnsupportedCovenant)
+        ));
+
+        let mut output = view.outputs.lock().await;
+        let observed = output.get_mut(&[1; 32]).unwrap();
+        observed.covenant_is_supported = Some(true);
+        observed.effective_lock_height = None;
+        drop(output);
+        assert!(matches!(
+            server.submit_response(&response, now + 1).await,
+            Err(Ggbp1ServerError::IncompleteOutputEvidence)
+        ));
+
+        let mut output = view.outputs.lock().await;
+        let observed = output.get_mut(&[1; 32]).unwrap();
+        observed.effective_lock_height = Some(observed.maturity_height - 1);
+        drop(output);
+        assert!(matches!(
+            server.submit_response(&response, now + 1).await,
+            Err(Ggbp1ServerError::ContradictoryLockHeight)
+        ));
+
+        view.snapshot.lock().await.as_mut().unwrap().is_synced = false;
+        assert!(matches!(
+            server.submit_response(&response, now + 1).await,
+            Err(Ggbp1ServerError::ChainNotSynced)
+        ));
+    }
+
+    #[tokio::test]
     async fn server_refuses_maturity_reorg_forgery_and_binding_substitution() {
         let now = 1_800_000_000;
         let view = Arc::new(FixtureChainView::default());
@@ -810,6 +919,7 @@ mod tests {
 
         let mut immature = observed(&witnesses[0].public);
         immature.maturity_height = 201;
+        immature.effective_lock_height = Some(201);
         view.outputs.lock().await.insert([1; 32], immature);
         assert!(matches!(
             server.submit_response(&response, now + 1).await,

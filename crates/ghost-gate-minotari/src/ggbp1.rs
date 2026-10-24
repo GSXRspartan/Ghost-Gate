@@ -74,6 +74,7 @@ pub struct Ggbp1Challenge {
 
 impl Ggbp1Challenge {
     pub fn canonical_message(&self, output_hashes: &[[u8; 32]]) -> Result<Vec<u8>, Ggbp1Error> {
+        validate_challenge(self)?;
         validate_output_hashes(output_hashes)?;
 
         let mut message = Vec::with_capacity(
@@ -200,6 +201,8 @@ pub struct Ggbp1Proof {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum Ggbp1Error {
+    #[error("a GGBP-1 threshold must be nonzero")]
+    ZeroThreshold,
     #[error("at least one output is required")]
     EmptyOutputs,
     #[error("too many outputs")]
@@ -239,6 +242,7 @@ pub fn prove_synthetic<R: rand::Rng + rand::CryptoRng>(
     outputs: &[SyntheticOutputWitness],
     rng: &mut R,
 ) -> Result<Ggbp1Proof, Ggbp1Error> {
+    validate_challenge(challenge)?;
     check_generator_compatibility(challenge)?;
     if subject.public_key() != challenge.subject_authentication_public_key {
         return Err(Ggbp1Error::InvalidSubjectSignature);
@@ -304,6 +308,7 @@ pub fn prove_synthetic<R: rand::Rng + rand::CryptoRng>(
 
 /// Independent public verifier for the synthetic fixture format.
 pub fn verify_synthetic(challenge: &Ggbp1Challenge, proof: &Ggbp1Proof) -> Result<(), Ggbp1Error> {
+    validate_challenge(challenge)?;
     check_generator_compatibility(challenge)?;
     let output_hashes = proof
         .outputs
@@ -356,6 +361,13 @@ fn check_generator_compatibility(challenge: &Ggbp1Challenge) -> Result<(), Ggbp1
     Ok(())
 }
 
+fn validate_challenge(challenge: &Ggbp1Challenge) -> Result<(), Ggbp1Error> {
+    if challenge.threshold_micro_xtm == 0 {
+        return Err(Ggbp1Error::ZeroThreshold);
+    }
+    Ok(())
+}
+
 fn validate_output_hashes(output_hashes: &[[u8; 32]]) -> Result<(), Ggbp1Error> {
     if output_hashes.is_empty() {
         return Err(Ggbp1Error::EmptyOutputs);
@@ -391,6 +403,7 @@ impl Ggbp1WireProof {
     /// Serializes exactly one canonical proof response. The fixed-size supported script encoding
     /// prevents alternative script encodings or attacker-selected length fields.
     pub fn to_bytes(&self) -> Result<Vec<u8>, Ggbp1Error> {
+        validate_challenge(&self.challenge)?;
         check_generator_compatibility(&self.challenge)?;
         let output_hashes = self
             .proof
@@ -473,6 +486,7 @@ impl Ggbp1WireProof {
             return Err(Ggbp1Error::UnsupportedWireVersion);
         }
         let challenge = read_challenge(&mut reader)?;
+        validate_challenge(&challenge)?;
         let output_count = usize::from(reader.byte()?);
         if output_count == 0 || output_count > GGBP1_MAX_OUTPUTS {
             return Err(Ggbp1Error::MalformedWire);
@@ -715,6 +729,64 @@ mod tests {
 
         let above_proof = prove_synthetic(&challenge(100), &subject, &[above], &mut rng).unwrap();
         verify_synthetic(&challenge(100), &above_proof).unwrap();
+    }
+
+    #[test]
+    fn zero_threshold_is_rejected_by_every_proof_entry_point() {
+        let zero = challenge(0);
+        let subject = subject();
+        let witness = output(1, 1, 11, 21);
+        let mut rng = StdRng::from_seed([13; 32]);
+
+        assert_eq!(
+            zero.canonical_message(&[[1; 32]]).unwrap_err(),
+            Ggbp1Error::ZeroThreshold
+        );
+        assert_eq!(
+            prove_synthetic(&zero, &subject, &[witness], &mut rng).unwrap_err(),
+            Ggbp1Error::ZeroThreshold
+        );
+
+        let valid_challenge = challenge(1);
+        let valid_proof = prove_synthetic(
+            &valid_challenge,
+            &subject,
+            &[output(1, 1, 11, 21)],
+            &mut rng,
+        )
+        .unwrap();
+        assert_eq!(
+            verify_synthetic(&zero, &valid_proof).unwrap_err(),
+            Ggbp1Error::ZeroThreshold
+        );
+        assert_eq!(
+            Ggbp1WireProof {
+                challenge: zero,
+                proof: valid_proof,
+            }
+            .to_bytes()
+            .unwrap_err(),
+            Ggbp1Error::ZeroThreshold
+        );
+
+        let mut encoded = Ggbp1WireProof {
+            challenge: valid_challenge,
+            proof: prove_synthetic(
+                &challenge(1),
+                &subject,
+                &[output(1, 1, 11, 21)],
+                &mut rng,
+            )
+            .unwrap(),
+        }
+        .to_bytes()
+        .unwrap();
+        // `GGBP1R` plus fixed-width header fields place the threshold at byte 144.
+        encoded[144..152].fill(0);
+        assert_eq!(
+            Ggbp1WireProof::from_bytes(&encoded).unwrap_err(),
+            Ggbp1Error::ZeroThreshold
+        );
     }
 
     #[test]

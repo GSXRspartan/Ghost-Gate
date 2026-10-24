@@ -2,8 +2,10 @@
 //!
 //! `SearchUtxos` establishes the output's best-chain block inclusion from a commitment and
 //! `FetchMatchingUtxos` establishes its current UTXO presence by output hash. The base-node gRPC
-//! service does not return a transferable inclusion proof, so this adapter is intentionally marked
-//! as evidence from a locally controlled node. A public endpoint is not a supported verifier mode.
+//! service does not return a transferable inclusion proof or response authentication. This adapter
+//! therefore emits *untrusted* RPC assertions only; it cannot produce a positive experimental
+//! verification result. A future connector must authenticate the transport or verify an
+//! operator-controlled pin before it may emit trusted evidence.
 
 use async_trait::async_trait;
 use minotari_node_grpc_client::grpc::{
@@ -23,14 +25,16 @@ use crate::{
     },
 };
 
-/// A read-only client for one explicitly operator-controlled base node. `connect` does not start,
-/// configure, or synchronize a node.
+/// A read-only diagnostic client for an arbitrary base-node endpoint. It does not start,
+/// configure, or synchronize a node, and its RPC observations are never a trusted verifier input.
 pub struct BaseNodeGgbp1ChainView {
     client: Mutex<BaseNodeClient<tonic::transport::Channel>>,
 }
 
 impl BaseNodeGgbp1ChainView {
-    pub async fn connect(endpoint: &str) -> Result<Self, Ggbp1ChainViewError> {
+    pub async fn connect_untrusted_for_diagnostics(
+        endpoint: &str,
+    ) -> Result<Self, Ggbp1ChainViewError> {
         let client = BaseNodeClient::connect(endpoint.to_string())
             .await
             .map_err(|error| Ggbp1ChainViewError(format!("base-node connect: {error}")))?;
@@ -74,7 +78,7 @@ impl Ggbp1ChainView for BaseNodeGgbp1ChainView {
         // numeric comparison so this module does not import a generated enum name that has changed
         // across Tari releases; the source-backed version contract is documented above.
         Ok(Ggbp1ChainSnapshot {
-            source: Ggbp1EvidenceSource::LocallyControlledBaseNode,
+            source: Ggbp1EvidenceSource::UntrustedBaseNodeRpc,
             network,
             genesis_hash,
             tip_height: metadata.best_block_height,
@@ -141,6 +145,11 @@ impl Ggbp1ChainView for BaseNodeGgbp1ChainView {
             output_version: output.version,
             output_type: features.output_type,
             range_proof_type: features.range_proof_type,
+            // The raw RPC output contains covenant bytes but this adapter has no reviewed
+            // canonical covenant parser. It also lacks the wallet-local script lock height.
+            // Returning `None` is deliberate: the verifier refuses incomplete evidence.
+            covenant_is_supported: None,
+            effective_lock_height: None,
             is_unspent,
             // `SearchUtxos` is defined against the node's current best chain. The verifier protects
             // the remaining node-trust and reorg race with its before/after tip snapshots.
