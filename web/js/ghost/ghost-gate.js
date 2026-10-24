@@ -17,7 +17,7 @@
  * - requests an operation the adapter did not already report as supported.
  */
 
-import { PROOF_MODES, formatAmount, parseAmount } from "./capabilities.js";
+import { PROOF_MODES, browserProviderGateCompatibility, formatAmount, parseAmount } from "./capabilities.js";
 import { sapientProvider, universeProvider, walletdProvider } from "./provider.js";
 
 const BRIDGE_BASE = window.location.origin;
@@ -72,6 +72,14 @@ export async function renderWalletPicker() {
 }
 
 async function probeAndFill(provider, card) {
+  const gateCompatibility = browserProviderGateCompatibility(currentGate);
+  if (!gateCompatibility.ok) {
+    card.dataset.wallet = provider.id;
+    card.querySelector(".wallet-state").textContent = gateCompatibility.reason;
+    card.classList.add("unsupported");
+    return;
+  }
+
   let probe;
   try {
     probe = await provider.probe();
@@ -120,6 +128,11 @@ async function probeAndFill(provider, card) {
 let selected = null;
 
 export async function selectWallet(provider, probe) {
+  const gateCompatibility = browserProviderGateCompatibility(currentGate);
+  if (!gateCompatibility.ok) {
+    setOutcome("error", gateCompatibility.reason);
+    return;
+  }
   selected = { provider, probe };
   el("wallet-line").textContent =
     `${provider.label} — ${probe.modes.map((m) => m.label).join(" or ")}. ` +
@@ -148,6 +161,11 @@ export async function selectWallet(provider, probe) {
 export async function runProof() {
   if (!selected) return;
   const gate = currentGate;
+  const gateCompatibility = browserProviderGateCompatibility(gate);
+  if (!gateCompatibility.ok) {
+    setOutcome("error", gateCompatibility.reason);
+    return;
+  }
   const { provider } = selected;
   const mode = provider.id === "walletd" ? "consensus" : "credential";
   const isConsensus = mode === "consensus";
@@ -243,6 +261,7 @@ export async function loadGate(id) {
   const gate = await res.json();
   if (!res.ok) throw new Error(gate.error || `gate ${id}: ${res.status}`);
   currentGate = gate;
+  selected = null;
   el("asset-symbol").textContent = gate.symbol || "—";
   el("asset-address").textContent = gate.resource_address;
   el("threshold").textContent =
@@ -251,6 +270,9 @@ export async function loadGate(id) {
       ? ` (${formatAmount(gate.threshold, gate.divisibility)} display)`
       : "");
   el("divisibility").textContent = gate.divisibility ?? "—";
+  // Re-render after policy load: wallet availability is a property of the selected gate as well
+  // as the wallet. In particular, an L2 provider must never be prompted for a Minotari L1 gate.
+  renderWalletPicker();
   return gate;
 }
 
@@ -295,7 +317,6 @@ function setOutcome(kind, text) {
 /* ------------------------------------------------------------------ */
 
 export function init() {
-  renderWalletPicker();
   const params = new URLSearchParams(window.location.search);
   loadGate(params.get("gate") || "g1").catch((e) => {
     const line = el("wallet-line");

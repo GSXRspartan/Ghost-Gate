@@ -64,6 +64,32 @@ export const PROOF_MODES = {
 };
 
 /**
+ * Whether the browser-provider family can be offered for the selected gate.
+ *
+ * `window.tari` is an Ootle (L2) provider contract. It does not expose Minotari L1 output
+ * ownership, authenticated inclusion, or current-UTXO-state evidence. Treating its Esmeralda
+ * name as an L1 network assertion would let an L2 connection look like an XTM verification.
+ * Keep this guard independent of wallet-reported capabilities: an unrecognised extension must
+ * not be able to opt itself into native-L1 authorization merely by returning extra fields.
+ *
+ * @param {{ proof_kind?: string, proofKind?: string }|null} gate
+ * @returns {{ ok: boolean, reason: string|null }}
+ */
+export function browserProviderGateCompatibility(gate) {
+  const kind = gate?.proof_kind ?? gate?.proofKind;
+  if (kind === "minotari_xtm" || kind === "xtm") {
+    return {
+      ok: false,
+      reason:
+        "This is a native Minotari L1 XTM gate. Tari Universe and Sapient expose the Tari Ootle " +
+        "L2 window.tari contract, not a Minotari L1 output-ownership and live-UTXO proof API. " +
+        "No wallet connection, challenge, or access session will be requested.",
+    };
+  }
+  return { ok: true, reason: null };
+}
+
+/**
  * Which proof modes a provider's capabilities support.
  *
  * Mode A is offered by the walletd adapter only, and deliberately not derived from any capability

@@ -89,7 +89,8 @@ pub enum ProofMode {
     /// The wallet creates a value-committing output and signs the challenge over it; the bridge
     /// verifies against chain state.
     Credential,
-    /// Native L1 (Minotari XTM). **Not activatable**: no compatible verifier exists upstream.
+    /// Native L1 (Minotari XTM). **Not activatable**: the available browser provider is Ootle
+    /// L2-only and no supported API yields independently verifiable live L1 output evidence.
     Xtm,
 }
 
@@ -103,10 +104,10 @@ impl ProofMode {
         match self {
             ProofMode::Consensus | ProofMode::Credential => None,
             ProofMode::Xtm => Some(
-                "Native L1 (XTM) has no compatible verifier yet: the only L1 signing surface \
-                 available upstream signs with the node identity key, not with a user's stealth \
-                 outputs, so no proof could be verified. Saved as a draft; it cannot authorize a \
-                 session until a real verifier exists.",
+                "Native L1 (XTM) is blocked for production: Tari Universe's window.tari provider \
+                 is Ootle L2-only, while the available Minotari wallet signing surface does not \
+                 provide an independently verifiable proof of a user's currently unspent outputs. \
+                 Saved as a draft; it cannot authorize a session until that proof API exists.",
             ),
         }
     }

@@ -12,7 +12,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { PROOF_MODES, supportedProofModes, walletUsability, networkMatches, parseAmount, formatAmount, networkVerdict, describeProviderError } from "./capabilities.js";
+import { PROOF_MODES, browserProviderGateCompatibility, supportedProofModes, walletUsability, networkMatches, parseAmount, formatAmount, networkVerdict, describeProviderError } from "./capabilities.js";
 import { sapientProvider, universeProvider, walletdProvider } from "./provider.js";
 
 /** Installs a minimal fake window with a provider object, returns an uninstaller. */
@@ -63,6 +63,15 @@ test("a wallet that answers nothing fails closed with a reason, not silently", (
   const { usable, reason } = walletUsability(null);
   assert.equal(usable, false);
   assert.match(reason, /did not report capabilities/);
+});
+
+test("an L2 browser provider cannot be offered to a native Minotari L1 XTM gate", () => {
+  const blocked = browserProviderGateCompatibility({ proof_kind: "minotari_xtm" });
+  assert.equal(blocked.ok, false);
+  assert.match(blocked.reason, /Minotari L1 XTM/i);
+  assert.match(blocked.reason, /window\.tari/i);
+  assert.equal(browserProviderGateCompatibility({ proof_kind: "ootle" }).ok, true);
+  assert.equal(browserProviderGateCompatibility({ proofKind: "xtm" }).ok, false);
 });
 
 test("the network check compares Ootle bytes, tolerating name case", () => {

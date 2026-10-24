@@ -4,6 +4,37 @@
 Ootle proof path.** The Ootle backend is stable and independently proven; this is a separate question
 about a separate chain.
 
+## 2026-10-23 browser-wallet capability update
+
+The requested Tari Universe source is now published as
+[`chironbuilds/tari-wallet`](https://github.com/chironbuilds/tari-wallet). Its own README explicitly
+identifies it as a **Tari Ootle L2** wallet, rather than a Minotari L1 wallet. Its injected
+`window.tari` contract reports Ootle accounts and Ootle networks (`esmeralda`/`igor`) and exposes
+Ootle transaction, shielding and ownership-proof operations. It does not expose a Minotari L1
+address, L1 output commitment, L1 output-spend-key signature, output-inclusion proof, or a
+current-UTXO-state proof.
+
+That rules out a tempting but invalid substitution: an Ootle `window.tari` connection or signature
+cannot establish ownership of native XTM. In particular, the Esmeralda name returned by the L2
+provider is not an independently verified Minotari L1 network assertion.
+
+The official `tari-project/tari` repository continues to expose Minotari through a console wallet
+and base-node gRPC interfaces. It has no browser provider contract equivalent to `window.tari` that
+lets an external site obtain the complete challenge-bound, output-owned, inclusion-checked and
+currently-unspent evidence this gate needs. The existing in-process `ghost-gate-minotari` prototype
+can construct a pay-to-self proof transaction, but that is deliberately not a public browser-wallet
+flow and is incompatible with a no-transaction access policy.
+
+Accordingly, Ghost Gate's `ProofMode::Xtm` remains a saved, reviewable **draft**. The browser UI
+now recognizes an L1 gate before wallet probing and refuses to request a Tari Universe/Sapient
+connection, issue a challenge, or present an authorization path. This is a production safety guard,
+not an L1 verification feature.
+
+No code from the Tari Universe/Sapient application was copied for this integration. The page keeps
+using the separately reviewed provider-contract metadata already vendored in `web/vendor/`; the
+third-party application's CPAL-1.0 licensing therefore creates no new code-copying obligation in
+this patch.
+
 ## The question
 
 > Prove control of at least X native Minotari L1 XTM, without burning or bridging that XTM onto Ootle,
