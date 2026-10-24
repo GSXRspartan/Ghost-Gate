@@ -171,8 +171,8 @@ demonstrates the exact canonical checks but is not a claim that the live capture
 ### Exact remaining requirement
 
 **BLOCKED for live consensus authorization.** The smallest missing independently authenticated
-artifact is a Tari-controlled immutable statement (for example, a signed release manifest or
-authenticated L1 record) binding Esmeralda network byte 38, epoch 12634, the four validator keys,
+artifact is a Tari maintainer-authenticated immutable statement (for example, a maintainer-signed
+release manifest) binding Esmeralda network byte 38, epoch 12634, the four validator keys,
 unit weights, shard group `1..=256`, and the derived validator-set root. It need not reconstruct
 all 8368-to-11670 history, but it must bind the candidate root at the anchor epoch.
 

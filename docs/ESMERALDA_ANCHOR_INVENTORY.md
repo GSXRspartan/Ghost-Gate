@@ -37,13 +37,18 @@ No non-default Esmeralda `indexer.sidechain_id` is set in the reviewed preset. T
 effective sidechain selector must be read from the authenticated v0.47 configuration/L1 scan when
 an independent node is available; Ghost Gate must not copy one from an indexer response.
 
-## Trust conclusion
+## Final trust conclusion
 
 The signed v0.47 release can derive a conditional candidate root at epoch 12634, but it does not
 authenticate the historical 8368-to-11670 membership discrepancy. The public indexer may carry
 committees, checkpoints and substate proofs as untrusted transport only. It is not an anchor.
 
-The required next input is an independently synchronized Esmeralda L1 source capable of returning
-the validator-node changes for the relevant Ootle sidechain, or an immutable Tari-authenticated
-record that binds a chosen epoch to the complete validator set and root. Until then, Ghost Gate
-must not create `GG_V047_ANCHOR_CONFIG` or issue a production gate session.
+An independently synchronized L1 node is **not** the immediate solution: in this Hybrid design it
+can authenticate epoch timing and boundary hashes, while the configured oracle supplies validator
+topology and reconstructs already-active validators from its current configuration. It cannot, by
+itself, turn that configuration into authenticated Esmeralda membership history.
+
+The one remaining external requirement is a maintainer-authenticated, immutable anchor statement
+binding a concrete Esmeralda epoch to network byte 38, protocol version/preshard count, complete
+validator public keys, vote powers, shard assignments, and the validator-set root. Until then,
+Ghost Gate must not create `GG_V047_ANCHOR_CONFIG` or issue a production gate session.

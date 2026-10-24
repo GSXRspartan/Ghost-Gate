@@ -1,62 +1,70 @@
-# Independent Esmeralda anchor bootstrap
+# Esmeralda anchor bootstrap: final determination
 
-This run did not install or start a base node, indexer, walletd, or validator. The machine has no
-already-synchronized independent L1 source, so starting an ordinary indexer against the public
-Esmeralda gRPC endpoint would be a trust downgrade, not a bootstrap.
+## Do not synchronize a full L1 node for this purpose
 
-## Required prerequisites
+The reviewed v0.47 Esmeralda configuration is Hybrid, not a base-layer topology oracle. The exact
+source behavior is decisive:
 
-1. A verified, version-pinned Minotari Esmeralda base-node binary and its release digest/signature.
-2. A fully synchronized local base-node database, independently validated by that node's normal
-   chain validation. A remote `grpc.esmeralda.tari.com` endpoint is not equivalent.
-3. The exact Tari Ootle `v0.47.0` indexer binary, built from commit
-   `9dabb2a76a9ad5c6e99dfa180ab7bbbcb1a05a47` or an authenticated release artifact that identifies
-   that build.
-4. A fresh, dedicated data root such as
-   `C:\Users\pdark\Documents\Codex\ghost-gate-laptop\.local\esmeralda-anchor`. It must not be a
-   walletd base path or any existing indexer's database.
-5. An authenticated record of the Esmeralda L1 network identity, the selected Ootle sidechain,
-   and validator-node change history through the proposed anchor epoch.
+- `hybrid/oracle.rs:54-76` receives base-layer events but forwards only `EpochChanged` and the
+  first `DoneForNow` to the configured ticker; all other base-layer events are ignored.
+- `configured/oracle.rs:212-260` emits registrations and `ActiveValidatorNodeSetChanged` from
+  `queued_validators`, which originated in configured topology.
+- `configured/oracle.rs:127-142` states that validators activated before local shard-key recording
+  are pinned to whatever the current configuration derives, because that is the best available
+  record for that process.
+- Esmeralda's `f_epoch_oracle.toml:70-124` sets `oracle = "Hybrid"`, supplies the L1 endpoint and
+  start height, and separately embeds the four validators, shard group `1..=256`, and registration
+  epoch 8367 in `config_json`.
 
-## Source-derived isolated indexer shape
+Therefore, a freshly synchronized independent L1 node would establish epoch timing/boundaries but
+would not independently authenticate the configured validator topology needed to derive Ghost
+Gate's epoch-12634 root. It is not a justified immediate operational step. No base node, indexer,
+walletd, or validator should be installed or synchronized for this bootstrap question.
 
-The v0.47 indexer accepts `--network`, `--base-path`, `--config`, and repeated `-p key=value`
-overrides. `CommonCliArgs::get_base_path` appends the network name, so the example root below
-becomes `<root>\esmeralda`; the indexer stores its default database below
-`data\indexer\global_storage.sqlite` there.
+## Minimum defensible conditional deployment policy
 
-Do not run this until the local base node in prerequisite 2 is healthy and its release provenance
-is recorded. With explicit executable paths, the command shape is:
+An operator may choose a **conditional** release-derived root only when all of these are recorded
+in a local, gitignored review record:
 
-```powershell
-$anchorRoot = 'C:\Users\pdark\Documents\Codex\ghost-gate-laptop\.local\esmeralda-anchor'
-$indexer = '<verified v0.47 tari_indexer executable>'
-$localBaseNodeGrpc = 'http://127.0.0.1:<local-base-node-grpc-port>'
+1. The exact v0.47.0 source tag and commit are verified against a release-signing fingerprint that
+   the accountable operator explicitly accepts as policy. GitHub's Verified badge is not enough.
+2. The operator records that this authenticates release provenance, not historical Esmeralda
+   membership. The policy must use that wording in operator-facing status and deployment review.
+3. The release topology is recomputed with v0.47 canonical hashing for one exact epoch, protocol
+   version, 256 preshards, shard group `1..=256`, and unit weights; the derived root is recorded.
+4. `anchor_pinned(network=38, walk_shard=1, epoch, root, committee)` verifies the transported
+   committee proof. Transport never selects or replaces the root.
+5. There is no automatic re-anchor. A replacement needs a new review record and explicit operator
+   approval. A missing checkpoint, invalid handover, stale proof, or unavailable sidecar denies
+   access.
 
-& $indexer --network esmeralda --base-path $anchorRoot `
-  -p epoch_oracle.oracle=BaseLayer `
-  -p epoch_oracle.base_layer.base_node_grpc_url=$localBaseNodeGrpc
-```
+This policy permits an operator-trusted deployment boundary; it does **not** create independent
+authentication. Ghost Gate's current production path remains disabled because no such operator
+approval record has been installed.
 
-The effective `indexer.sidechain_id` must remain the reviewed Esmeralda default unless the
-authenticated L1 record proves a different value. Do not set it from an indexer API response.
-The BaseLayer oracle path in `applications/tari_indexer/src/bootstrap.rs` verifies the base-node
-network and enables validator-node-change synchronization. That is the minimum implementation
-path that can calculate a validator-set root from local L1-derived events.
+## Exact maintainer-authenticated alternative
 
-## Approval procedure after synchronization
+The preferred external artifact is a Tari maintainer-signed, immutable anchor statement for one
+Esmeralda epoch. It must include or commit by digest to:
 
-1. Export/reproduce the active validator identities, activation epochs, shard keys, claim keys and
-   vote weights from the local L1-derived epoch manager at one concrete anchor epoch.
-2. Recompute its validator-set Merkle root using the exact v0.47 `ValidatorSetTree` and protocol
-   version for that epoch. Record the derivation input and a digest of the L1 evidence.
-3. Independently compare the derived root with the authenticated record. A public indexer may be
-   used only to obtain the committee proof that `anchor_pinned` checks against this already chosen
-   root.
-4. Have an accountable operator create a gitignored `GG_V047_ANCHOR_CONFIG` with `reviewStatus`
-   `approved`, `network` 38, and `walkShard` **1**. No automatic re-anchor is permitted.
-5. Replay contiguous signed handovers with `advance()` and retain the resulting verified-set
-   history. Missing handovers, malformed committee proofs, an unexpected network, or any L1
-   disagreement leave the service unready.
+- network byte 38 and epoch;
+- protocol version and preshard count;
+- every validator public key, vote power, and shard assignment in the set;
+- the canonical validator-set root; and
+- enough committee-proof material to verify the walked shard-1 committee against that root.
 
-No command in this document is a wallet command or submits a transaction.
+The statement's signature must be independently verified against a maintainer key the operator
+has explicitly approved; a hosted web response or indexer field is insufficient. A signed release
+manifest carrying the same data is acceptable. This artifact is the sole remaining external trust
+requirement.
+
+## Evidence retention and replay after approval
+
+Retain the unmodified signed anchor statement, its signature/certificate chain, the exact release
+source digest, and raw indexer transport responses separately from the Git repository. For each
+handover retain the complete `EpochCheckpointEntry` bytes and its next-epoch committee proof.
+
+Install only the reviewed local anchor JSON into `GG_V047_ANCHOR_CONFIG`, then replay contiguous
+raw entries through `PinnedConsensusVerifier::advance()` in epoch order. Persist each resulting
+trusted validator-set hash with the evidence digest. Do not use decoded JSON convenience `members`
+as authoritative; the committee proof and checkpoint signatures are what `advance()` validates.

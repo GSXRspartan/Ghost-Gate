@@ -41,7 +41,8 @@ this run.
 
 The conditional epoch-12634 release-derived root remains
 `dc39359775aa329670eb8cbfce7e1c77f7e5280d1ae334bc62bb46485c6c8956`. It is useful only after an
-operator explicitly accepts the reviewed release-signing policy; it is not a substitute for the
-independent L1 bootstrap described in `INDEPENDENT_ANCHOR_BOOTSTRAP.md`.
+operator explicitly accepts the reviewed release-signing policy; it is not independently
+authenticated topology. The final bootstrap determination is in
+`INDEPENDENT_ANCHOR_BOOTSTRAP.md`.
 
 Result: **ANCHOR_UNTRUSTED / no live checkpoint authorization.**
