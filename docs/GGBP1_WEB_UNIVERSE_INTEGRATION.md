@@ -46,7 +46,7 @@ The work can remain within Web Universe only after the core aggregate proof prim
 
 The source shows scanning/import of full L1 output fields and local transaction construction, which is promising for a future wallet adapter. This review did not establish a tamper-resistant, independently authenticated current-UTXO query path suitable for Ghost Gate; that must be specified and tested against Esmeralda separately.
 
-Synthetic GGBP-1 proof tests were **not created**, by design: the actual aggregate-sum proof and output-authority formats do not exist in the audited wallet surface. Fresh synthetic transaction or commitment examples would not validate a real GGBP-1 wallet path and are not represented as Esmeralda proofs.
+A lower-level synthetic Rust proof is now verified separately; it shows that a wallet holding all openings can construct a single minimum proof over an aggregate commitment. It does not validate Web Universe: the audited browser-wallet surface still lacks the reviewed, wallet-internal authority and aggregate-proof API required to use that construction safely. No synthetic result is represented as an Esmeralda proof; see [GGBP1_CRYPTOGRAPHIC_SPIKE.md](GGBP1_CRYPTOGRAPHIC_SPIKE.md).
 
 ## Future authorized test procedure
 

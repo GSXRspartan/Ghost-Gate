@@ -16,6 +16,8 @@
 
 pub mod artifact;
 pub mod chain_reader;
+#[cfg(feature = "experimental-ggbp1")]
+pub mod ggbp1;
 pub mod http;
 pub mod service;
 pub mod wallet_service;

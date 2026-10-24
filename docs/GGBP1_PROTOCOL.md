@@ -6,9 +6,11 @@
 
 The underlying Pedersen arithmetic is sound in principle: if `C_i = r_i.G + v_i.H` are commitments made with the same Minotari generators, then `C_sum = sum(C_i) = r_sum.G + v_sum.H`, where `r_sum = sum(r_i)` and `v_sum = sum(v_i)`. A party holding all valid openings can therefore form an opening for the aggregate.
 
-That observation is **not a deployable GGBP-1 proof**. The exact pinned wallet interface has a single-mask, single-`u64` `construct_range_proof` entry point and no safe aggregate-proof or output-authority API. `ExtendedRangeProofService::construct_extended_proof` exists in the crypto crate, but it is not an aggregate-*sum* proof API exposed through the key manager, and an aggregate proof over individual outputs is not automatically a proof about `C_sum`. No wallet surface supplies the needed aggregate opening while retaining the keys inside the wallet.
+That observation is **not a deployable GGBP-1 proof**. The exact pinned wallet interface has a single-mask, single-`u64` `construct_range_proof` entry point and no safe aggregate-proof or output-authority API. No wallet surface supplies the needed aggregate opening while retaining the keys inside the wallet.
 
-Consequently, this repository intentionally includes **no GGBP-1 prover or accepting verifier**. Making synthetic commitments and signatures here would only demonstrate independently invented crypto, not that a Tari wallet can produce the asserted evidence. That would be misleading.
+The lower-level primitive is nevertheless sufficient for a tightly bounded synthetic construction: the experimental spike sums the openings privately, constructs **one** extended Bulletproofs+ witness for `C_sum`, and independently verifies it against the recomputed public commitment. See [GGBP1_CRYPTOGRAPHIC_SPIKE.md](GGBP1_CRYPTOGRAPHIC_SPIKE.md). This is not an aggregate proof over individual output statements and does not make the construction wallet-reachable.
+
+Consequently, normal builds still include **no GGBP-1 prover or accepting verifier**. The synthetic module is disabled by default and has no chain, wallet, bridge, HTTP, Telegram, or authorization connection.
 
 ## Source findings
 

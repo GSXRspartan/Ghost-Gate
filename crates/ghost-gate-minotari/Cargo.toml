@@ -7,6 +7,11 @@ license.workspace = true
 authors.workspace = true
 description = "Native Minotari L1 XTM threshold proving: the wallet daemon service, the bridge channel and the base-node verifier"
 
+[features]
+# A synthetic-only cryptographic feasibility spike. It is off by default and has no wallet, chain,
+# HTTP, bridge, Telegram, or authorization integration.
+experimental-ggbp1 = []
+
 [dependencies]
 ghost-gate-core = { path = "../ghost-gate-core" }
 ghost-gate-bridge = { path = "../ghost-gate-bridge" }

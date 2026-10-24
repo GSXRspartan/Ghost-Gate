@@ -39,4 +39,4 @@ The RFC is incomplete until it includes independent cryptographic review of the 
 
 ## Smallest next upstream change
 
-Start with a Rust-only, non-exporting prototype behind an experimental capability flag: canonical request decoding, explicit user approval, one supported standard output form, and deterministic fixtures. It must first prove the exact aggregate-sum statement with independent verification before any gRPC, browser, deep-link, or mobile exposure is considered.
+Start with a Rust-only, non-exporting prototype behind an experimental capability flag: canonical request decoding, explicit user approval, one supported standard output form, and deterministic fixtures. The synthetic lower-level construction in [GGBP1_CRYPTOGRAPHIC_SPIKE.md](GGBP1_CRYPTOGRAPHIC_SPIKE.md) establishes the exact one-aggregate-commitment statement to carry forward; it must still receive independent review before any gRPC, browser, deep-link, or mobile exposure is considered.
