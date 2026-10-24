@@ -90,6 +90,56 @@ export function browserProviderGateCompatibility(gate) {
 }
 
 /**
+ * Parses the RFC-0154 *send intent* shape without opening it, connecting a wallet, or treating it
+ * as a Ghost Gate proof. This is deliberately a diagnostic boundary: a send deep link can only
+ * prefill a wallet's ordinary payment review; it cannot attest output ownership, value, or current
+ * unspent state.
+ *
+ * Amounts stay strings because microTari values must not pass through JavaScript Number.
+ * Address validity remains wallet-owned: the URI syntax carries a Base58 address, but only the
+ * selected Minotari network and wallet can decide whether it is a usable recipient.
+ *
+ * @param {string} raw
+ * @returns {{ ok: boolean, network?: string, address?: string, amountMicro?: string|null,
+ *   note?: string|null, canAuthorizeGate: false, reason?: string }}
+ */
+export function inspectMinotariSendDeepLink(raw) {
+  let url;
+  try {
+    url = new URL(String(raw));
+  } catch {
+    return { ok: false, canAuthorizeGate: false, reason: "Not a valid URI." };
+  }
+  if (url.protocol !== "tari:") {
+    return { ok: false, canAuthorizeGate: false, reason: "A Minotari wallet URI must use the tari: scheme." };
+  }
+  if (!url.hostname || url.pathname !== "/transactions/send") {
+    return {
+      ok: false,
+      canAuthorizeGate: false,
+      reason: "Only the RFC-0154 /transactions/send intent is recognised here.",
+    };
+  }
+  const address = url.searchParams.get("tariAddress");
+  if (!address || /\s/.test(address)) {
+    return { ok: false, canAuthorizeGate: false, reason: "The send intent has no usable tariAddress." };
+  }
+  const amountMicro = url.searchParams.get("amount");
+  if (amountMicro !== null && !/^(0|[1-9]\d*)$/.test(amountMicro)) {
+    return { ok: false, canAuthorizeGate: false, reason: "amount must be an unsigned integer in microTari." };
+  }
+  return {
+    ok: true,
+    network: url.hostname.toLowerCase(),
+    address,
+    amountMicro,
+    note: url.searchParams.get("note"),
+    canAuthorizeGate: false,
+    reason: "This is a payment-review intent only; it is never Ghost Gate authorization evidence.",
+  };
+}
+
+/**
  * Which proof modes a provider's capabilities support.
  *
  * Mode A is offered by the walletd adapter only, and deliberately not derived from any capability

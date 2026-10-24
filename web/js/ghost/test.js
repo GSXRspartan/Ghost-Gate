@@ -12,7 +12,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { PROOF_MODES, browserProviderGateCompatibility, supportedProofModes, walletUsability, networkMatches, parseAmount, formatAmount, networkVerdict, describeProviderError } from "./capabilities.js";
+import { PROOF_MODES, browserProviderGateCompatibility, inspectMinotariSendDeepLink, supportedProofModes, walletUsability, networkMatches, parseAmount, formatAmount, networkVerdict, describeProviderError } from "./capabilities.js";
 import { sapientProvider, universeProvider, walletdProvider } from "./provider.js";
 
 /** Installs a minimal fake window with a provider object, returns an uninstaller. */
@@ -72,6 +72,19 @@ test("an L2 browser provider cannot be offered to a native Minotari L1 XTM gate"
   assert.match(blocked.reason, /window\.tari/i);
   assert.equal(browserProviderGateCompatibility({ proof_kind: "ootle" }).ok, true);
   assert.equal(browserProviderGateCompatibility({ proofKind: "xtm" }).ok, false);
+});
+
+test("synthetic Minotari send links are diagnostic only, never gate authorization", () => {
+  const parsed = inspectMinotariSendDeepLink(
+    "tari://mainnet/transactions/send?tariAddress=abc123&amount=1234567&note=synthetic",
+  );
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.network, "mainnet");
+  assert.equal(parsed.amountMicro, "1234567");
+  assert.equal(parsed.canAuthorizeGate, false);
+  assert.match(parsed.reason, /payment-review intent/i);
+  assert.equal(inspectMinotariSendDeepLink("tari://mainnet/transactions/send?tariAddress=x&amount=-1").ok, false);
+  assert.equal(inspectMinotariSendDeepLink("https://example.test/transactions/send?tariAddress=x").ok, false);
 });
 
 test("the network check compares Ootle bytes, tolerating name case", () => {
