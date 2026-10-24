@@ -12,6 +12,10 @@ The lower-level primitive is nevertheless sufficient for a tightly bounded synth
 
 Consequently, normal builds still include **no GGBP-1 prover or accepting verifier**. The synthetic module is disabled by default and has no chain, wallet, bridge, HTTP, Telegram, or authorization connection.
 
+The Phase 2 feature-gated experiment adds a separate in-memory verifier lifecycle and a read-only,
+locally-trusted base-node adapter. Its result type is explicitly non-authorizing and it is not
+connected to normal builds. See [GGBP1_PHASE2_EXPERIMENT.md](GGBP1_PHASE2_EXPERIMENT.md).
+
 ## Source findings
 
 The project pins `tari_transaction_key_manager 6.0.1-pre.2` and `tari_crypto 0.23.4`; detailed source quotations and paths are retained in [XTM_RESEARCH.md](XTM_RESEARCH.md).

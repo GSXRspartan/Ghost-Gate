@@ -34,6 +34,7 @@ tari_script = "6.0.1-pre.2"
 tari_shutdown = "6.0.1-pre.2"
 
 anyhow.workspace = true
+async-trait.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true

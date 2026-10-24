@@ -15,6 +15,8 @@ thiserror.workspace = true
 rand.workspace = true
 sha2.workspace = true
 tari_utilities.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
 
 [lib]
 path = "src/lib.rs"

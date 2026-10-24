@@ -5,3 +5,6 @@
 
 #[path = "../../ghost-gate-minotari/src/ggbp1.rs"]
 pub mod ggbp1;
+
+#[path = "../../ghost-gate-minotari/src/ggbp1_experiment.rs"]
+pub mod ggbp1_experiment;

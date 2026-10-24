@@ -43,13 +43,18 @@ This is deliberately not a claim that Tari currently supports a wallet-created p
 
 ## Verified test cases
 
-`cargo test -p ghost-gate-ggbp1-spike` passes four tests covering:
+The initial isolated crypto harness passed six tests covering:
 
 - a value below the threshold refusing to produce a proof, with equal and above-threshold single outputs verifying;
 - two `45 + 55` synthetic outputs verifying against threshold `100`;
 - challenge-threshold substitution failing first at the bound authority signatures, and still failing the Bulletproofs+ verification when synthetic authority signatures are regenerated for the altered threshold;
 - invalid opening mask, invalid authority signature, changed commitment, non-standard script, duplicate output identifier, malformed proof bytes, and `u64` aggregate overflow rejecting;
 - a GGBP-1 signature failing verification when reinterpreted under Tari's `CheckSigHashDomain`.
+
+The same harness now has three additional Phase 2 tests for an isolated server/challenge/ChainView
+lifecycle, concurrent redemption refusal, response-size refusal, maturity and reorganization
+refusal, forged aggregate-proof refusal, gate-binding refusal, and recheck revocation. See
+[GGBP1_PHASE2_EXPERIMENT.md](GGBP1_PHASE2_EXPERIMENT.md).
 
 The fixtures are reproducible: their private keys, masks, challenge fields, and signature RNG seeds are fixed in the test module. They are not published as Esmeralda vectors and have no chain meaning.
 
