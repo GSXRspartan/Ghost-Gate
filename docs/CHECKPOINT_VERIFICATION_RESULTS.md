@@ -34,15 +34,17 @@ authenticate a live Esmeralda root.
 
 ## Genuine evidence result
 
-No genuine current checkpoint or L1-derived anchor was verified in this run. The earlier raw
-12634-to-12635 handover is not retained in the repository, and previous public-endpoint retrieval
-was refused. Therefore there is no claim that a genuine 12634-to-12635 handover passed during
-this run.
+On 2026-10-23, bounded read-only requests to the official public indexer returned retained,
+genuine shard-1 responses for epochs 12633 and 12634, including each next-epoch committee proof.
+The focused `esmeralda_release_handover` regression derives the epoch-12634 root from the reviewed
+release topology, authenticates the 12634 committee using the preceding response, and runs the
+official `TrustedValidatorSet::advance` on the genuine 12634 checkpoint. It reached the
+independently derived epoch-12635 root successfully.
 
-The conditional epoch-12634 release-derived root remains
-`dc39359775aa329670eb8cbfce7e1c77f7e5280d1ae334bc62bb46485c6c8956`. It is useful only after an
-operator explicitly accepts the reviewed release-signing policy; it is not independently
-authenticated topology. The final bootstrap determination is in
-`INDEPENDENT_ANCHOR_BOOTSTRAP.md`.
+The raw transport hashes, endpoints, protocol-version calculation and trust assumptions are in
+`ESMERALDA_RELEASE_BOOTSTRAP_POLICY.md`. This is a cryptographic live-evidence PASS **relative to
+the conditional release-derived candidate root**. It is not independent authentication of the
+signer's authority, and it does not establish current-state freshness.
 
-Result: **ANCHOR_UNTRUSTED / no live checkpoint authorization.**
+Result: **CHECKPOINT_VALID_RELATIVE_TO_CONDITIONAL_ROOT / production authorization remains
+fail-closed.**

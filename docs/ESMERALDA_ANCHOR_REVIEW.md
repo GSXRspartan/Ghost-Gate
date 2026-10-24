@@ -25,7 +25,9 @@ The loopback sidecar accepts a JSON document only when all of these fields are p
   "upstreamCommit": "9dabb2a76a9ad5c6e99dfa180ab7bbbcb1a05a47",
   "releaseBootstrap": {
     "releaseTag": "v0.47.0",
-    "signerFingerprint": "337B91EFC5F1027D8AEDF63D1885B149504C0A64"
+    "signerFingerprint": "337B91EFC5F1027D8AEDF63D1885B149504C0A64",
+    "policyVersion": "ghost-gate/esmeralda-release-bootstrap/v1",
+    "epochOraclePresetSha256": "e9b9badfb8061e982524c4176ae2336d44229c34b6d074ef128cd670e49d9df3"
   },
   "reviewStatus": "approved",
   "maxProofAgeEpochs": 1
@@ -53,9 +55,9 @@ because the v0.47 verifier proves it against the approved hash.
    configuration parse failure remains `UNKNOWN`.
 
 `releaseBootstrap` is optional. When present, the sidecar accepts only the exact reviewed
-v0.47.0 release tag, signer fingerprint, Esmeralda network byte, epoch 12634, and the
-deterministically derived validator-set hash. It is not enabled by default and does not make a
-transport response an anchor.
+v0.47.0 release tag, signer fingerprint, policy version, epoch-oracle-preset SHA-256, Esmeralda
+network byte, epoch 12634, and deterministically derived validator-set hash. It is not enabled by
+default and does not make a transport response an anchor.
 
 This package intentionally contains no production approval or active configuration. Filling its
 placeholders requires an operator with independent provenance evidence.
@@ -163,10 +165,13 @@ checkpoint and incorrect network. The indexer's duplicate JSON `members` field i
 not authoritative: changing only that convenience field leaves the proof-authenticated committee
 unchanged, which is the intended safe behavior.
 
-The complete genuine 12634-to-12635 response is not stored in this repository, and a read-only
-attempt to re-fetch it during this review was actively refused by the public endpoint. Therefore
-the genuine Esmeralda handover has **not** been rerun through the new sidecar. Fixture validation
-demonstrates the exact canonical checks but is not a claim that the live capture passed them.
+The complete genuine shard-1 12633 and 12634 responses are retained under
+`tools/ghost-gate-v047-verifier/evidence/`, with SHA-256 digests in
+`ESMERALDA_RELEASE_BOOTSTRAP_POLICY.md`. The focused v0.47 regression uses the 12633 next-epoch
+committee as the epoch-12634 `anchor_pinned` proof, then verifies the genuine 12634 checkpoint
+with `advance`, reaching the independently derived 12635 root. This is a live-evidence success
+relative to the conditional release-derived root; it does not establish signer's authority or
+current proof freshness.
 
 ### Exact remaining requirement
 

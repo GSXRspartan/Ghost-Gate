@@ -55,14 +55,17 @@ Esmeralda epoch. It must include or commit by digest to:
 
 The statement's signature must be independently verified against a maintainer key the operator
 has explicitly approved; a hosted web response or indexer field is insufficient. A signed release
-manifest carrying the same data is acceptable. This artifact is the sole remaining external trust
-requirement.
+manifest carrying the same data is acceptable. This artifact is the route to independent anchor
+authentication. The alternative is the explicitly conditional operator policy now recorded in
+`ESMERALDA_RELEASE_BOOTSTRAP_POLICY.md`; it does not provide independent authentication.
 
 ## Evidence retention and replay after approval
 
 Retain the unmodified signed anchor statement, its signature/certificate chain, the exact release
-source digest, and raw indexer transport responses separately from the Git repository. For each
-handover retain the complete `EpochCheckpointEntry` bytes and its next-epoch committee proof.
+source digest, and raw indexer transport responses. The reproducible public transport fixtures are
+versioned under `tools/ghost-gate-v047-verifier/evidence/`; any operator approval record stays
+local and gitignored. For each handover retain the complete `EpochCheckpointEntry` bytes and its
+next-epoch committee proof.
 
 Install only the reviewed local anchor JSON into `GG_V047_ANCHOR_CONFIG`, then replay contiguous
 raw entries through `PinnedConsensusVerifier::advance()` in epoch order. Persist each resulting

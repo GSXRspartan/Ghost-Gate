@@ -48,7 +48,10 @@ can authenticate epoch timing and boundary hashes, while the configured oracle s
 topology and reconstructs already-active validators from its current configuration. It cannot, by
 itself, turn that configuration into authenticated Esmeralda membership history.
 
-The one remaining external requirement is a maintainer-authenticated, immutable anchor statement
+Independent authentication still requires a maintainer-authenticated immutable anchor statement
 binding a concrete Esmeralda epoch to network byte 38, protocol version/preshard count, complete
-validator public keys, vote powers, shard assignments, and the validator-set root. Until then,
-Ghost Gate must not create `GG_V047_ANCHOR_CONFIG` or issue a production gate session.
+validator public keys, vote powers, shard assignments, and the validator-set root. The narrower
+alternative is an explicitly operator-approved conditional release policy; its genuine one-epoch
+handover result is recorded in `ESMERALDA_RELEASE_BOOTSTRAP_POLICY.md`. Neither route currently
+has a freshness-qualified current-state chain, so Ghost Gate must not create a production
+`GG_V047_ANCHOR_CONFIG` or issue a production gate session.

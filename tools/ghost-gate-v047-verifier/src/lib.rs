@@ -44,6 +44,17 @@ pub const ESMERALDA_V047_RELEASE_COMMIT: &str = "9dabb2a76a9ad5c6e99dfa180ab7bbb
 /// The exact release tag whose signature was checked during the bootstrap review.
 pub const ESMERALDA_V047_RELEASE_TAG: &str = "v0.47.0";
 
+/// Policy revision for the reviewed release-derived topology. This is deliberately explicit in
+/// local anchor configuration so that an operator must re-review rather than silently inheriting
+/// a changed policy.
+pub const ESMERALDA_V047_RELEASE_BOOTSTRAP_POLICY_VERSION: &str =
+    "ghost-gate/esmeralda-release-bootstrap/v1";
+
+/// SHA-256 of the exact `f_epoch_oracle.toml` file in the reviewed v0.47.0 release checkout.
+/// It is a provenance pin, not a runtime substitute for release-signature verification.
+pub const ESMERALDA_V047_EPOCH_ORACLE_PRESET_SHA256: &str =
+    "e9b9badfb8061e982524c4176ae2336d44229c34b6d074ef128cd670e49d9df3";
+
 /// The first epoch whose release-derived committee was checked against captured public transport
 /// evidence. This is intentionally not inferred from the configured-oracle registration epoch.
 pub const ESMERALDA_V047_RELEASE_ANCHOR_EPOCH: u64 = 12_634;
@@ -167,6 +178,8 @@ pub struct PinnedAnchorConfig {
 pub struct ReleaseBootstrap {
     pub release_tag: String,
     pub signer_fingerprint: String,
+    pub policy_version: String,
+    pub epoch_oracle_preset_sha256: String,
 }
 
 fn default_max_proof_age_epochs() -> u64 { 1 }
@@ -189,6 +202,8 @@ impl PinnedAnchorConfig {
         if let Some(bootstrap) = self.release_bootstrap {
             if bootstrap.release_tag != ESMERALDA_V047_RELEASE_TAG
                 || bootstrap.signer_fingerprint != ESMERALDA_V047_RELEASE_SIGNER_FINGERPRINT
+                || bootstrap.policy_version != ESMERALDA_V047_RELEASE_BOOTSTRAP_POLICY_VERSION
+                || !bootstrap.epoch_oracle_preset_sha256.eq_ignore_ascii_case(ESMERALDA_V047_EPOCH_ORACLE_PRESET_SHA256)
                 || self.network != Network::Esmeralda.as_byte()
                 || self.anchor_epoch != ESMERALDA_V047_RELEASE_ANCHOR_EPOCH
                 || hash != derive_esmeralda_v047_release_validator_set_hash(Epoch(self.anchor_epoch))
@@ -248,6 +263,13 @@ impl PinnedConsensusVerifier {
 
     pub fn latest_epoch(&self) -> Epoch {
         self.latest.epoch()
+    }
+
+    /// The validator-set hash reached through the pinned anchor and verified handovers.
+    /// This is useful to bind a product freshness policy to authenticated progression rather than
+    /// an indexer's reported latest epoch.
+    pub fn latest_validator_set_hash(&self) -> ValidatorSetHash {
+        *self.latest.validator_set_hash()
     }
 
     /// A valid historical inclusion proof is not present-holdings evidence. This check uses the
@@ -434,6 +456,19 @@ mod tests {
         assert_eq!(result.verdict, ChainVerdict::EvidenceUnavailable);
         assert_eq!(result.reason, "handover_limit");
         assert_eq!(verifier.latest_epoch(), set.epoch);
+    }
+
+    #[test]
+    fn stale_proof_is_rejected_relative_to_an_authenticated_handover() {
+        let (mut verifier, current, id, value) = fixture();
+        let proof = substate_proof(&current, &id, SubstateVersion::ZERO, &value);
+        let next = ValidatorSetFixture::new(3);
+        verifier.advance(&checkpoint_entry(CheckpointSpec::handover(&current, &next))).unwrap();
+
+        assert!(matches!(
+            verifier.verify_substate_fresh(0, &id, SubstateVersion::ZERO, &value, &proof, &current.committee(low())),
+            Err(ConsensusError::StaleEvidence)
+        ));
     }
 
     #[test]
@@ -655,6 +690,8 @@ mod tests {
             release_bootstrap: Some(ReleaseBootstrap {
                 release_tag: ESMERALDA_V047_RELEASE_TAG.into(),
                 signer_fingerprint: ESMERALDA_V047_RELEASE_SIGNER_FINGERPRINT.into(),
+                policy_version: ESMERALDA_V047_RELEASE_BOOTSTRAP_POLICY_VERSION.into(),
+                epoch_oracle_preset_sha256: ESMERALDA_V047_EPOCH_ORACLE_PRESET_SHA256.into(),
             }),
             max_proof_age_epochs: 1,
         };
@@ -669,6 +706,13 @@ mod tests {
             .unwrap()
             .signer_fingerprint = "0000000000000000000000000000000000000000".into();
         assert!(matches!(wrong_signer.into_verifier(), Err(ConsensusError::UntrustedAnchor)));
+        let mut wrong_preset = reviewed.clone();
+        wrong_preset
+            .release_bootstrap
+            .as_mut()
+            .unwrap()
+            .epoch_oracle_preset_sha256 = "00".into();
+        assert!(matches!(wrong_preset.into_verifier(), Err(ConsensusError::UntrustedAnchor)));
         let mut wrong_tag = reviewed;
         wrong_tag.release_bootstrap.as_mut().unwrap().release_tag = "v0.47.1".into();
         assert!(matches!(wrong_tag.into_verifier(), Err(ConsensusError::UntrustedAnchor)));
