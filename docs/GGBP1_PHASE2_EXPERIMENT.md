@@ -18,6 +18,11 @@ wallet attachment, no Telegram integration, and no live Esmeralda claim.**
 - `SyntheticWalletProver` is a synthetic-only wallet-owned API shape. It accepts a complete
   challenge and emits a bounded public response. It offers no raw signing, secret export,
   transaction creation, network call, or existing-wallet constructor.
+- `ggbp1_wallet_adapter.rs` is the next, still synthetic-only wallet-core boundary. It binds
+  network and genesis, filters deterministic confirmed/mature/unspent standard fixtures, obtains
+  explicit approval over the exact origin/gate/threshold/output references, and returns only the
+  same bounded public response. It is not connected to `OutputManagerHandle`, key-manager APIs,
+  wallet files, WASM, or any authorization surface.
 
 ## Protocol hardening
 

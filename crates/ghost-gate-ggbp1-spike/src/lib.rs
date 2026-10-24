@@ -8,3 +8,6 @@ pub mod ggbp1;
 
 #[path = "../../ghost-gate-minotari/src/ggbp1_experiment.rs"]
 pub mod ggbp1_experiment;
+
+#[path = "../../ghost-gate-minotari/src/ggbp1_wallet_adapter.rs"]
+pub mod ggbp1_wallet_adapter;

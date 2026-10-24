@@ -173,6 +173,19 @@ impl SyntheticOutputWitness {
             value_micro_xtm,
         }
     }
+
+    /// Available only to the experimental wallet-core adapter while it selects synthetic
+    /// fixtures. This is deliberately crate-private: proof callers never receive a value,
+    /// mask, script key, seed, or a generic signing capability.
+    pub(crate) fn value_for_wallet_selection(&self) -> u64 {
+        self.value_micro_xtm
+    }
+
+    /// Checks the only script shape supported by this experiment without exposing any signing
+    /// primitive to the adapter.
+    pub(crate) fn is_supported_standard_output(&self) -> bool {
+        check_standard_script(&self.public).is_ok()
+    }
 }
 
 /// Public output proof material. The verifier receives no masks, values, or script private keys.

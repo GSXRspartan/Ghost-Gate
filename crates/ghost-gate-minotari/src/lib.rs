@@ -22,6 +22,8 @@ pub mod ggbp1;
 pub mod ggbp1_chain_view;
 #[cfg(feature = "experimental-ggbp1")]
 pub mod ggbp1_experiment;
+#[cfg(feature = "experimental-ggbp1")]
+pub mod ggbp1_wallet_adapter;
 pub mod http;
 pub mod service;
 pub mod wallet_service;
