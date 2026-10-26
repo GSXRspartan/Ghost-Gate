@@ -162,12 +162,31 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             access_token: None,
             trust_tier: ghost_gate_registry::TrustTier::default(),
             evidence_digest: None,
+            // The chain generation the challenge is ISSUED under, captured now. Authorization later
+            // refuses if the active generation has moved on (a reset migration between challenge
+            // issue and proof submission), so an old-generation challenge cannot be exchanged for a
+            // new-generation session. `0` when there is no binding yet (offline preview).
+            chain_generation: self.access.as_ref().map(|a| a.expected_generation(gate_id)).unwrap_or(0),
         }
     }
 
     /// Set the operator trust policy parsed from the environment. Never raises a tier.
     pub fn set_trust_policy(&mut self, policy: ghost_gate_registry::TrustPolicy) {
         self.trust_policy = policy;
+    }
+
+    /// The durable reset-halt path for this (registry-backed) bridge, if it has a store. A preview
+    /// bridge has no store and so can never be halted.
+    fn reset_halt_path(&self) -> Option<std::path::PathBuf> {
+        self.access.as_ref().map(|a| a.plane.paths.dir.join("reset_halt.json"))
+    }
+
+    /// Whether a durable chain-reset halt is latched. While halted the bridge issues no new
+    /// sessions: a suspected reset must be reviewed and explicitly cleared by an operator first.
+    /// The check reads the durable guard each time, so it survives a restart and cannot be cleared
+    /// by anything but an explicit acknowledgment (see [`crate::reset_guard`]).
+    pub fn reset_halted(&self) -> bool {
+        self.reset_halt_path().map(|p| crate::reset_guard::is_halted(&p)).unwrap_or(false)
     }
 
     /// Assembles a bridge over every channel at once. The narrower constructors below are sugar
@@ -643,6 +662,16 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
         job_id: Option<&str>,
         evidence: ghost_gate_registry::Evidence,
     ) -> Option<ghost_gate_registry::AccessGrant> {
+        // A latched chain-reset halt stops ALL new issuance, before any other work. A suspected
+        // reset (an indexer identity/epoch discontinuity) must be reviewed and explicitly cleared
+        // by an operator; the bridge never clears it itself and never issues while it stands.
+        if self.reset_halted() {
+            eprintln!(
+                "ghost-gate-bridge: refusing to issue for gate {gate_id}: a chain-reset halt is \
+                 latched; an operator must review the chain identity and clear it"
+            );
+            return None;
+        }
         // A proof is only worth a session under the policy it was answered against. If an
         // administrator replaced that policy while the challenge was outstanding, the answer proves
         // the OLD threshold — so no session is issued and the caller must mint a fresh challenge.
@@ -664,6 +693,10 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
         // value from the same evidence, so a recovery that presents different evidence (a different
         // digest, or evidence that would yield a different tier) is refused rather than upgraded.
         let expected_tier = self.access.as_ref()?.expected_tier(gate_id, &evidence, &policy);
+        // The chain generation this gate is bound under, recorded alongside the tier so a recovery
+        // after a reset migration (which republishes a higher generation) is refused rather than
+        // restoring a retired authorization.
+        let expected_generation = self.access.as_ref()?.expected_generation(gate_id);
         let evidence_digest = evidence.digest().to_string();
         let grant = if let Some(replay) = self.replay.as_mut() {
             let nonce = nonce?;
@@ -675,7 +708,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             }
             let authorization_id = format!("gg-auth-{}", hex::encode(nonce));
             let token = existing.access_token.clone().unwrap_or_else(|| hex::encode(random_nonce()));
-            let record = match replay.authorize(&nonce, &authorization_id, &token, expected_tier, &evidence_digest, crate::session::now_unix()) {
+            let record = match replay.authorize(&nonce, &authorization_id, &token, expected_tier, &evidence_digest, expected_generation, crate::session::now_unix()) {
                 Ok(record) => record,
                 Err(error) => {
                     // An evidence/tier mismatch on a retry is an attempted upgrade: fail closed and
@@ -2038,6 +2071,39 @@ mod tests {
             wallet,
             OriginPolicy::new().allow("https://vip.example").allow("https://partner.example"),
         )
+    }
+
+    #[test]
+    fn a_registry_backed_bridge_enforces_a_latched_reset_halt_across_a_restart() {
+        use ghost_gate_registry::{Bindings, StorePaths};
+        let dir = std::env::temp_dir().join(format!("gg-bridge-halt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths = StorePaths::new(&dir);
+        let empty = Bindings { generated_unix: 0, gates: vec![], revoked_session_prefixes: vec![] };
+
+        // A registry-backed bridge (one with an access plane) reads its reset halt from the store.
+        let mut b = bridge(FakeWallet::new());
+        b.access = Some(crate::access::AccessHandle::from_snapshot(&paths, &empty).0);
+        assert!(!b.reset_halted(), "no halt latched yet");
+
+        // Latch a halt (as the identity sensor would) and confirm the bridge now refuses issuance.
+        crate::reset_guard::latch_halt(
+            &paths.generations().with_file_name("reset_halt.json"),
+            &crate::reset_guard::ResetHalt { reason: "epoch regressed".into(), first_seen_unix: 1, observed_network: Some(38), observed_epoch: Some(3) },
+        ).unwrap();
+        assert!(b.reset_halted(), "the bridge sees the latched halt");
+
+        // "Restart": a freshly constructed bridge over the SAME store still sees the halt — it is
+        // read from disk every time, never held only in memory.
+        let mut restarted = bridge(FakeWallet::new());
+        restarted.access = Some(crate::access::AccessHandle::from_snapshot(&paths, &empty).0);
+        assert!(restarted.reset_halted(), "a restarted bridge still enforces the durable halt");
+
+        // Only an explicit operator acknowledgment clears it.
+        crate::reset_guard::clear_halt(&paths.generations().with_file_name("reset_halt.json"), "operator reviewed").unwrap();
+        assert!(!restarted.reset_halted(), "an explicit ack clears the halt");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn get(path: &str) -> Request {

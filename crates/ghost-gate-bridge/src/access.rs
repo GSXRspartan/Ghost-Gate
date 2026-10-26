@@ -25,6 +25,10 @@ pub struct GateAccessInfo {
     /// The gate's proof machinery, recovered from the snapshot. The bridge uses it only to sanity
     /// the evidence it already holds; the registry remains the authority on the issued tier.
     pub proof_mode: ProofMode,
+    /// The Ootle chain generation this gate's binding was published under. Bound into the replay
+    /// record so a recovery after a reset migration (which republishes with a higher generation)
+    /// cannot restore a retired-generation authorization. `0` means an unmigrated binding.
+    pub chain_generation: u64,
 }
 
 /// Where the bridge's gates came from when it is registry-backed.
@@ -54,6 +58,7 @@ impl AccessHandle {
                     // Credential, the mode whose ceiling is lowest among the activatable modes, so
                     // an unparseable snapshot can never over-grant.
                     proof_mode: ProofMode::from_label(&g.proof_mode).unwrap_or(ProofMode::Credential),
+                    chain_generation: g.chain_generation,
                 },
             );
         }
@@ -143,6 +148,12 @@ impl AccessHandle {
             Some(info) => ghost_gate_registry::achieved_tier(evidence.kind(), info.proof_mode, policy),
             None => ghost_gate_registry::TrustTier::Development,
         }
+    }
+
+    /// The chain generation this gate's binding was published under, bound into the replay record
+    /// so a cross-generation recovery is refused. An unknown gate yields `0` (no live generation).
+    pub fn expected_generation(&self, gate_id: &str) -> u64 {
+        self.index.get(gate_id).map(|info| info.chain_generation).unwrap_or(0)
     }
 
     /// The full server-side access decision.

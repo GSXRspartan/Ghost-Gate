@@ -88,6 +88,7 @@ fn main() -> ExitCode {
         pending: Mutex::new(std::collections::BTreeMap::new()),
         bootstrap_token: bootstrap_token.clone(),
         genesis_hash: std::env::var("GG_GENESIS_HASH").ok().map(|g| g.trim().to_string()).filter(|g| !g.is_empty()),
+        chain_generation: std::env::var("GG_CHAIN_GENERATION").ok().and_then(|g| g.trim().parse::<u64>().ok()).filter(|g| *g > 0),
     });
 
     println!("ghost-gate-admin listening on {origin}");

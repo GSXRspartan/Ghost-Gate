@@ -42,6 +42,9 @@ pub struct AdminState {
     /// The deployment's ledger identity (GG_GENESIS_HASH): applied to every application that does
     /// not name its own. Set once at startup so the dashboard's identity fields default correctly.
     pub genesis_hash: Option<String>,
+    /// The deployment's starting Ootle chain generation (GG_CHAIN_GENERATION): applied to a new
+    /// application that does not name its own. `None` falls back to generation `1` at create time.
+    pub chain_generation: Option<u64>,
 }
 
 pub type SharedState = Arc<AdminState>;
@@ -331,6 +334,7 @@ pub fn route(state: &SharedState, req: &Request) -> Result<Response, ()> {
     match (method, path) {
         ("POST", "/admin/api/app/create") => Ok(create_application(state, req, &authority)),
         ("POST", "/admin/api/app/update") => Ok(update_application(state, req, &authority)),
+        ("POST", "/admin/api/app/migrate-generation") => Ok(migrate_generation(state, req, &authority)),
         ("POST", "/admin/api/app/delete") => Ok(delete_application(state, req, &authority)),
         ("POST", "/admin/api/gate/set") => Ok(set_gate(state, req, &authority)),
         ("POST", "/admin/api/gate/remove") => Ok(remove_gate(state, req, &authority)),
@@ -760,6 +764,11 @@ fn admin_state(state: &SharedState, authority: &Authority) -> Response {
             "network": a.network,
             "networkName": network_name(a.network),
             "genesisHash": a.genesis_hash,
+            // The live Ootle chain generation, and the durable floor it may never drop below. A
+            // reset migration raises both; an operator reads these to confirm the deployment is on
+            // the current chain.
+            "chainGeneration": a.chain_generation,
+            "generationFloor": reg.generation_floor_of(&a.application_id),
             "gates": gates_json,
         }));
     }
@@ -916,6 +925,11 @@ fn create_application(state: &SharedState, req: &Request, authority: &Authority)
         /// once for the whole deployment instead of once per application.
         #[serde(default)]
         genesis_hash: Option<String>,
+        /// The Ootle chain generation this application starts at. Falls back to GG_CHAIN_GENERATION,
+        /// then to `1` (the first generation) so a fresh deployment authorizes. A reset later moves
+        /// it forward through the dedicated migrate operation, never through an ordinary edit.
+        #[serde(default)]
+        chain_generation: Option<u64>,
     }
     let body: Body = match parse_body(req) {
         Ok(b) => b,
@@ -944,6 +958,9 @@ fn create_application(state: &SharedState, req: &Request, authority: &Authority)
         }
     };
     let actor = authority.session.credential_id.clone();
+    // A fresh application starts at the deployment's declared generation (or 1). It only ever moves
+    // forward via the migrate operation; an ordinary create/edit never advances it past the floor.
+    let chain_generation = body.chain_generation.or(state.chain_generation).unwrap_or(1);
     let app = ghost_gate_core::policy::Application {
         application_id: body.application_id.clone(),
         display_name: body.display_name,
@@ -956,6 +973,7 @@ fn create_application(state: &SharedState, req: &Request, authority: &Authority)
         production: body.production,
         network,
         genesis_hash,
+        chain_generation,
     };
     if let Err(e) = app.validate() {
         return Response::error(400, &format!("GG: {e}"));
@@ -1008,6 +1026,46 @@ fn update_application(state: &SharedState, req: &Request, authority: &Authority)
         Ok(())
     }) {
         Ok(_) => Response::ok_json(&serde_json::json!({ "updated": app_id })),
+        Err(e) => Response::error(400, &format!("GG: {e}")),
+    }
+}
+
+/// Migrate an application to a new Ootle chain generation after a reset. This is the ONLY operation
+/// that advances the generation — ordinary edits never do. It raises the durable generation floor,
+/// retires every prior session, and so refuses pre-reset authorizations from then on. It needs the
+/// owner's fresh authentication, like creating an application.
+fn migrate_generation(state: &SharedState, req: &Request, authority: &Authority) -> Response {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Body {
+        application_id: String,
+        new_generation: u64,
+    }
+    let body: Body = match parse_body(req) {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    if let Err(resp) = gatekeep(state, req, authority, &body.application_id, "app.migrate-generation") {
+        return resp;
+    }
+    // A reset migration invalidates every existing authorization for the application; it is at
+    // least as sensitive as creating one, so it requires fresh authentication.
+    if authority.session.stepup_until_unix <= ghost_gate_registry::now_unix() {
+        return Response::error(403, "GG: migrating a chain generation requires fresh authentication");
+    }
+    let actor = authority.session.credential_id.clone();
+    let app_id = body.application_id.clone();
+    let new_generation = body.new_generation;
+    match state.commit_ctx(
+        &actor,
+        "app.migrate-generation",
+        Some((app_id.clone(), None, None, Some(new_generation))),
+        |r| ghost_gate_registry::migrate_generation(&state.paths, r, &app_id, new_generation, &actor),
+    ) {
+        Ok(_) => Response::ok_json(&serde_json::json!({
+            "migrated": app_id,
+            "generation": new_generation,
+        })),
         Err(e) => Response::error(400, &format!("GG: {e}")),
     }
 }

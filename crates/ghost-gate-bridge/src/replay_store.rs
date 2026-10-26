@@ -71,6 +71,11 @@ pub struct ReplayRecord {
     /// different evidence is refused rather than silently upgraded. Legacy records have `None`.
     #[serde(default)]
     pub evidence_digest: Option<String>,
+    /// The Ootle chain generation this authorization was granted under. A recovery after a reset
+    /// migration presents the new generation, which no longer matches, so the retired-generation
+    /// authorization is refused rather than restored. Legacy records load as `0`.
+    #[serde(default)]
+    pub chain_generation: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,6 +95,8 @@ pub enum ReplayError {
     Final,
     #[error("GG: recovery evidence does not match the originally authorized evidence")]
     EvidenceMismatch,
+    #[error("GG: recovery presents a different chain generation than the one originally authorized")]
+    GenerationMismatch,
 }
 
 /// Each mutation must be atomic across bridge processes. There is intentionally no operation that
@@ -110,7 +117,7 @@ pub trait ReplayStore: Send {
     /// `evidence_digest`, or it is refused: a restart, retry or reconfiguration can never upgrade
     /// an authorization that was already granted.
     fn authorize(&mut self, nonce: &[u8; 32], authorization_id: &str, access_token: &str,
-        trust_tier: TrustTier, evidence_digest: &str, now_unix: u64)
+        trust_tier: TrustTier, evidence_digest: &str, chain_generation: u64, now_unix: u64)
         -> Result<ReplayRecord, ReplayError>;
     fn release_refused(&mut self, expected: &ReplayRecord, now_unix: u64) -> Result<(), ReplayError>;
     fn revoke(&mut self, nonce: &[u8; 32]) -> Result<(), ReplayError>;
@@ -124,7 +131,7 @@ impl ReplayStore for UnavailableReplayStore {
     fn reserve(&mut self, _: &ReplayRecord, _: &str, _: u64) -> Result<Reservation, ReplayError> { Err(ReplayError::Unavailable) }
     fn record_submission(&mut self, _: &[u8; 32], _: &str, _: PendingProofKind, _: &str) -> Result<(), ReplayError> { Err(ReplayError::Unavailable) }
     fn submitted(&mut self) -> Result<Vec<ReplayRecord>, ReplayError> { Err(ReplayError::Unavailable) }
-    fn authorize(&mut self, _: &[u8; 32], _: &str, _: &str, _: TrustTier, _: &str, _: u64) -> Result<ReplayRecord, ReplayError> { Err(ReplayError::Unavailable) }
+    fn authorize(&mut self, _: &[u8; 32], _: &str, _: &str, _: TrustTier, _: &str, _: u64, _: u64) -> Result<ReplayRecord, ReplayError> { Err(ReplayError::Unavailable) }
     fn release_refused(&mut self, _: &ReplayRecord, _: u64) -> Result<(), ReplayError> { Err(ReplayError::Unavailable) }
     fn revoke(&mut self, _: &[u8; 32]) -> Result<(), ReplayError> { Err(ReplayError::Unavailable) }
     fn get(&mut self, _: &[u8; 32]) -> Result<ReplayRecord, ReplayError> { Err(ReplayError::Unavailable) }
@@ -163,22 +170,36 @@ fn reserve_record(record: &mut ReplayRecord, expected: &ReplayRecord, job: &str,
     }
 }
 
-fn authorize_record(record: &mut ReplayRecord, id: &str, token: &str, tier: TrustTier, digest: &str, now: u64)
+fn authorize_record(record: &mut ReplayRecord, id: &str, token: &str, tier: TrustTier, digest: &str, generation: u64, now: u64)
     -> Result<ReplayRecord, ReplayError>
 {
     if record.expires_unix < now { return Err(ReplayError::BindingMismatch); }
     match record.state {
         ReplayState::Submitted => {
+            // A challenge reserved under one generation cannot be authorized under another: a reset
+            // migration between challenge issue and proof submission retires the in-flight
+            // challenge rather than exchanging it for a new-generation session. (`chain_generation`
+            // is deliberately absent from the policy hash, so this is the check that catches it.) A
+            // record reserved before this field existed carries `0` and is simply stamped here.
+            if record.chain_generation != 0 && record.chain_generation != generation {
+                return Err(ReplayError::GenerationMismatch);
+            }
             record.state = ReplayState::Authorized;
             record.authorization_id = Some(id.to_string());
             record.access_token = Some(token.to_string());
             record.trust_tier = tier;
             record.evidence_digest = Some(digest.to_string());
+            record.chain_generation = generation;
             Ok(record.clone())
         }
         // An idempotent retry must reinstall the SAME authorization: same identity, same tier, same
-        // evidence. A mismatch on the evidence or the tier is an upgrade attempt and is refused.
+        // evidence, same chain generation. A mismatch on the evidence or the tier is an upgrade
+        // attempt; a mismatch on the generation is a post-reset-migration recovery attempt. Both
+        // are refused rather than silently restored.
         ReplayState::Authorized if record.authorization_id.as_deref() == Some(id) => {
+            if record.chain_generation != generation {
+                return Err(ReplayError::GenerationMismatch);
+            }
             if record.trust_tier != tier || record.evidence_digest.as_deref() != Some(digest) {
                 return Err(ReplayError::EvidenceMismatch);
             }
@@ -207,8 +228,8 @@ impl ReplayStore for MemoryReplayStore {
     fn submitted(&mut self) -> Result<Vec<ReplayRecord>, ReplayError> {
         Ok(self.records.values().filter(|record| record.state == ReplayState::Submitted).cloned().collect())
     }
-    fn authorize(&mut self, nonce: &[u8; 32], id: &str, token: &str, tier: TrustTier, digest: &str, now: u64) -> Result<ReplayRecord, ReplayError> {
-        authorize_record(self.records.get_mut(nonce).ok_or(ReplayError::BindingMismatch)?, id, token, tier, digest, now)
+    fn authorize(&mut self, nonce: &[u8; 32], id: &str, token: &str, tier: TrustTier, digest: &str, generation: u64, now: u64) -> Result<ReplayRecord, ReplayError> {
+        authorize_record(self.records.get_mut(nonce).ok_or(ReplayError::BindingMismatch)?, id, token, tier, digest, generation, now)
     }
     fn release_refused(&mut self, expected: &ReplayRecord, now: u64) -> Result<(), ReplayError> {
         let record = self.records.get_mut(&expected.nonce).ok_or(ReplayError::BindingMismatch)?;
@@ -305,8 +326,8 @@ impl ReplayStore for FileReplayStore {
             Ok(records)
         })
     }
-    fn authorize(&mut self, nonce: &[u8; 32], id: &str, token: &str, tier: TrustTier, digest: &str, now: u64) -> Result<ReplayRecord, ReplayError> {
-        self.locked(|| { let mut record = self.read(nonce)?; let result = authorize_record(&mut record, id, token, tier, digest, now)?;
+    fn authorize(&mut self, nonce: &[u8; 32], id: &str, token: &str, tier: TrustTier, digest: &str, generation: u64, now: u64) -> Result<ReplayRecord, ReplayError> {
+        self.locked(|| { let mut record = self.read(nonce)?; let result = authorize_record(&mut record, id, token, tier, digest, generation, now)?;
             self.write(&self.path(nonce), &record)?; Ok(result) })
     }
     fn release_refused(&mut self, expected: &ReplayRecord, now: u64) -> Result<(), ReplayError> {
@@ -323,8 +344,9 @@ impl ReplayStore for FileReplayStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn record() -> ReplayRecord { ReplayRecord { nonce: [7; 32], tenant: "tenant-a".into(), gate: "gate-a".into(), relying_site: "site-a".into(), visitor_session: vec![1], network: 38, policy_hash: Some("policy-a".into()), expires_unix: 10, state: ReplayState::Issued, proof_job_id: None, pending_transaction_id: None, pending_proof_kind: None, authorization_id: None, access_token: None, trust_tier: TrustTier::default(), evidence_digest: None } }
+    fn record() -> ReplayRecord { ReplayRecord { nonce: [7; 32], tenant: "tenant-a".into(), gate: "gate-a".into(), relying_site: "site-a".into(), visitor_session: vec![1], network: 38, policy_hash: Some("policy-a".into()), expires_unix: 10, state: ReplayState::Issued, proof_job_id: None, pending_transaction_id: None, pending_proof_kind: None, authorization_id: None, access_token: None, trust_tier: TrustTier::default(), evidence_digest: None, chain_generation: 0 } }
     const TTT: TrustTier = TrustTier::OperatorTrustedTestnet;
+    const GEN: u64 = 1;
 
     #[test]
     fn identical_retry_gets_original_job_but_another_visitor_cannot() {
@@ -337,22 +359,56 @@ mod tests {
     #[test]
     fn authorization_is_idempotent_but_never_mints_a_second_token() {
         let mut store = MemoryReplayStore::default(); let record = record(); store.create(&record).unwrap(); store.reserve(&record, "job-1", 1).unwrap();
-        assert_eq!(store.authorize(&record.nonce, "auth-1", "token-1", TTT, "ev-1", 1).unwrap().access_token.as_deref(), Some("token-1"));
-        assert_eq!(store.authorize(&record.nonce, "auth-1", "token-2", TTT, "ev-1", 1).unwrap().access_token.as_deref(), Some("token-1"));
-        assert_eq!(store.authorize(&record.nonce, "auth-2", "token-2", TTT, "ev-1", 1), Err(ReplayError::Final));
+        assert_eq!(store.authorize(&record.nonce, "auth-1", "token-1", TTT, "ev-1", GEN, 1).unwrap().access_token.as_deref(), Some("token-1"));
+        assert_eq!(store.authorize(&record.nonce, "auth-1", "token-2", TTT, "ev-1", GEN, 1).unwrap().access_token.as_deref(), Some("token-1"));
+        assert_eq!(store.authorize(&record.nonce, "auth-2", "token-2", TTT, "ev-1", GEN, 1), Err(ReplayError::Final));
     }
     #[test]
     fn authorization_records_the_tier_and_evidence_and_refuses_an_upgrade_on_retry() {
         let mut store = MemoryReplayStore::default(); let record = record(); store.create(&record).unwrap(); store.reserve(&record, "job-1", 1).unwrap();
-        let authed = store.authorize(&record.nonce, "auth-1", "token-1", TTT, "ev-1", 1).unwrap();
+        let authed = store.authorize(&record.nonce, "auth-1", "token-1", TTT, "ev-1", GEN, 1).unwrap();
         assert_eq!(authed.trust_tier, TTT);
         assert_eq!(authed.evidence_digest.as_deref(), Some("ev-1"));
+        assert_eq!(authed.chain_generation, GEN);
         // Same identity, SAME evidence and tier: idempotent success.
-        assert!(store.authorize(&record.nonce, "auth-1", "token-1", TTT, "ev-1", 1).is_ok());
+        assert!(store.authorize(&record.nonce, "auth-1", "token-1", TTT, "ev-1", GEN, 1).is_ok());
         // Same identity, a STRONGER tier or different evidence: refused, never upgraded.
-        assert_eq!(store.authorize(&record.nonce, "auth-1", "token-1", TrustTier::Production, "ev-1", 1), Err(ReplayError::EvidenceMismatch));
-        assert_eq!(store.authorize(&record.nonce, "auth-1", "token-1", TTT, "ev-2", 1), Err(ReplayError::EvidenceMismatch));
+        assert_eq!(store.authorize(&record.nonce, "auth-1", "token-1", TrustTier::Production, "ev-1", GEN, 1), Err(ReplayError::EvidenceMismatch));
+        assert_eq!(store.authorize(&record.nonce, "auth-1", "token-1", TTT, "ev-2", GEN, 1), Err(ReplayError::EvidenceMismatch));
         assert_eq!(store.get(&record.nonce).unwrap().trust_tier, TTT, "the stored tier is never raised");
+    }
+
+    #[test]
+    fn a_challenge_reserved_before_a_migration_cannot_be_authorized_after_it() {
+        // The challenge is ISSUED (reserved) under generation 1, then the operator migrates to
+        // generation 2, then the visitor submits the proof. Authorization must refuse rather than
+        // mint a generation-2 session from a generation-1 challenge. This is the end-to-end
+        // old-challenge-after-migration case, caught at authorize time.
+        let mut store = MemoryReplayStore::default();
+        let mut record = record();
+        record.chain_generation = 1; // stamped at challenge issue (as the bridge now does)
+        store.create(&record).unwrap();
+        store.reserve(&record, "job-1", 1).unwrap();
+        // Migration happened: the gate binding now reports generation 2.
+        assert_eq!(
+            store.authorize(&record.nonce, "auth-1", "token-1", TTT, "ev-1", 2, 1),
+            Err(ReplayError::GenerationMismatch)
+        );
+        // No authorization was installed: the record is untouched, so no session can be recovered.
+        let after = store.get(&record.nonce).unwrap();
+        assert_eq!(after.state, ReplayState::Submitted);
+        assert!(after.access_token.is_none(), "no bearer token was minted for the stale challenge");
+    }
+
+    #[test]
+    fn a_recovery_under_a_different_generation_is_refused() {
+        // After a reset migration the bridge presents the NEW generation on recovery. The retired
+        // generation's authorization must not be restored, even with the same identity, tier and
+        // evidence — that is exactly the old-record-replay-after-migration case.
+        let mut store = MemoryReplayStore::default(); let record = record(); store.create(&record).unwrap(); store.reserve(&record, "job-1", 1).unwrap();
+        store.authorize(&record.nonce, "auth-1", "token-1", TTT, "ev-1", GEN, 1).unwrap();
+        assert_eq!(store.authorize(&record.nonce, "auth-1", "token-1", TTT, "ev-1", GEN + 1, 1), Err(ReplayError::GenerationMismatch));
+        assert_eq!(store.get(&record.nonce).unwrap().chain_generation, GEN, "the stored generation is never changed on recovery");
     }
     #[test]
     fn unavailable_storage_fails_closed() { let mut store = UnavailableReplayStore; assert_eq!(store.create(&record()), Err(ReplayError::Unavailable)); assert_eq!(store.reserve(&record(), "job", 1), Err(ReplayError::Unavailable)); }
@@ -361,7 +417,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("gg-replay-{}-{}", std::process::id(), crate::session::now_unix())); let mut first = FileReplayStore::open(&root).unwrap(); let mut second = FileReplayStore::open(&root).unwrap(); let record = record();
         first.create(&record).unwrap(); first.reserve(&record, "job-1", 1).unwrap();
         assert_eq!(second.reserve(&record, "job-2", 1), Ok(Reservation::Pending { proof_job_id: "job-1".into() }));
-        second.authorize(&record.nonce, "auth-1", "token-1", TTT, "ev-1", 1).unwrap(); assert_eq!(first.authorize(&record.nonce, "auth-2", "token-2", TTT, "ev-1", 1), Err(ReplayError::Final)); assert_eq!(first.get(&record.nonce).unwrap().state, ReplayState::Authorized); let _ = fs::remove_dir_all(root);
+        second.authorize(&record.nonce, "auth-1", "token-1", TTT, "ev-1", GEN, 1).unwrap(); assert_eq!(first.authorize(&record.nonce, "auth-2", "token-2", TTT, "ev-1", GEN, 1), Err(ReplayError::Final)); assert_eq!(first.get(&record.nonce).unwrap().state, ReplayState::Authorized); let _ = fs::remove_dir_all(root);
     }
     #[test]
     fn corrupt_durable_record_fails_closed() {

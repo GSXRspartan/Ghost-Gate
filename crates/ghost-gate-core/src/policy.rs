@@ -476,6 +476,23 @@ pub fn achieved_tier(kind: EvidenceKind, mode: ProofMode, policy: &TrustPolicy) 
     kind.ceiling(policy).min(mode.max_trust_tier())
 }
 
+/// The chain generation an application may currently authorize under, or `None` when it may
+/// authorize nothing. This is the single fail-closed rule for reset enforcement, shared by
+/// issuance, the access check and the bridge so none of them can disagree:
+///
+/// - `declared == 0` (unknown) authorizes nothing — on production AND non-production apps, with no
+///   development or testnet bypass. A legacy application, session or record loads as `0`.
+/// - `declared < floor` is a generation *rollback*: an older configuration was restored after a
+///   newer generation was activated. It authorizes nothing until migrated forward again. The floor
+///   is a durable, monotonic high-water mark that a config/policy/session restore cannot lower.
+/// - otherwise the live generation is `declared` (`== floor` in steady state).
+pub fn effective_generation(declared: u64, floor: u64) -> Option<u64> {
+    if declared == 0 || declared < floor {
+        return None;
+    }
+    Some(declared)
+}
+
 impl GatePolicy {
     /// Exact, divisibility-aware conversion from a human amount to raw units.
     ///
@@ -563,6 +580,15 @@ pub struct Application {
     /// digest that binds only the network byte would treat unrelated ledgers as one. Required: an
     /// application without a genesis identity is refused at validation.
     pub genesis_hash: String,
+    /// The Ootle chain *generation* this application authorizes under. An L2 testnet reset can
+    /// leave the L1 genesis, the network byte and even the native resource address unchanged while
+    /// re-genesising the L2 — so `genesis_hash` and `network` cannot detect it. This is an
+    /// operator-declared, review-gated generation counter: `0` means "unknown" and authorizes
+    /// NOTHING (production or not), and it may only ever be raised, through the migrate operation,
+    /// past the durable generation floor. It is deliberately NOT part of the policy digest: it is
+    /// an orthogonal authorization dimension, not a property of a gate's frozen content.
+    #[serde(default)]
+    pub chain_generation: u64,
 }
 
 impl Application {
@@ -941,6 +967,7 @@ mod tests {
             production: true,
             network: crate::network::LOCALNET,
             genesis_hash: "00f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0".into(),
+            chain_generation: 1,
         }
     }
 
@@ -1288,6 +1315,23 @@ mod tests {
     fn legacy_records_load_as_no_evidence() {
         assert_eq!(EvidenceKind::default(), EvidenceKind::None);
         assert_eq!(Evidence::None.digest(), "");
+    }
+
+    #[test]
+    fn an_unknown_or_rolled_back_generation_authorizes_nothing() {
+        // 0 is "unknown" — no development or testnet bypass, on any application.
+        assert_eq!(effective_generation(0, 0), None);
+        assert_eq!(effective_generation(0, 5), None);
+        // A declared generation below the durable floor is a rollback: a restored older config.
+        assert_eq!(effective_generation(1, 2), None);
+        assert_eq!(effective_generation(4, 5), None);
+        // Steady state: declared == floor, and a freshly migrated generation.
+        assert_eq!(effective_generation(1, 1), Some(1));
+        assert_eq!(effective_generation(5, 5), Some(5));
+        // declared may sit at the floor; it can never be raised above it except by migration,
+        // which raises the floor in the same operation, so declared > floor is never a steady
+        // state — but if observed it is still the live generation (the floor only ever lags up).
+        assert_eq!(effective_generation(6, 5), Some(6));
     }
 
     #[test]

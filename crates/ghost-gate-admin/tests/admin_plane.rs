@@ -83,6 +83,7 @@ fn spawn_server(dir: &std::path::Path) -> TestServer {
             pending: Mutex::new(BTreeMap::new()),
             bootstrap_token: Some("bootstrap-token-1".into()),
             genesis_hash: Some(GENESIS.to_string()),
+            chain_generation: None,
         });
         let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
         let addr = format!("127.0.0.1:{port}");
@@ -438,6 +439,7 @@ fn one_week_session_issue_use_expiry_and_revocation() {
         production: true,
         network: ghost_gate_core::network::LOCALNET,
         genesis_hash: GENESIS.into(),
+        chain_generation: 1,
     };
     app.gates.push(ghost_gate_core::policy::GatePolicy {
         gate_id: "members".into(),
@@ -704,6 +706,7 @@ fn tamper_8_a_proof_against_another_gate_or_policy_cannot_verify() {
         topology: GateTopology::Independent, default_session_ttl: 86_400, max_gates: 5,
         gates: vec![], revision: 1, production: true,
             network: ghost_gate_core::network::LOCALNET, genesis_hash: GENESIS.into(),
+            chain_generation: 1,
     };
     for id in ["a", "b"] {
         app.gates.push(ghost_gate_core::policy::GatePolicy {
@@ -787,6 +790,7 @@ fn tamper_10_a_lower_tier_session_cannot_reach_a_higher_tier() {
         topology: GateTopology::Hierarchical, default_session_ttl: 86_400, max_gates: 5,
         gates: vec![], revision: 1, production: true,
             network: ghost_gate_core::network::LOCALNET, genesis_hash: GENESIS.into(),
+            chain_generation: 1,
     };
     let silver = ghost_gate_core::policy::GatePolicy {
         gate_id: "silver".into(), name: "s".into(), resource_address: "resource_x".into(),
@@ -843,6 +847,7 @@ fn tamper_11_client_side_expiry_extension_is_meaningless() {
         topology: GateTopology::Independent, default_session_ttl: 3600, max_gates: 5,
         gates: vec![], revision: 1, production: true,
             network: ghost_gate_core::network::LOCALNET, genesis_hash: GENESIS.into(),
+            chain_generation: 1,
     };
     app.gates.push(ghost_gate_core::policy::GatePolicy {
         gate_id: "g".into(), name: "g".into(), resource_address: "resource_x".into(),
@@ -1122,6 +1127,7 @@ fn a_credential_gate_on_a_production_app_refuses_production_tier() {
         topology: GateTopology::Independent, default_session_ttl: 86_400, max_gates: 5,
         gates: vec![], revision: 1, production: true,
         network: ghost_gate_core::network::LOCALNET, genesis_hash: GENESIS.into(),
+        chain_generation: 1,
     };
     app.gates.push(ghost_gate_core::policy::GatePolicy {
         gate_id: "cred".into(), name: "cred".into(), resource_address: "resource_x".into(),
@@ -1195,6 +1201,7 @@ fn measured_scalability_at_1_3_10_25_and_50_gates() {
             production: true,
             network: ghost_gate_core::network::LOCALNET,
             genesis_hash: GENESIS.into(),
+            chain_generation: 1,
         };
         for i in 0..count {
             app.gates.push(ghost_gate_core::policy::GatePolicy {
@@ -1331,6 +1338,7 @@ fn a_gate_records_which_surfaces_it_may_authorize() {
         production: true,
         network: ghost_gate_core::network::LOCALNET,
         genesis_hash: GENESIS.into(),
+        chain_generation: 1,
     };
     app.validate().expect("a telegram-scoped gate is a valid gate");
     let json = serde_json::to_string(&policy).unwrap();
@@ -1611,6 +1619,49 @@ fn wallet_authentication_covers_ordinary_login_and_stepup() {
     assert_eq!(state_field(&server, &cookie2, "stepupValid"), serde_json::Value::Bool(true));
     let create2 = create_app(&server, &cookie2, &csrf2, "wallet-unlocked");
     assert_eq!(create2.status, 200, "{}", create2.body);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_authorized_generation_migration_advances_and_rejects_rollback() {
+    let dir = unique_dir("gg-admin-gen");
+    let server = spawn_server(&dir);
+    let admin = WalletAdmin::new();
+    let (cookie, csrf) = admin.register(server.port);
+
+    // A fresh application starts at generation 1.
+    let create = http(server.port, "POST", "/admin/api/app/create", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
+        &serde_json::json!({ "applicationId": "gen-app", "displayName": "Gen", "topology": "independent", "defaultSessionTtl": 86_400u64, "production": true }).to_string());
+    assert_eq!(create.status, 200, "{}", create.body);
+
+    let read_app = |label: &str| {
+        let state = http(server.port, "GET", "/admin/api/state", &hdrs(&auth_headers(server.port, &cookie, &csrf)), "");
+        state.body.get("applications").unwrap().as_array().unwrap().iter()
+            .find(|a| as_str(a, "applicationId") == "gen-app").unwrap_or_else(|| panic!("app missing at {label}")).clone()
+    };
+    let app = read_app("create");
+    assert_eq!(app.get("chainGeneration").unwrap().as_u64(), Some(1));
+    assert_eq!(app.get("generationFloor").unwrap().as_u64(), Some(0));
+
+    // Authorized migration forward to generation 2.
+    let migrate = http(server.port, "POST", "/admin/api/app/migrate-generation", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
+        &serde_json::json!({ "applicationId": "gen-app", "newGeneration": 2u64 }).to_string());
+    assert_eq!(migrate.status, 200, "migration refused: {}", migrate.body);
+    let app = read_app("migrated");
+    assert_eq!(app.get("chainGeneration").unwrap().as_u64(), Some(2));
+    assert_eq!(app.get("generationFloor").unwrap().as_u64(), Some(2), "the durable floor advanced");
+
+    // A rollback (and a no-op) migration is refused.
+    let rollback = http(server.port, "POST", "/admin/api/app/migrate-generation", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
+        &serde_json::json!({ "applicationId": "gen-app", "newGeneration": 1u64 }).to_string());
+    assert_eq!(rollback.status, 400, "a generation rollback must be refused: {}", rollback.body);
+
+    // An ordinary update never changes the generation.
+    let update = http(server.port, "POST", "/admin/api/app/update", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
+        &serde_json::json!({ "applicationId": "gen-app", "displayName": "Renamed" }).to_string());
+    assert_eq!(update.status, 200, "{}", update.body);
+    assert_eq!(read_app("after-update").get("chainGeneration").unwrap().as_u64(), Some(2), "an ordinary edit must not change the generation");
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 

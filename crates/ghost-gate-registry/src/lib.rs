@@ -21,9 +21,9 @@
 //!   nothing about version N+1: re-verification needs fresh evidence.
 
 pub use ghost_gate_core::policy::{
-    achieved_tier, hash_policy, now_unix, required_tier, Application, Evidence, EvidenceKind,
-    GatePolicy, PolicyHasher, PolicyVersion, ProofMode, ReplacementRecord, TrustPolicy, TrustTier,
-    CHALLENGE_TTL, DEFAULT_SESSION_TTL, MAX_SESSION_TTL, MIN_SESSION_TTL,
+    achieved_tier, effective_generation, hash_policy, now_unix, required_tier, Application, Evidence,
+    EvidenceKind, GatePolicy, PolicyHasher, PolicyVersion, ProofMode, ReplacementRecord, TrustPolicy,
+    TrustTier, CHALLENGE_TTL, DEFAULT_SESSION_TTL, MAX_SESSION_TTL, MIN_SESSION_TTL,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -124,6 +124,12 @@ pub struct VerifiedSession {
     /// Legacy sessions load as `None`, which is consistent with their `Development` tier.
     #[serde(default)]
     pub evidence_kind: EvidenceKind,
+    /// The Ootle chain generation this session was issued under. `check_access` refuses a session
+    /// whose generation is not the application's current effective generation, so a legacy session
+    /// (loads as `0`) authorizes nothing, and a session from a retired generation cannot be
+    /// resurrected by restoring an older configuration after a reset migration.
+    #[serde(default)]
+    pub chain_generation: u64,
 }
 
 /// Why a session was revoked — the audit trail wants the reason, not just the fact.
@@ -184,6 +190,12 @@ pub struct Registry {
     /// Incremented on every accepted mutation, for optimistic concurrency.
     #[serde(default)]
     pub store_revision: u64,
+    /// Durable, monotonic per-application generation floor, loaded from `generations.ndjson` — NOT
+    /// from this file. It is `#[serde(skip)]` so it is never written into `registry.json`: a
+    /// restored registry snapshot carries no floor, and the floor is re-read from its own
+    /// append-only ledger, which a config rollback cannot lower. See [`effective_generation`].
+    #[serde(skip)]
+    pub generation_floor: BTreeMap<String, u64>,
 }
 
 impl Registry {
@@ -198,6 +210,22 @@ impl Registry {
 
     pub fn application(&self, application_id: &str) -> Option<&Application> {
         self.applications.iter().find(|a| a.application_id == application_id)
+    }
+
+    /// The durable generation floor for an application: the highest generation ever activated for
+    /// it. Absent means never migrated, so the floor is `0` and only a declared generation `>= 1`
+    /// can authorize.
+    pub fn generation_floor_of(&self, application_id: &str) -> u64 {
+        self.generation_floor.get(application_id).copied().unwrap_or(0)
+    }
+
+    /// The generation this application may authorize under right now, or `None` when it may
+    /// authorize nothing (unknown generation, or a declared generation below the durable floor —
+    /// a rollback). This is the one place issuance and the access check agree on the live
+    /// generation; see [`effective_generation`].
+    pub fn effective_generation(&self, application_id: &str) -> Option<u64> {
+        let app = self.application(application_id)?;
+        effective_generation(app.chain_generation, self.generation_floor_of(application_id))
     }
 
     /// The session for a token, if present and unrevoked. Expiry is checked by the caller (which
@@ -338,6 +366,10 @@ impl StorePaths {
     pub fn audit(&self) -> PathBuf { self.dir.join("audit.ndjson") }
     pub fn lock(&self) -> PathBuf { self.dir.join("store.lock") }
     pub fn bootstrap(&self) -> PathBuf { self.dir.join("bootstrap.token") }
+    /// The durable, append-only generation floor. It is deliberately a SEPARATE file from
+    /// `registry.json`: restoring an older `registry.json` (or `sessions.json`) must not lower the
+    /// floor, so the monotonic high-water mark cannot live inside the config snapshot it protects.
+    pub fn generations(&self) -> PathBuf { self.dir.join("generations.ndjson") }
 }
 
 /// An exclusive, patient file lock around read-modify-write cycles. Both processes take it, so a
@@ -399,15 +431,160 @@ impl Drop for StoreLock {
 /// error (admin plane: no — it starts empty and bootstraps; bridge: also no, it just has nothing
 /// to bind yet).
 pub fn load_registry(paths: &StorePaths) -> Result<Registry, String> {
+    let floor = load_generation_floor(paths)?;
     let path = paths.registry();
     if !path.exists() {
-        return Ok(Registry::default());
+        return Ok(Registry { generation_floor: floor, ..Registry::default() });
     }
     let bytes = fs::read(&path).map_err(|e| format!("cannot read the registry: {e}"))?;
-    let reg: Registry =
+    let mut reg: Registry =
         serde_json::from_slice(&bytes).map_err(|e| format!("the registry file is not valid JSON: {e}"))?;
     reg.validate_all().map_err(|e| format!("the registry file failed validation: {e}"))?;
+    // The floor comes from its own append-only ledger, never from `registry.json`. A restored or
+    // hand-edited registry therefore inherits the real floor, so an older generation it still
+    // declares is caught as a rollback by `effective_generation`.
+    reg.generation_floor = floor;
     Ok(reg)
+}
+
+/// One activation of a new chain generation for an application. Appended, never rewritten, so the
+/// floor can only rise. The actor and timestamp are kept for the audit of a reset migration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenerationActivation {
+    pub application_id: String,
+    pub generation: u64,
+    pub activated_unix: u64,
+    pub actor: String,
+}
+
+/// Rebuild the per-application floor from the append-only ledger: the floor is the maximum
+/// generation ever activated for each application. A missing ledger means nothing was migrated.
+pub fn load_generation_floor(paths: &StorePaths) -> Result<BTreeMap<String, u64>, String> {
+    let path = paths.generations();
+    if !path.exists() {
+        return Ok(BTreeMap::new());
+    }
+    let text = fs::read_to_string(&path)
+        .map_err(|e| format!("cannot read the generation ledger: {e}"))?;
+    let mut floor: BTreeMap<String, u64> = BTreeMap::new();
+    for (lineno, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let rec: GenerationActivation = serde_json::from_str(line).map_err(|e| {
+            format!("the generation ledger is corrupt at line {}: {e}", lineno + 1)
+        })?;
+        let slot = floor.entry(rec.application_id).or_insert(0);
+        *slot = (*slot).max(rec.generation);
+    }
+    Ok(floor)
+}
+
+/// Append one activation to the durable ledger and raise the in-memory floor. The append is
+/// rejected unless it strictly raises the application's floor, so the floor is monotonic and a
+/// generation can never be rolled back through this path. The ledger is fsync'd before the floor
+/// is advanced, so a crash can lose nothing that a later authorization would rely on.
+pub fn append_generation_activation(
+    paths: &StorePaths,
+    reg: &mut Registry,
+    activation: &GenerationActivation,
+) -> Result<(), String> {
+    let current = reg.generation_floor_of(&activation.application_id);
+    if activation.generation <= current {
+        return Err(format!(
+            "refusing a generation rollback for {}: {} does not exceed the durable floor {}",
+            activation.application_id, activation.generation, current
+        ));
+    }
+    let _ = fs::create_dir_all(&paths.dir);
+    let line = serde_json::to_string(activation)
+        .map_err(|e| format!("cannot serialise the generation activation: {e}"))?;
+    let mut f = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(paths.generations())
+        .map_err(|e| format!("cannot open the generation ledger: {e}"))?;
+    f.write_all(line.as_bytes()).and_then(|_| f.write_all(b"\n")).and_then(|_| f.sync_all())
+        .map_err(|e| format!("cannot append to the generation ledger: {e}"))?;
+    reg.generation_floor.insert(activation.application_id.clone(), activation.generation);
+    Ok(())
+}
+
+/// The sanctioned, explicit operation that moves an application to a new chain generation after a
+/// reset. Ordinary edits never change the generation; only this does. It raises the durable floor
+/// FIRST (so the old generation is retired even if the process dies mid-migration), then advances
+/// the application and retires every session it held, so nothing from before the migration can
+/// authorize under the new generation. Challenges and replay records are retired at the bridge by
+/// the same generation gate on its next registry load. Historical records are never deleted.
+///
+/// The caller holds the store lock and persists the registry (and its sessions) afterward.
+pub fn migrate_generation(
+    paths: &StorePaths,
+    reg: &mut Registry,
+    application_id: &str,
+    new_generation: u64,
+    actor: &str,
+) -> Result<(), String> {
+    let current_declared = reg
+        .application(application_id)
+        .ok_or_else(|| format!("unknown application {application_id}"))?
+        .chain_generation;
+    let floor = reg.generation_floor_of(application_id);
+    if new_generation == 0 {
+        return Err("a chain generation must be >= 1; 0 means unknown and authorizes nothing".into());
+    }
+    // Monotonic: a migration may only move strictly forward, past both the declared generation and
+    // the durable floor. This is the one place a generation rollback is rejected during normal
+    // operation — an operator who wants an older generation back must re-migrate forward, which
+    // records a new, higher generation rather than resurrecting a retired one.
+    if new_generation <= floor || new_generation <= current_declared {
+        return Err(format!(
+            "refusing a generation migration for {application_id}: {new_generation} does not advance \
+             past the current generation {current_declared} / durable floor {floor}"
+        ));
+    }
+    // Raise the durable floor first (fsync'd inside): a crash after this point leaves the old
+    // generation retired rather than silently re-authorizable.
+    append_generation_activation(
+        paths,
+        reg,
+        &GenerationActivation {
+            application_id: application_id.to_string(),
+            generation: new_generation,
+            activated_unix: now_unix(),
+            actor: actor.to_string(),
+        },
+    )?;
+    let now = now_unix();
+    let app = reg
+        .applications
+        .iter_mut()
+        .find(|a| a.application_id == application_id)
+        .expect("application presence was checked above");
+    app.chain_generation = new_generation;
+    app.revision = app.revision.saturating_add(1);
+    // Retire every session the application held. The runtime generation gate already refuses them,
+    // but marking them revoked makes the invalidation explicit in the store and the audit.
+    let mut retired = 0usize;
+    for s in reg.sessions.iter_mut().filter(|s| s.application_id == application_id && !s.revoked) {
+        s.revoked = true;
+        retired += 1;
+    }
+    reg.audit(AuditEntry {
+        unix: now,
+        actor: actor.to_string(),
+        action: "migrate-generation".into(),
+        application_id: Some(application_id.to_string()),
+        gate_id: None,
+        old_version: Some(current_declared),
+        new_version: Some(new_generation),
+        outcome: AuditOutcome::Accepted,
+        detail: format!(
+            "chain generation {current_declared} -> {new_generation}; {retired} session(s) retired"
+        ),
+    });
+    Ok(())
 }
 
 /// Atomically persist the registry: temp file in the same directory, fsync, rename. A crash can
@@ -480,6 +657,12 @@ pub struct GateBindingSnapshot {
     /// colliding address.
     pub network: u8,
     pub genesis_hash: String,
+    /// The Ootle chain generation this gate is served under, carried into the bridge binding so a
+    /// republish after a reset migration advances it. `0` (a binding written before this field, or
+    /// an un-migrated application) means the bridge serves no live generation and authorizes
+    /// nothing — the fail-closed default.
+    #[serde(default)]
+    pub chain_generation: u64,
     /// Which surfaces this gate may authorize (`website`, `telegram`, `both`). The Telegram bot
     /// refuses a website-only gate; the Lab shows the scope rather than implying it.
     ///
@@ -541,6 +724,7 @@ pub fn derive_bindings(reg: &Registry) -> Bindings {
                 test_lane: g.test_lane,
                 network: app.network,
                 genesis_hash: app.genesis_hash.clone(),
+                chain_generation: app.chain_generation,
                 use_mode: g.use_mode.as_str().to_string(),
                 max_trust_tier: g.proof_mode.max_trust_tier().as_str().to_string(),
             });
@@ -654,6 +838,16 @@ pub fn issue_session_with_token(
     if !gate.proof_mode.is_activatable() {
         return Err(format!("gate {gate_id} uses a proof mode that cannot authorise sessions"));
     }
+    // Fail closed on the chain generation BEFORE any tier work: an unknown generation (`0`) or a
+    // declared generation below the durable floor (a rollback) authorizes nothing, on production
+    // and non-production alike, with no development or testnet bypass. This is orthogonal to, and
+    // additive to, the trust-tier gate below.
+    let Some(generation) = reg.effective_generation(application_id) else {
+        return Err(format!(
+            "application {application_id} has no live chain generation (unknown or rolled back); \
+             no session issued until an operator migrates it to the current generation"
+        ));
+    };
     let evidence_kind = evidence.kind();
     // The tier is derived here, from the evidence and the gate's proof machinery — never supplied
     // by the caller as a bare tier. Incompatible evidence, a mode ceiling or the operator policy
@@ -689,6 +883,7 @@ pub fn issue_session_with_token(
         test_lane: gate.test_lane,
         trust_tier: achieved,
         evidence_kind,
+        chain_generation: generation,
     })
 }
 
@@ -749,6 +944,32 @@ pub fn check_access(
     // A test-lane session can never authorise a production gate, whatever it proves.
     if session.test_lane && !gate.test_lane {
         return refuse("a test session cannot authorise a production gate", session.expires_unix, 0, tier);
+    }
+    // Fail-closed chain-generation enforcement, evaluated against the CURRENT application and the
+    // durable floor on every call. A session only authorizes while its generation is still the
+    // live one: an unknown generation (`0`, including a legacy session) authorizes nothing; a
+    // reset migration raises the generation so prior-generation sessions stop authorizing at once;
+    // and restoring an older configuration cannot help, because the declared generation then falls
+    // below the durable floor and `effective_generation` returns `None`.
+    match reg.effective_generation(application_id) {
+        Some(current) if current == session.chain_generation => {}
+        Some(current) => {
+            return refuse(
+                &format!(
+                    "session was issued under chain generation {} but this application now \
+                     authorizes under generation {current}; a fresh proof is required",
+                    session.chain_generation
+                ),
+                session.expires_unix, 0, tier,
+            );
+        }
+        None => {
+            return refuse(
+                "this application has no live chain generation (unknown or rolled back); it \
+                 authorizes nothing until an operator migrates it forward",
+                session.expires_unix, 0, tier,
+            );
+        }
     }
     // Fail-closed trust-tier enforcement, evaluated against the CURRENT application policy and not
     // just at issuance. A `Development` session never authorizes; a legacy session (no tier field)
@@ -864,6 +1085,7 @@ mod tests {
             production: true,
             network: ghost_gate_core::network::LOCALNET,
             genesis_hash: "00f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0".into(),
+            chain_generation: 1,
         }
     }
 
@@ -1305,6 +1527,9 @@ mod tests {
             proven_gate: "gold".into(), policy_hash: hash, granted: vec!["gold".into(), "silver".into(), "bronze".into()],
             issued_unix: now, expires_unix: now + 3600, revoked: false, test_lane: false,
             trust_tier: TrustTier::Development, evidence_kind: EvidenceKind::None,
+            // A live generation, so this test isolates the TIER gate (the generation gate runs
+            // first and would otherwise refuse a `0` generation for a different reason).
+            chain_generation: 1,
         };
         let d = check_access(&reg, &[legacy.clone()], &legacy.token, "meme", "gold", now);
         assert!(!d.authorized, "a Development/legacy session must never authorize, even on a non-production app");
@@ -1321,6 +1546,206 @@ mod tests {
     fn session_bounds_match_the_policy_bounds() {
         assert_eq!(CHALLENGE_TTL, std::time::Duration::from_secs(180));
         assert!(MIN_SESSION_TTL <= DEFAULT_SESSION_TTL);
+    }
+
+    // ---- Chain-generation / reset enforcement ------------------------------------------------
+
+    fn gen_dir(name: &str) -> StorePaths {
+        let dir = std::env::temp_dir().join(format!("gg-gen-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        StorePaths::new(&dir)
+    }
+
+    fn session_at(reg: &Registry, generation: u64) -> VerifiedSession {
+        let app = reg.application("meme").unwrap();
+        let gold = app.gate("gold").unwrap();
+        let hash = hash_policy(&hasher(), app, gold, 1);
+        let now = now_unix();
+        VerifiedSession {
+            token: format!("tok-{generation}"), authorization_id: None, application_id: "meme".into(),
+            proven_gate: "gold".into(), policy_hash: hash,
+            granted: vec!["gold".into(), "silver".into(), "bronze".into()],
+            issued_unix: now, expires_unix: now + 3600, revoked: false, test_lane: false,
+            trust_tier: TrustTier::Production, evidence_kind: EvidenceKind::IndexerAsserted,
+            chain_generation: generation,
+        }
+    }
+
+    #[test]
+    fn an_unknown_generation_authorizes_nothing_on_production_and_nonproduction() {
+        let mut reg = registry_with_tiers();
+        reg.applications[0].chain_generation = 0; // unknown
+        let mut entropy = [0u8; 32];
+        let gold_hash = {
+            let app = reg.application("meme").unwrap();
+            hash_policy(&hasher(), app, app.gate("gold").unwrap(), 1)
+        };
+        // Issuance refuses outright — no development or testnet bypass.
+        assert!(issue_session_with_evidence(&reg, "meme", "gold", gold_hash, &mut entropy, &production_evidence(), &trusted()).is_err());
+        // And a hand-built session (as a legacy record with generation 0 would be) is refused at
+        // check time on BOTH a production and a non-production application.
+        let now = now_unix();
+        let s = session_at(&reg, 0);
+        for production in [true, false] {
+            reg.applications[0].production = production;
+            let d = check_access(&reg, &[s.clone()], &s.token, "meme", "gold", now);
+            assert!(!d.authorized, "unknown generation must deny (production={production})");
+            assert!(d.reason.contains("chain generation"), "reason names the generation gate: {}", d.reason);
+        }
+    }
+
+    #[test]
+    fn a_rolled_back_generation_authorizes_nothing() {
+        let mut reg = registry_with_tiers();
+        // The durable floor has reached 2, but the application now declares 1 — a restored older
+        // configuration. It authorizes nothing until migrated forward again.
+        reg.applications[0].chain_generation = 1;
+        reg.generation_floor.insert("meme".into(), 2);
+        let now = now_unix();
+        let s = session_at(&reg, 1);
+        let d = check_access(&reg, &[s.clone()], &s.token, "meme", "gold", now);
+        assert!(!d.authorized, "a declared generation below the durable floor is a rollback");
+        let mut entropy = [0u8; 32];
+        let gold_hash = { let app = reg.application("meme").unwrap(); hash_policy(&hasher(), app, app.gate("gold").unwrap(), 1) };
+        assert!(issue_session_with_evidence(&reg, "meme", "gold", gold_hash, &mut entropy, &production_evidence(), &trusted()).is_err());
+    }
+
+    #[test]
+    fn migrating_the_generation_retires_old_sessions_and_rejects_rollback() {
+        let paths = gen_dir("migrate");
+        let mut reg = registry_with_tiers(); // generation 1, floor 0
+        // A live generation-1 session authorizes before the migration.
+        let old = session_at(&reg, 1);
+        let now = now_unix();
+        assert!(check_access(&reg, &[old.clone()], &old.token, "meme", "gold", now).authorized);
+
+        // Migrate forward to generation 2.
+        migrate_generation(&paths, &mut reg, "meme", 2, "admin-1").unwrap();
+        assert_eq!(reg.generation_floor_of("meme"), 2);
+        assert_eq!(reg.application("meme").unwrap().chain_generation, 2);
+
+        // The generation-1 session no longer authorizes — the generation gate refuses it even
+        // though its policy hash is unchanged.
+        let d = check_access(&reg, &[old.clone()], &old.token, "meme", "gold", now);
+        assert!(!d.authorized, "a pre-migration session must be refused after a generation migration");
+        assert!(d.reason.contains("generation 2"), "reason names the live generation: {}", d.reason);
+
+        // A fresh generation-2 session authorizes.
+        let fresh = session_at(&reg, 2);
+        assert!(check_access(&reg, &[fresh.clone()], &fresh.token, "meme", "gold", now).authorized);
+
+        // Rollback and no-op migrations are rejected; only strictly-forward moves are allowed.
+        assert!(migrate_generation(&paths, &mut reg, "meme", 1, "admin-1").is_err());
+        assert!(migrate_generation(&paths, &mut reg, "meme", 2, "admin-1").is_err());
+        assert!(migrate_generation(&paths, &mut reg, "meme", 3, "admin-1").is_ok());
+
+        // The durable ledger survives a reload: restoring an old in-memory registry (floor 0) does
+        // not lower the floor, because the floor is read from generations.ndjson, not registry.json.
+        let reloaded_floor = load_generation_floor(&paths).unwrap();
+        assert_eq!(reloaded_floor.get("meme").copied(), Some(3), "the floor is durable and monotonic");
+        let _ = fs::remove_dir_all(&paths.dir);
+    }
+
+    #[test]
+    fn identical_l1_genesis_network_and_resource_still_fail_closed_across_generations() {
+        // The dangerous case: an L2 reset leaves the L1 genesis, the network byte and the native
+        // resource address UNCHANGED. Nothing about the gate's content or ledger identity differs
+        // — only the declared chain generation. A session from the earlier generation must still
+        // be refused, proving reset safety does not rely on any of those three fields changing.
+        let paths = gen_dir("identical");
+        let mut reg = registry_with_tiers();
+        let before = reg.application("meme").unwrap().clone();
+        let old = session_at(&reg, 1);
+
+        migrate_generation(&paths, &mut reg, "meme", 2, "admin-1").unwrap();
+        let after = reg.application("meme").unwrap();
+
+        // Everything a reset is NOT guaranteed to change is identical across the two generations.
+        assert_eq!(before.network, after.network);
+        assert_eq!(before.genesis_hash, after.genesis_hash);
+        assert_eq!(
+            before.gates.iter().map(|g| &g.resource_address).collect::<Vec<_>>(),
+            after.gates.iter().map(|g| &g.resource_address).collect::<Vec<_>>(),
+            "the native resource address is deterministic and unchanged",
+        );
+        // Yet the pre-reset session is refused purely on the generation boundary.
+        let now = now_unix();
+        assert!(!check_access(&reg, &[old.clone()], &old.token, "meme", "gold", now).authorized);
+        let _ = fs::remove_dir_all(&paths.dir);
+    }
+
+    // ---- Migration crash recovery and ledger integrity ---------------------------------------
+
+    #[test]
+    fn a_partial_migration_with_the_floor_ahead_of_the_declared_generation_fails_closed() {
+        // Models a crash AFTER the generation floor was persisted (fsync'd) but BEFORE the registry
+        // save advanced the declared generation. The floor is 2 while the application still
+        // declares 1, so every authorization is refused until the migration is completed.
+        let paths = gen_dir("partial");
+        let mut reg = registry_with_tiers(); // declared 1, floor 0
+        append_generation_activation(&paths, &mut reg, &GenerationActivation {
+            application_id: "meme".into(), generation: 2, activated_unix: 1, actor: "op".into(),
+        }).unwrap();
+        // The registry save did NOT run, so the app still declares generation 1.
+        assert_eq!(reg.application("meme").unwrap().chain_generation, 1);
+        assert_eq!(reg.generation_floor_of("meme"), 2);
+        assert_eq!(reg.effective_generation("meme"), None, "floor ahead of declared denies");
+        let now = now_unix();
+        let s = session_at(&reg, 1);
+        assert!(!check_access(&reg, &[s.clone()], &s.token, "meme", "gold", now).authorized);
+        // Issuance is refused too, so no new session is minted in the partial state.
+        let mut entropy = [0u8; 32];
+        let gold_hash = { let app = reg.application("meme").unwrap(); hash_policy(&hasher(), app, app.gate("gold").unwrap(), 1) };
+        assert!(issue_session_with_evidence(&reg, "meme", "gold", gold_hash, &mut entropy, &production_evidence(), &trusted()).is_err());
+        let _ = fs::remove_dir_all(&paths.dir);
+    }
+
+    #[test]
+    fn a_restored_older_registry_cannot_drop_below_the_durable_floor_on_reload() {
+        // The durable floor lives in its own append-only ledger, not in registry.json. Persisting a
+        // registry that declares the OLD generation and reloading it cannot lower the floor: the
+        // reload re-reads the ledger, sees generation 2, and refuses the restored generation-1 app.
+        let paths = gen_dir("restore");
+        let mut reg = registry_with_tiers(); // declared 1
+        append_generation_activation(&paths, &mut reg, &GenerationActivation {
+            application_id: "meme".into(), generation: 2, activated_unix: 1, actor: "op".into(),
+        }).unwrap();
+        // Save a registry that STILL declares generation 1 (the restored older configuration).
+        save_registry(&paths, &reg).unwrap();
+        let reloaded = load_registry(&paths).unwrap();
+        assert_eq!(reloaded.application("meme").unwrap().chain_generation, 1);
+        assert_eq!(reloaded.generation_floor_of("meme"), 2, "the floor is re-read from the ledger");
+        assert_eq!(reloaded.effective_generation("meme"), None, "the restored older config authorizes nothing");
+        let _ = fs::remove_dir_all(&paths.dir);
+    }
+
+    #[test]
+    fn a_corrupt_or_truncated_generation_ledger_fails_the_whole_load() {
+        // A corrupt or partially-written ledger line could hide a high activation, so the load
+        // fails closed (the registry refuses to load at all) rather than silently using a lower
+        // floor. Recovery is an explicit operator repair, never an automatic downgrade.
+        let paths = gen_dir("corrupt");
+        let good = serde_json::to_string(&GenerationActivation {
+            application_id: "meme".into(), generation: 2, activated_unix: 1, actor: "op".into(),
+        }).unwrap();
+        fs::write(paths.generations(), format!("{good}\n{{\"application_id\":\"meme\",\"generat")).unwrap();
+        assert!(load_generation_floor(&paths).is_err(), "a corrupt/truncated ledger line fails closed");
+        assert!(load_registry(&paths).is_err(), "the whole registry load fails closed on a bad ledger");
+        let _ = fs::remove_dir_all(&paths.dir);
+    }
+
+    #[test]
+    fn a_missing_generation_ledger_means_no_floor_documenting_the_fs_limit() {
+        // LIMIT OF LOCAL-FS PERSISTENCE: if the ledger file is DELETED, the floor is lost. Rollback
+        // protection defends against restoring registry.json / sessions.json alone, not against an
+        // adversary who can also delete or rewrite the ledger itself. A remote/authenticated anchor
+        // would be required to defend the durable store against tampering with its own files.
+        let paths = gen_dir("missing");
+        assert_eq!(load_generation_floor(&paths).unwrap().len(), 0);
+        let reg = load_registry(&paths).unwrap();
+        assert_eq!(reg.generation_floor_of("anything"), 0);
+        let _ = fs::remove_dir_all(&paths.dir);
     }
 }
 
