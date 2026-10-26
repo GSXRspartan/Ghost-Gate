@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/ghost-gate-core",
+    "crates/ghost-gate-cbor",
     "crates/ghost-gate-registry",
     "crates/ghost-gate-admin",
     "crates/ghost-gate-verifier",
