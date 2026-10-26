@@ -23,3 +23,10 @@ sha2 = { workspace = true }
 p256 = { version = "0.13.2", default-features = false, features = ["ecdsa", "ecdsa-core"] }
 # The Ristretto Schnorr machinery the audited credential flow uses, for wallet-challenge admins.
 tari_crypto = { workspace = true }
+
+[dev-dependencies]
+# The admin_plane integration tests synthesise Production-grade consensus evidence to exercise the
+# session lifecycle; the fixture constructor lives behind this feature and never reaches a shipped
+# binary. Features are additive, so enabling it here affects test builds only.
+ghost-gate-registry = { path = "../ghost-gate-registry", features = ["test-fixtures"] }
+ghost-gate-core = { path = "../ghost-gate-core", features = ["test-fixtures"] }

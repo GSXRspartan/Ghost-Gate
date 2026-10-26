@@ -123,6 +123,10 @@ pub struct Bridge<
     /// per-challenge value (suitable for the credential path, which has no on-chain component).
     /// Operator sets `GG_GATE_SESSION` to the same value used at component instantiation.
     pub component_session: Option<Vec<u8>>,
+    /// Operator trust policy (GG_OPERATOR_TRUSTED_INDEXER, GG_MAX_TRUST_TIER). It can only LOWER a
+    /// derived tier: the default trusts no indexer and caps at `Production` (so it imposes no cap
+    /// on its own). The bridge binary parses the env into this once at startup.
+    pub trust_policy: ghost_gate_registry::TrustPolicy,
 }
 
 impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChannel, XR: crate::xtm::XtmChainReader>
@@ -156,8 +160,16 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             pending_proof_kind: None,
             authorization_id: None,
             access_token: None,
+            trust_tier: ghost_gate_registry::TrustTier::default(),
+            evidence_digest: None,
         }
     }
+
+    /// Set the operator trust policy parsed from the environment. Never raises a tier.
+    pub fn set_trust_policy(&mut self, policy: ghost_gate_registry::TrustPolicy) {
+        self.trust_policy = policy;
+    }
+
     /// Assembles a bridge over every channel at once. The narrower constructors below are sugar
     /// for the common deployments; this is the one the L1-enabled bridge binary uses.
     pub fn assemble(
@@ -186,6 +198,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             xtm,
             xtm_chain,
             component_session: None,
+            trust_policy: ghost_gate_registry::TrustPolicy::default(),
         }
     }
 
@@ -217,6 +230,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             xtm,
             xtm_chain,
             component_session: None,
+            trust_policy: ghost_gate_registry::TrustPolicy::default(),
         }
     }
 }
@@ -328,6 +342,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R, crate::xt
             xtm: crate::xtm::NoXtm,
             xtm_chain: None,
             component_session: None,
+            trust_policy: ghost_gate_registry::TrustPolicy::default(),
         }
     }
 }
@@ -363,6 +378,7 @@ impl<W: WalletChannel, X: crate::xtm::XtmChannel, XR: crate::xtm::XtmChainReader
             xtm,
             xtm_chain,
             component_session: None,
+            trust_policy: ghost_gate_registry::TrustPolicy::default(),
         }
     }
 }
@@ -397,6 +413,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             xtm,
             xtm_chain,
             component_session: None,
+            trust_policy: ghost_gate_registry::TrustPolicy::default(),
         }
     }
 }
@@ -556,6 +573,10 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                             "granted": decision.granted,
                             "expiresUnix": decision.expires_unix,
                             "policyVersion": decision.policy_version,
+                            // Server-derived; a relying party may require a minimum tier but can
+                            // never raise either value (G3).
+                            "trustTier": decision.trust_tier.as_str(),
+                            "requiredTier": decision.required_tier.as_str(),
                         }))
                     }
                     None => Response::error(503, "GG: this bridge is not registry-backed; no access plane"),
@@ -620,6 +641,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
         gate_id: &str,
         nonce_hex: &str,
         job_id: Option<&str>,
+        evidence: ghost_gate_registry::Evidence,
     ) -> Option<ghost_gate_registry::AccessGrant> {
         // A proof is only worth a session under the policy it was answered against. If an
         // administrator replaced that policy while the challenge was outstanding, the answer proves
@@ -636,6 +658,13 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                 return None;
             }
         }
+        let policy = self.trust_policy;
+        // The tier the evidence will achieve on this gate, computed here so it can be bound into the
+        // durable replay record BEFORE issuance. The registry independently recomputes the same
+        // value from the same evidence, so a recovery that presents different evidence (a different
+        // digest, or evidence that would yield a different tier) is refused rather than upgraded.
+        let expected_tier = self.access.as_ref()?.expected_tier(gate_id, &evidence, &policy);
+        let evidence_digest = evidence.digest().to_string();
         let grant = if let Some(replay) = self.replay.as_mut() {
             let nonce = nonce?;
             let existing = replay.get(&nonce).ok()?;
@@ -646,12 +675,20 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             }
             let authorization_id = format!("gg-auth-{}", hex::encode(nonce));
             let token = existing.access_token.clone().unwrap_or_else(|| hex::encode(random_nonce()));
-            let record = replay.authorize(&nonce, &authorization_id, &token, crate::session::now_unix()).ok()?;
+            let record = match replay.authorize(&nonce, &authorization_id, &token, expected_tier, &evidence_digest, crate::session::now_unix()) {
+                Ok(record) => record,
+                Err(error) => {
+                    // An evidence/tier mismatch on a retry is an attempted upgrade: fail closed and
+                    // say so, rather than installing a session at a tier the record never bound.
+                    eprintln!("ghost-gate-bridge: refusing a session for gate {gate_id}: {error}");
+                    return None;
+                }
+            };
             let authorization_id = record.authorization_id.as_deref()?;
             let token = record.access_token.as_deref()?;
-            self.access.as_mut()?.grant_idempotent(gate_id, authorization_id, token).ok()?
+            self.access.as_mut()?.grant_idempotent(gate_id, authorization_id, token, &evidence, &policy).ok()?
         } else {
-            self.access.as_mut()?.grant(gate_id).ok()?
+            self.access.as_mut()?.grant(gate_id, &evidence, &policy).ok()?
         };
         // The grant's own remaining life is the session duration the visitor was shown. It is the
         // visitor's OWN session, so its length discloses nothing about anyone else.
@@ -1123,8 +1160,16 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                     started_at: std::time::SystemTime::now(),
                     xtm_artifact: None,
                 });
-                // The credential path grants the session here: the receipt IS the verification.
-                self.grant_access_for(id, &hex::encode(job_nonce), Some(&job_id));
+                // The credential path's evidence is the indexer's own `verified` flag (F-04): the
+                // bridge read the output from an indexer and trusts its merkle assertion. That is
+                // `IndexerAsserted`, which reaches at most OperatorTrustedTestnet, and only when the
+                // operator has opted in. It can never authorize a production application. When the
+                // v0.47 sidecar is wired (Phase 2C) this is where ConsensusVerified evidence will
+                // replace it. The digest names the exact verified output + floor.
+                let evidence = ghost_gate_registry::Evidence::IndexerAsserted {
+                    digest: format!("credential:{}:{}", receipt.substate_id, receipt.attested_minimum),
+                };
+                self.grant_access_for(id, &hex::encode(job_nonce), Some(&job_id), evidence);
                 // The credential path grants its session here and hands it straight back, so
                 // the browser never has to poll for it.
                 let access = self.access_grants.get(&hex::encode(job_nonce)).cloned();
@@ -1163,19 +1208,29 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                     }
                 }
 
-                // The success message reflects whether a server-authorized session actually
-                // exists: a verified proof on a preview bridge is exactly that — verified,
-                // not granted.
-                let status_message = if access.is_some() {
+                // Four distinct facts, never collapsed into one (G4):
+                //   proof_verified     — the signature and on-chain floor checked out (always true here);
+                //   evidence_class     — the trust model the evidence was accepted under;
+                //   session_issued     — a server-authorized session actually exists;
+                //   access_granted     — session_issued AND it meets the gate's required tier.
+                // A verified proof whose evidence does not meet the application's required tier
+                // issues NO session: the bridge must not show admission for it.
+                let session_issued = access.is_some();
+                let status_message = if session_issued {
                     "ACCESS GRANTED"
                 } else {
-                    "PROOF VERIFIED — SESSION NOT ISSUED"
+                    "PROOF VERIFIED — NO ACCESS SESSION ISSUED (evidence does not meet this application's required trust tier, \
+                     or this bridge issues no sessions)"
                 };
                 Response::json(
                     200,
                     &serde_json::json!({
                         "state": "accepted",
                         "status_message": status_message,
+                        "proof_verified": true,
+                        "evidence_class": ghost_gate_registry::EvidenceKind::IndexerAsserted.as_str(),
+                        "session_issued": session_issued,
+                        "access_granted": session_issued,
                         "proof_id": job_id,
                         "receipt": receipt,
                         "access": access,
@@ -1565,7 +1620,16 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                     // `grant_access_for` uses the durable nonce record to atomically select its
                     // stable authorization identity before installing/recovering the registry
                     // session. A restart-recovered job follows exactly this same path.
-                    self.grant_access_for(&gate_id, &hex::encode(nonce), Some(job_id));
+                    //
+                    // Mode A's evidence is the operator's OWN wallet daemon reporting a finalized
+                    // transaction — not independent consensus. It is `OperatorWalletReceipt`, which
+                    // tops out at OperatorTrustedTestnet: a local walletd receipt does not become
+                    // Production merely because the gate uses Consensus mode (G5). The digest names
+                    // the committed transaction and the floor it attested.
+                    let evidence = ghost_gate_registry::Evidence::OperatorWalletReceipt {
+                        digest: format!("ootle:{}:{attested_minimum}", hex::encode(nonce)),
+                    };
+                    self.grant_access_for(&gate_id, &hex::encode(nonce), Some(job_id), evidence);
                 }
                 Ok(crate::wallet::CommitOutcome::Rejected { reason }) => {
                     self.jobs[index].status = ProofStatus::Refused { reason };
@@ -1641,7 +1705,13 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                     .consume_on_acceptance(&nonce, &session_commitment)
                     .ok();
                 let xtm_job_id = self.jobs[index].id.clone();
-                self.grant_access_for(&gate_id, &hex::encode(nonce), Some(&xtm_job_id));
+                // L1 XTM is base-node-verified by the operator's own reader, so it is at most an
+                // OperatorWalletReceipt. In practice XTM gates are not activatable, so issuance
+                // refuses regardless — this stays fail-closed either way.
+                let evidence = ghost_gate_registry::Evidence::OperatorWalletReceipt {
+                    digest: format!("xtm:{}", hex::encode(nonce)),
+                };
+                self.grant_access_for(&gate_id, &hex::encode(nonce), Some(&xtm_job_id), evidence);
                 self.jobs[index].status = ProofStatus::Accepted {
                     result: PublicProof {
                         gate_id: gate_id.clone(),

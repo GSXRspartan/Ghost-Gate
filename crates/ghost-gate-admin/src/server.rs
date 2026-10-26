@@ -775,6 +775,11 @@ fn admin_state(state: &SharedState, authority: &Authority) -> Response {
                 "expiresUnix": s.expires_unix,
                 "revoked": s.revoked,
                 "testLane": s.test_lane,
+                // The tier this session ACHIEVED from its evidence, and the evidence class behind
+                // it. Distinct from a gate's "Max tier" (the ceiling its proof mode could ever
+                // reach): this is what was actually verified for this session.
+                "trustTier": s.trust_tier.as_str(),
+                "evidenceKind": s.evidence_kind.as_str(),
             })
         })
         .collect();

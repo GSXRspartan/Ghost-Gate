@@ -38,4 +38,8 @@ tari_crypto = { workspace = true }
 blake2 = "0.10.6"
 # xtm.rs's tests are async.
 tokio = { workspace = true, features = ["macros", "rt", "net", "io-util", "time"] }
+# Turns on the fixture evidence constructors (ConsensusAttestation::fixture) for this crate's tests
+# only. Features are additive, so this affects test builds alone and never a shipped bridge binary.
+ghost-gate-registry = { path = "../ghost-gate-registry", features = ["test-fixtures"] }
+ghost-gate-core = { path = "../ghost-gate-core", features = ["test-fixtures"] }
 

@@ -558,13 +558,19 @@ function renderSessions(state) {
     return;
   }
   const table = document.createElement("table");
-  table.innerHTML = "<tr><th>Token</th><th>App</th><th>Proven gate</th><th>Grants</th><th>Expires</th><th>State</th><th></th></tr>";
+  table.innerHTML = "<tr><th>Token</th><th>App</th><th>Proven gate</th><th>Achieved tier</th><th>Grants</th><th>Expires</th><th>State</th><th></th></tr>";
   for (const s of state.sessions) {
     const tr = document.createElement("tr");
+    // The tier this session ACTUALLY achieved from its verified evidence — not a gate's maximum
+    // supported tier. A development-tier session authorises nothing, so it is flagged plainly.
+    const tier = s.trustTier || "development";
+    const tierClass = tier === "production" ? "tier-prod" : tier === "operator-trusted-testnet" ? "tier-testnet" : "tier-dev";
+    const tierLabel = tier === "production" ? "production" : tier === "operator-trusted-testnet" ? "testnet" : "dev — no access";
     tr.innerHTML = `
       <td class="mono">${esc(s.tokenPrefix)}…</td>
       <td class="mono">${esc(s.applicationId)}</td>
       <td>${esc(s.provenGate)}</td>
+      <td><span class="badge ${tierClass}" title="${esc(s.evidenceKind || "none")}">${tierLabel}</span></td>
       <td class="mono">${esc((s.granted || []).join(", "))}</td>
       <td>${new Date(s.expiresUnix * 1000).toLocaleString()}</td>
       <td>${s.revoked ? '<span class="bad">revoked</span>' : Date.now() / 1000 > s.expiresUnix ? '<span class="bad">expired</span>' : '<span class="ok">live</span>'}</td>

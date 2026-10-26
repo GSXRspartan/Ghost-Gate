@@ -30,6 +30,22 @@ fn unique_dir(prefix: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("{prefix}-{}-{n}", std::process::id()))
 }
 
+/// Synthetic Production-grade consensus evidence. `ConsensusAttestation::fixture` is the only way
+/// to reach `Production` before the sidecar client exists (Phase 2C), and it is test-only.
+fn production_evidence() -> ghost_gate_registry::Evidence {
+    use ghost_gate_core::policy::{AnchorClass, ConsensusAttestation, Freshness};
+    ghost_gate_registry::Evidence::ConsensusVerified(ConsensusAttestation::fixture(
+        AnchorClass::IndependentlyAuthenticated, Freshness::Authenticated, "fixture-consensus"))
+}
+
+/// The operator trust policy used by the lifecycle tests: trusts the indexer and imposes no ceiling.
+fn trusted_policy() -> ghost_gate_registry::TrustPolicy {
+    ghost_gate_registry::TrustPolicy {
+        operator_trusted_indexer: true,
+        max_tier: ghost_gate_registry::TrustTier::Production,
+    }
+}
+
 fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -396,8 +412,7 @@ fn a_test_lane_gate_cannot_be_enabled_on_a_production_application() {
 #[test]
 fn one_week_session_issue_use_expiry_and_revocation() {
     use ghost_gate_core::policy::{hash_policy, GateTopology, ProofMode};
-    use ghost_gate_core::policy::TrustTier;
-    use ghost_gate_registry::{check_access, issue_session_with_tier, PolicyVersion};
+    use ghost_gate_registry::{check_access, issue_session_with_evidence, PolicyVersion};
 
     let dir = unique_dir("gg-admin-t4");
     let _ = std::fs::remove_dir_all(&dir);
@@ -464,7 +479,7 @@ fn one_week_session_issue_use_expiry_and_revocation() {
     let app_ref = reg.application("community").unwrap();
     let gate_ref = app_ref.gate("members").unwrap();
     let mut entropy = [0u8; 32];
-    let session = issue_session_with_tier(&reg, "community", "members", hash_policy(&ghost_gate_registry::Blake3Hasher, app_ref, gate_ref, 1), &mut entropy, TrustTier::Production).unwrap();
+    let session = issue_session_with_evidence(&reg, "community", "members", hash_policy(&ghost_gate_registry::Blake3Hasher, app_ref, gate_ref, 1), &mut entropy, &production_evidence(), &trusted_policy()).unwrap();
     assert_eq!(session.expires_unix - session.issued_unix, 7 * 86_400, "exactly one week");
 
     // In-window use succeeds.
@@ -682,8 +697,7 @@ fn tamper_8_a_proof_against_another_gate_or_policy_cannot_verify() {
     // The challenge domain + policy hash binding: a session proven for gate A is refused for gate
     // C unless the policy says A grants C; a session proven under v1 is refused after v2 exists.
     use ghost_gate_core::policy::{hash_policy, GateTopology, ProofMode};
-    use ghost_gate_core::policy::TrustTier;
-    use ghost_gate_registry::{check_access, issue_session_with_tier, Registry};
+    use ghost_gate_registry::{check_access, issue_session_with_evidence, Registry};
     let mut reg = Registry::default();
     let mut app = ghost_gate_core::policy::Application {
         application_id: "app".into(), display_name: "app".into(), owner_credential: "w".into(),
@@ -719,7 +733,7 @@ fn tamper_8_a_proof_against_another_gate_or_policy_cannot_verify() {
     let app_ref = reg.application("app").unwrap();
     let a = app_ref.gate("a").unwrap();
     let mut e = [0u8; 32];
-    let session = issue_session_with_tier(&reg, "app", "a", hash_policy(&ghost_gate_registry::Blake3Hasher, app_ref, a, 1), &mut e, TrustTier::Production).unwrap();
+    let session = issue_session_with_evidence(&reg, "app", "a", hash_policy(&ghost_gate_registry::Blake3Hasher, app_ref, a, 1), &mut e, &production_evidence(), &trusted_policy()).unwrap();
     let now = ghost_gate_registry::now_unix();
     let token = session.token.clone();
     assert!(check_access(&reg, &[session.clone()], &token, "app", "a", now).authorized);
@@ -766,8 +780,7 @@ fn tamper_10_a_lower_tier_session_cannot_reach_a_higher_tier() {
     // Covered exhaustively in the registry tests; repeated here as the product-level statement:
     // silver grants bronze, never the reverse.
     use ghost_gate_core::policy::{hash_policy, GateTopology, ProofMode};
-    use ghost_gate_core::policy::TrustTier;
-    use ghost_gate_registry::{check_access, issue_session_with_tier, Registry};
+    use ghost_gate_registry::{check_access, issue_session_with_evidence, Registry};
     let mut reg = Registry::default();
     let mut app = ghost_gate_core::policy::Application {
         application_id: "t".into(), display_name: "t".into(), owner_credential: "w".into(),
@@ -808,7 +821,7 @@ fn tamper_10_a_lower_tier_session_cannot_reach_a_higher_tier() {
     let app_ref = reg.application("t").unwrap();
     let bronze = app_ref.gate("bronze").unwrap();
     let mut e = [0u8; 32];
-    let s = issue_session_with_tier(&reg, "t", "bronze", hash_policy(&ghost_gate_registry::Blake3Hasher, app_ref, bronze, 1), &mut e, TrustTier::Production).unwrap();
+    let s = issue_session_with_evidence(&reg, "t", "bronze", hash_policy(&ghost_gate_registry::Blake3Hasher, app_ref, bronze, 1), &mut e, &production_evidence(), &trusted_policy()).unwrap();
     let now = ghost_gate_registry::now_unix();
     assert!(check_access(&reg, &[s.clone()], &s.token, "t", "bronze", now).authorized);
     let token = s.token.clone();
@@ -823,8 +836,7 @@ fn tamper_11_client_side_expiry_extension_is_meaningless() {
     // the expiry — only the token — and /access/check recomputes everything server-side. This test
     // proves the check ignores any client claim: there is no parameter for it.
     use ghost_gate_core::policy::{hash_policy, GateTopology, ProofMode};
-    use ghost_gate_core::policy::TrustTier;
-    use ghost_gate_registry::{check_access, issue_session_with_tier, Registry};
+    use ghost_gate_registry::{check_access, issue_session_with_evidence, Registry};
     let mut reg = Registry::default();
     let mut app = ghost_gate_core::policy::Application {
         application_id: "e".into(), display_name: "e".into(), owner_credential: "w".into(),
@@ -850,7 +862,7 @@ fn tamper_11_client_side_expiry_extension_is_meaningless() {
     let app_ref = reg.application("e").unwrap();
     let g = app_ref.gate("g").unwrap();
     let mut e2 = [0u8; 32];
-    let s = issue_session_with_tier(&reg, "e", "g", hash_policy(&ghost_gate_registry::Blake3Hasher, app_ref, g, 1), &mut e2, TrustTier::Production).unwrap();
+    let s = issue_session_with_evidence(&reg, "e", "g", hash_policy(&ghost_gate_registry::Blake3Hasher, app_ref, g, 1), &mut e2, &production_evidence(), &trusted_policy()).unwrap();
     let now = ghost_gate_registry::now_unix();
     let expiry = s.expires_unix;
     let token = s.token.clone();
@@ -1102,8 +1114,7 @@ fn an_application_needs_a_known_cohort_and_a_ledger_identity() {
 #[test]
 fn a_credential_gate_on_a_production_app_refuses_production_tier() {
     use ghost_gate_core::policy::{hash_policy, GateTopology, ProofMode};
-    use ghost_gate_core::policy::TrustTier;
-    use ghost_gate_registry::{issue_session_with_tier, Registry};
+    use ghost_gate_registry::{issue_session_with_evidence, Registry};
 
     let mut reg = Registry::default();
     let mut app = ghost_gate_core::policy::Application {
@@ -1132,15 +1143,15 @@ fn a_credential_gate_on_a_production_app_refuses_production_tier() {
         policy: policy_clone, app_revision: 1, created_unix: 1,
     });
     let mut entropy = [0u8; 32];
-    let err = issue_session_with_tier(
+    // Even handed Production-grade consensus evidence, a CREDENTIAL gate caps the achieved tier at
+    // OperatorTrustedTestnet, which is below the production app's requirement, so no session issues.
+    let err = issue_session_with_evidence(
         &reg, "prod-cred", "cred", policy_hash,
-        &mut entropy, TrustTier::Production,
+        &mut entropy, &production_evidence(), &trusted_policy(),
     );
-    assert!(err.is_err(), "a credential gate on a production app must refuse Production tier");
+    assert!(err.is_err(), "a credential gate on a production app must refuse to issue a session");
     let msg = err.unwrap_err();
-    assert!(msg.contains("production"), "error must mention production: {msg}");
-    assert!(msg.contains("operator-trusted-testnet") || msg.contains("refuses"),
-        "error must explain the tier cap: {msg}");
+    assert!(msg.contains("requires") || msg.contains("production"), "error must explain the tier gap: {msg}");
 }
 
 // ---------------------------------------------------------------------------
@@ -1154,8 +1165,7 @@ fn a_credential_gate_on_a_production_app_refuses_production_tier() {
 #[test]
 fn measured_scalability_at_1_3_10_25_and_50_gates() {
     use ghost_gate_core::policy::{hash_policy, GateTopology, ProofMode};
-    use ghost_gate_core::policy::TrustTier;
-    use ghost_gate_registry::{check_access, derive_bindings, issue_session_with_tier, Blake3Hasher, Registry, StoreLock};
+    use ghost_gate_registry::{check_access, derive_bindings, issue_session_with_evidence, Blake3Hasher, Registry, StoreLock};
     use std::time::Instant;
 
     let dir = unique_dir("gg-scale");
@@ -1248,7 +1258,7 @@ fn measured_scalability_at_1_3_10_25_and_50_gates() {
         let a = loaded.application("scale").unwrap();
         let top = a.gate(&format!("gate-{}", count - 1)).unwrap();
         let mut entropy = [0u8; 32];
-        let session = issue_session_with_tier(&loaded, "scale", &format!("gate-{}", count - 1), hash_policy(&Blake3Hasher, a, top, 1), &mut entropy, TrustTier::Production).unwrap();
+        let session = issue_session_with_evidence(&loaded, "scale", &format!("gate-{}", count - 1), hash_policy(&Blake3Hasher, a, top, 1), &mut entropy, &production_evidence(), &trusted_policy()).unwrap();
         let sessions = vec![session.clone()];
         let _ = check_access(&loaded, &sessions, &session.token, "scale", &format!("gate-{}", count - 1), ghost_gate_registry::now_unix());
         let t0 = Instant::now();

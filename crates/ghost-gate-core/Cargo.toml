@@ -16,3 +16,7 @@ minicbor = { version = "2.3", default-features = false, features = ["std", "deri
 # alloc keeps ghost-gate-core compilable for the template's wasm32 target, where std is absent;
 # the workspace convention (serde 1.0 + derive) is unchanged otherwise.
 serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }
+
+[features]
+# Exposes ConsensusAttestation::fixture for tests only. Never enable it in a shipped binary.
+test-fixtures = []

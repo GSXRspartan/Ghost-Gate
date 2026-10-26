@@ -730,6 +730,20 @@ where
     X: ghost_gate_bridge::xtm::XtmChannel,
     XR: ghost_gate_bridge::xtm::XtmChainReader,
 {
+    // The operator trust policy applies to every registry-backed deployment. It can only LOWER a
+    // derived tier: GG_OPERATOR_TRUSTED_INDEXER=1 lets the indexer's self-reported `verified` flag
+    // support non-production (OperatorTrustedTestnet) sessions, and GG_MAX_TRUST_TIER caps the
+    // result. Absent both, credential (indexer-asserted) evidence stays Development and issues no
+    // session — fail-closed by default. Production is never reachable from an indexer assertion.
+    let trust_policy = ghost_gate_registry::TrustPolicy::parse(
+        std::env::var("GG_OPERATOR_TRUSTED_INDEXER").ok().as_deref(),
+        std::env::var("GG_MAX_TRUST_TIER").ok().as_deref(),
+    );
+    bridge.set_trust_policy(trust_policy);
+    if trust_policy.operator_trusted_indexer {
+        println!("  trust policy: operator vouches for the configured indexer (indexer-asserted evidence may reach operator-trusted-testnet)");
+    }
+
     let Some(dir) = std::env::var("GG_BINDINGS_PATH")
         .ok()
         .filter(|v| !v.trim().is_empty())

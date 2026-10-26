@@ -21,9 +21,9 @@
 //!   nothing about version N+1: re-verification needs fresh evidence.
 
 pub use ghost_gate_core::policy::{
-    hash_policy, now_unix, Application, GatePolicy, PolicyHasher, PolicyVersion, ProofMode,
-    ReplacementRecord, TrustTier, CHALLENGE_TTL, DEFAULT_SESSION_TTL, MAX_SESSION_TTL,
-    MIN_SESSION_TTL,
+    achieved_tier, hash_policy, now_unix, required_tier, Application, Evidence, EvidenceKind,
+    GatePolicy, PolicyHasher, PolicyVersion, ProofMode, ReplacementRecord, TrustPolicy, TrustTier,
+    CHALLENGE_TTL, DEFAULT_SESSION_TTL, MAX_SESSION_TTL, MIN_SESSION_TTL,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -116,9 +116,14 @@ pub struct VerifiedSession {
     /// Sessions issued by test-lane gates can never authorise production gates.
     pub test_lane: bool,
     /// The verification strength at the moment this session was issued. Defaults to
-    /// `Development` so sessions written before this field existed are never silently upgraded.
+    /// `Development` so sessions written before this field existed are never silently upgraded —
+    /// and `check_access` refuses `Development`, so a legacy session authorizes nothing.
     #[serde(default)]
     pub trust_tier: TrustTier,
+    /// The class of evidence the tier was derived from, recorded for the dashboard and the audit.
+    /// Legacy sessions load as `None`, which is consistent with their `Development` tier.
+    #[serde(default)]
+    pub evidence_kind: EvidenceKind,
 }
 
 /// Why a session was revoked — the audit trail wants the reason, not just the fact.
@@ -599,38 +604,31 @@ pub fn save_sessions(paths: &StorePaths, sessions: &[VerifiedSession]) -> Result
 /// Returns an error rather than a session when the application or gate is unknown, the gate is
 /// disabled, or the TTL falls outside the enforced bounds — the honest failure, never a best-effort
 /// token.
-pub fn issue_session(
+pub fn issue_session_with_evidence(
     reg: &Registry,
     application_id: &str,
     gate_id: &str,
     policy_hash: String,
     fresh_entropy: &mut [u8; 32],
-) -> Result<VerifiedSession, String> {
-    issue_session_with_tier(reg, application_id, gate_id, policy_hash, fresh_entropy, TrustTier::Development)
-}
-
-/// Issue a session with an explicit trust tier determined by the bridge's verification.
-pub fn issue_session_with_tier(
-    reg: &Registry,
-    application_id: &str,
-    gate_id: &str,
-    policy_hash: String,
-    fresh_entropy: &mut [u8; 32],
-    trust_tier: TrustTier,
+    evidence: &Evidence,
+    policy: &TrustPolicy,
 ) -> Result<VerifiedSession, String> {
     rand::fill(fresh_entropy);
     let token = hex::encode(fresh_entropy);
     issue_session_with_token(
-        reg, application_id, gate_id, policy_hash, &format!("legacy-{token}"), &token, trust_tier,
+        reg, application_id, gate_id, policy_hash, &format!("legacy-{token}"), &token, evidence, policy,
     )
 }
 
-/// Same policy validation as [`issue_session`], with a token already created and durably held by
-/// the replay coordinator. It is never for browser input.
+/// Issue a session for a proof the caller has already verified, resolving the trust tier
+/// SERVER-SIDE from the supplied `evidence` and the gate's own proof machinery.
 ///
-/// `trust_tier` is the verification strength the caller (the bridge) determined from the actual
-/// evidence — never from the browser. A `production: true` application refuses to issue a session
-/// below `Production` tier.
+/// `evidence` describes what was actually verified; it is produced at the verification site, never
+/// taken from a browser, and its strongest variant ([`Evidence::ConsensusVerified`]) cannot even be
+/// constructed outside an authenticated verification path. The achieved tier is
+/// `achieved_tier(evidence.kind(), gate.proof_mode, policy)`, which is capped by the evidence
+/// ceiling, the mode ceiling and the operator policy. A tier that does not meet the application's
+/// `required_tier` — including every `Development` result — issues no session.
 pub fn issue_session_with_token(
     reg: &Registry,
     application_id: &str,
@@ -638,7 +636,8 @@ pub fn issue_session_with_token(
     policy_hash: String,
     authorization_id: &str,
     token: &str,
-    trust_tier: TrustTier,
+    evidence: &Evidence,
+    policy: &TrustPolicy,
 ) -> Result<VerifiedSession, String> {
     if authorization_id.is_empty() || token.len() != 64 || !token.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err("invalid server-side authorization identity or session token".into());
@@ -655,14 +654,16 @@ pub fn issue_session_with_token(
     if !gate.proof_mode.is_activatable() {
         return Err(format!("gate {gate_id} uses a proof mode that cannot authorise sessions"));
     }
-    // The tier can never exceed the mode's ceiling.
-    let effective_tier = std::cmp::min(trust_tier, gate.proof_mode.max_trust_tier());
-    // A production application refuses to issue a session below Production tier.
-    if app.production && !effective_tier.permits_production() {
+    let evidence_kind = evidence.kind();
+    // The tier is derived here, from the evidence and the gate's proof machinery — never supplied
+    // by the caller as a bare tier. Incompatible evidence, a mode ceiling or the operator policy
+    // all pull it down; nothing pulls it up.
+    let achieved = achieved_tier(evidence_kind, gate.proof_mode, policy);
+    let required = required_tier(app);
+    if achieved < required {
         return Err(format!(
-            "gate {gate_id}: production application refuses a session at {} tier \
-             (requires production-grade verification)",
-            effective_tier
+            "gate {gate_id}: {evidence_kind} evidence achieves {achieved} trust, but this application \
+             requires {required}; no session issued"
         ));
     }
     let ttl = gate.effective_ttl(app.default_session_ttl);
@@ -686,7 +687,8 @@ pub fn issue_session_with_token(
         expires_unix: issued + ttl.as_secs(),
         revoked: false,
         test_lane: gate.test_lane,
-        trust_tier: effective_tier,
+        trust_tier: achieved,
+        evidence_kind,
     })
 }
 
@@ -698,6 +700,12 @@ pub struct AccessDecision {
     pub granted: Vec<String>,
     pub expires_unix: u64,
     pub policy_version: u64,
+    /// The verification strength of the session that was checked. `Development` on any refusal
+    /// that happened before a session was found. Server-derived; a relying party may require a
+    /// minimum but can never raise it.
+    pub trust_tier: TrustTier,
+    /// The minimum tier the application's CURRENT policy demands. A relying party compares the two.
+    pub required_tier: TrustTier,
 }
 
 /// Check a session against a gate: expiry, revocation, test-lane isolation, policy-version match
@@ -710,50 +718,73 @@ pub fn check_access(
     gate_id: &str,
     now: u64,
 ) -> AccessDecision {
-    let Some(session) = sessions.iter().find(|s| s.token == token) else {
-        return AccessDecision { authorized: false, reason: "unknown session".into(), granted: vec![], expires_unix: 0, policy_version: 0 };
+    // The required tier is a property of the CURRENT application policy, computed here regardless
+    // of the session. A relying party reads it to see what the gate demands; it can never be
+    // lowered by the session or the client.
+    let required = reg.application(application_id).map(required_tier).unwrap_or(TrustTier::Production);
+    let refuse = |reason: &str, expires: u64, version: u64, tier: TrustTier| AccessDecision {
+        authorized: false, reason: reason.into(), granted: vec![], expires_unix: expires,
+        policy_version: version, trust_tier: tier, required_tier: required,
     };
+
+    let Some(session) = sessions.iter().find(|s| s.token == token) else {
+        return refuse("unknown session", 0, 0, TrustTier::Development);
+    };
+    let tier = session.trust_tier;
     if session.revoked {
-        return AccessDecision { authorized: false, reason: "session revoked".into(), granted: vec![], expires_unix: session.expires_unix, policy_version: 0 };
+        return refuse("session revoked", session.expires_unix, 0, tier);
     }
     if session.expires_unix <= now {
-        return AccessDecision { authorized: false, reason: "session expired".into(), granted: vec![], expires_unix: session.expires_unix, policy_version: 0 };
+        return refuse("session expired", session.expires_unix, 0, tier);
     }
     if session.application_id != application_id {
-        return AccessDecision { authorized: false, reason: "session belongs to a different application".into(), granted: vec![], expires_unix: session.expires_unix, policy_version: 0 };
+        return refuse("session belongs to a different application", session.expires_unix, 0, tier);
     }
     let Some(app) = reg.application(application_id) else {
-        return AccessDecision { authorized: false, reason: "unknown application".into(), granted: vec![], expires_unix: session.expires_unix, policy_version: 0 };
+        return refuse("unknown application", session.expires_unix, 0, tier);
     };
     let Some(gate) = app.gate(gate_id) else {
-        return AccessDecision { authorized: false, reason: "unknown gate".into(), granted: vec![], expires_unix: session.expires_unix, policy_version: 0 };
+        return refuse("unknown gate", session.expires_unix, 0, tier);
     };
     // A test-lane session can never authorise a production gate, whatever it proves.
     if session.test_lane && !gate.test_lane {
-        return AccessDecision { authorized: false, reason: "a test session cannot authorise a production gate".into(), granted: vec![], expires_unix: session.expires_unix, policy_version: 0 };
+        return refuse("a test session cannot authorise a production gate", session.expires_unix, 0, tier);
+    }
+    // Fail-closed trust-tier enforcement, evaluated against the CURRENT application policy and not
+    // just at issuance. A `Development` session never authorizes; a legacy session (no tier field)
+    // loads as `Development` and so is refused here; promoting an application to production
+    // immediately refuses any session below `Production`, because `required` is recomputed per call.
+    if tier < required {
+        return refuse(
+            &format!(
+                "session trust tier {tier} is below the {required} this application requires; a fresh proof is needed"
+            ),
+            session.expires_unix, 0, tier,
+        );
     }
     // The session is only as valid as the policy it proved under. If the published version moved
     // on, fresh evidence is required: re-verification, not inheritance.
     let version = match reg.current_version(application_id, &session.proven_gate) {
         Some(v) => v,
-        None => return AccessDecision { authorized: false, reason: "no published policy for the proven gate".into(), granted: vec![], expires_unix: session.expires_unix, policy_version: 0 },
+        None => return refuse("no published policy for the proven gate", session.expires_unix, 0, tier),
     };
     if version.policy_hash != session.policy_hash {
-        return AccessDecision {
-            authorized: false,
-            reason: format!(
+        return refuse(
+            &format!(
                 "the policy changed (v{} -> v{}): fresh proof required",
                 version.version.saturating_sub(1),
                 version.version
             ),
-            granted: vec![],
-            expires_unix: session.expires_unix,
-            policy_version: version.version,
-        };
+            session.expires_unix, version.version, tier,
+        );
     }
     // Tier resolution, server-side, from the CURRENT policy — never from the client's claim.
     if !session.granted.contains(&gate_id.to_string()) {
-        return AccessDecision { authorized: false, reason: "this session does not grant that gate".into(), granted: session.granted.clone(), expires_unix: session.expires_unix, policy_version: version.version };
+        return AccessDecision {
+            authorized: false, reason: "this session does not grant that gate".into(),
+            granted: session.granted.clone(), expires_unix: session.expires_unix,
+            policy_version: version.version, trust_tier: tier, required_tier: required,
+        };
     }
     AccessDecision {
         authorized: true,
@@ -761,6 +792,8 @@ pub fn check_access(
         granted: app.granted_by(gate_id),
         expires_unix: session.expires_unix,
         policy_version: version.version,
+        trust_tier: tier,
+        required_tier: required,
     }
 }
 
@@ -773,13 +806,30 @@ pub fn prune_sessions(sessions: &mut Vec<VerifiedSession>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ghost_gate_core::policy::{GateTopology, ProofMode};
+    use ghost_gate_core::policy::{AnchorClass, ConsensusAttestation, Freshness, GateTopology, ProofMode};
 
     /// A stand-in ledger identity for the tests; production uses the deployment's real genesis hash.
     const GENESIS: &str = "00f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
 
     fn hasher() -> Blake3Hasher {
         Blake3Hasher
+    }
+
+    /// The operator opt-in used by tests that exercise the testnet tier.
+    fn trusted() -> TrustPolicy {
+        TrustPolicy { operator_trusted_indexer: true, max_tier: TrustTier::Production }
+    }
+
+    /// Synthetic Production-grade consensus evidence — the only way to reach `Production` before
+    /// the sidecar client exists. `ConsensusAttestation::fixture` is test-only.
+    fn production_evidence() -> Evidence {
+        Evidence::ConsensusVerified(ConsensusAttestation::fixture(
+            AnchorClass::IndependentlyAuthenticated, Freshness::Authenticated, "fixture-consensus"))
+    }
+
+    /// A consensus gate's own-wallet receipt: reaches OperatorTrustedTestnet, never Production.
+    fn wallet_receipt() -> Evidence {
+        Evidence::OperatorWalletReceipt { digest: "fixture-receipt".into() }
     }
 
     fn gate(id: &str, threshold: u128, test: bool) -> GatePolicy {
@@ -869,7 +919,7 @@ mod tests {
         let gold_hash = hash_policy(&hasher(), app, gold, 1);
         let silver_hash = hash_policy(&hasher(), app, silver, 1);
         let mut entropy = [0u8; 32];
-        let session = issue_session_with_tier(&reg, "meme", "gold", gold_hash, &mut entropy, TrustTier::Production).unwrap();
+        let session = issue_session_with_evidence(&reg, "meme", "gold", gold_hash, &mut entropy, &production_evidence(), &trusted()).unwrap();
         assert_eq!(session.granted, vec!["gold", "silver", "bronze"]);
         assert_eq!(session.trust_tier, TrustTier::Production);
 
@@ -877,7 +927,7 @@ mod tests {
         assert!(check_access(&reg, &[session.clone()], &session.token, "meme", "gold", now).authorized);
         assert!(check_access(&reg, &[session.clone()], &session.token, "meme", "bronze", now).authorized);
         // A lower-tier session does NOT reach up.
-        let s2 = issue_session_with_tier(&reg, "meme", "silver", silver_hash, &mut entropy, TrustTier::Production).unwrap();
+        let s2 = issue_session_with_evidence(&reg, "meme", "silver", silver_hash, &mut entropy, &production_evidence(), &trusted()).unwrap();
         let d = check_access(&reg, &[s2.clone()], &s2.token, "meme", "gold", now);
         assert!(!d.authorized, "a lower tier must not unlock a higher gate");
         // Unknown session / expired / wrong application.
@@ -898,8 +948,8 @@ mod tests {
         let hash = reg.current_version("meme", "gold").unwrap().policy_hash.clone();
         let mut plane = AccessPlane::new(paths.clone());
         let token = "ab".repeat(32);
-        let first = plane.issue_idempotent_with_tier("meme", "gold", hash.clone(), "auth-1", &token, TrustTier::Production).unwrap();
-        let recovered = plane.issue_idempotent_with_tier("meme", "gold", hash, "auth-1", &token, TrustTier::Production).unwrap();
+        let first = plane.issue_idempotent("meme", "gold", hash.clone(), "auth-1", &token, &production_evidence(), &trusted()).unwrap();
+        let recovered = plane.issue_idempotent("meme", "gold", hash, "auth-1", &token, &production_evidence(), &trusted()).unwrap();
         assert_eq!(first.token, token);
         assert_eq!(recovered.token, first.token);
         assert_eq!(load_sessions(&paths).unwrap().len(), 1);
@@ -912,7 +962,7 @@ mod tests {
         let app = reg.application("meme").unwrap();
         let gold = app.gate("gold").unwrap();
         let mut entropy = [0u8; 32];
-        let session = issue_session_with_tier(&reg, "meme", "gold", hash_policy(&hasher(), app, gold, 1), &mut entropy, TrustTier::Production).unwrap();
+        let session = issue_session_with_evidence(&reg, "meme", "gold", hash_policy(&hasher(), app, gold, 1), &mut entropy, &production_evidence(), &trusted()).unwrap();
 
         // Publish v2 with a raised threshold: same session, new hash required.
         let token = session.token.clone();
@@ -964,7 +1014,7 @@ mod tests {
         let tg = tapp.gate("test-gate").unwrap();
         let test_hash = hash_policy(&hasher(), tapp, tg, 1);
         let mut e = [0u8; 32];
-        let ts = issue_session(&reg, "test", "test-gate", test_hash, &mut e).unwrap();
+        let ts = issue_session_with_evidence(&reg, "test", "test-gate", test_hash, &mut e, &wallet_receipt(), &TrustPolicy::default()).unwrap();
         assert!(ts.test_lane);
         let ts_token = ts.token.clone();
         let d = check_access(&reg, &[ts.clone()], &ts_token, "prod", "prod-gate", now_unix());
@@ -1019,7 +1069,7 @@ mod tests {
         let mut reg = Registry::default();
         reg.credentials.push(cred("admin-1"));
         let mut a = app("cred-app", "admin-1");
-        let mut cred_gate = GatePolicy {
+        let cred_gate = GatePolicy {
             gate_id: "crypt".into(),
             name: "10 tTARI credential".into(),
             resource_address: "resource_0101010101010101010101010101010101010101010101010101010101010101".into(),
@@ -1085,24 +1135,25 @@ mod tests {
 
     #[test]
     fn production_app_refuses_session_below_production_tier() {
-        let mut reg = registry_with_tiers();
+        let reg = registry_with_tiers();
         let app = reg.application("meme").unwrap();
         let gold = app.gate("gold").unwrap();
         let gold_hash = hash_policy(&hasher(), app, gold, 1);
         let mut entropy = [0u8; 32];
-        // The test registry is production:true, so Development tier must be refused.
-        let err = issue_session_with_tier(
-            &reg, "meme", "gold", gold_hash.clone(), &mut entropy, TrustTier::Development,
+        // The test registry is production:true. A consensus-mode gate with only an operator wallet
+        // receipt achieves OperatorTrustedTestnet, which must be refused for a production app.
+        let err = issue_session_with_evidence(
+            &reg, "meme", "gold", gold_hash.clone(), &mut entropy, &wallet_receipt(), &trusted(),
         );
-        assert!(err.is_err(), "production app must refuse a development-tier session");
+        assert!(err.is_err(), "production app must refuse an operator-trusted-testnet session");
         let msg = err.unwrap_err();
-        assert!(msg.contains("production"), "error should mention production: {msg}");
+        assert!(msg.contains("production") || msg.contains("requires"), "error should explain the tier gap: {msg}");
 
-        // OperatorTrustedTestnet must also be refused for a production app.
-        let err2 = issue_session_with_tier(
-            &reg, "meme", "gold", gold_hash, &mut entropy, TrustTier::OperatorTrustedTestnet,
+        // No evidence at all is likewise refused.
+        let err2 = issue_session_with_evidence(
+            &reg, "meme", "gold", gold_hash, &mut entropy, &Evidence::None, &trusted(),
         );
-        assert!(err2.is_err(), "production app must refuse an operator-trusted-testnet session");
+        assert!(err2.is_err(), "production app must refuse a session with no evidence");
     }
 
     #[test]
@@ -1113,8 +1164,8 @@ mod tests {
         let gold = app.gate("gold").unwrap();
         let gold_hash = hash_policy(&hasher(), app, gold, 1);
         let mut entropy = [0u8; 32];
-        let session = issue_session_with_tier(
-            &reg, "meme", "gold", gold_hash, &mut entropy, TrustTier::OperatorTrustedTestnet,
+        let session = issue_session_with_evidence(
+            &reg, "meme", "gold", gold_hash, &mut entropy, &wallet_receipt(), &trusted(),
         ).unwrap();
         assert_eq!(session.trust_tier, TrustTier::OperatorTrustedTestnet);
     }
@@ -1156,13 +1207,114 @@ mod tests {
             created_unix: 1,
         });
         let mut entropy = [0u8; 32];
-        // Even if the caller claims Production, credential mode caps it.
-        let session = issue_session_with_tier(
+        // Even with independently-authenticated consensus evidence (Production-grade on a consensus
+        // gate), credential mode caps the achieved tier at OperatorTrustedTestnet.
+        let session = issue_session_with_evidence(
             &reg, "cap-test", "cred", hash_policy(&hasher(), &a, g, 1),
-            &mut entropy, TrustTier::Production,
+            &mut entropy, &production_evidence(), &trusted(),
         ).unwrap();
         assert_eq!(session.trust_tier, TrustTier::OperatorTrustedTestnet,
             "credential mode must cap the tier at OperatorTrustedTestnet");
+        assert_eq!(session.evidence_kind, EvidenceKind::ConsensusIndependentAuthenticatedFreshness);
+    }
+
+    #[test]
+    fn indexer_assertion_needs_the_operator_opt_in_and_never_reaches_production() {
+        // A credential gate on a non-production app, verified only by the indexer's own flag.
+        let mut reg = Registry::default();
+        reg.credentials.push(cred("admin-1"));
+        let mut a = app("idx", "admin-1");
+        a.production = false;
+        a.gates.push(GatePolicy {
+            gate_id: "cred".into(), name: "cred".into(), resource_address: "resource_abc".into(),
+            symbol: "t".into(), divisibility: 6, threshold_raw: 1, proof_mode: ProofMode::Credential,
+            challenge_domain: "x.localhost".into(), session_ttl_override: None, grants: vec![],
+            enabled: true, test_lane: false, use_mode: Default::default(), component_address: None,
+        });
+        a.validate().unwrap();
+        reg.applications.push(a.clone());
+        let g = a.gate("cred").unwrap();
+        let hash = hash_policy(&hasher(), &a, g, 1);
+        reg.versions.push(PolicyVersion {
+            application_id: a.application_id.clone(), gate_id: "cred".into(), version: 1,
+            policy_hash: hash.clone(), network: ghost_gate_core::network::LOCALNET,
+            genesis_hash: GENESIS.to_string(), policy: g.clone(), app_revision: 1, created_unix: 1,
+        });
+        let indexer = Evidence::IndexerAsserted { digest: "idx".into() };
+        let mut e = [0u8; 32];
+        // Without the opt-in, indexer-asserted evidence achieves only Development and issues nothing.
+        assert!(issue_session_with_evidence(&reg, "idx", "cred", hash.clone(), &mut e, &indexer, &TrustPolicy::default()).is_err(),
+            "indexer assertion without the operator opt-in must not authorize");
+        // With the opt-in, it reaches OperatorTrustedTestnet on a non-production app.
+        let s = issue_session_with_evidence(&reg, "idx", "cred", hash.clone(), &mut e, &indexer, &trusted()).unwrap();
+        assert_eq!(s.trust_tier, TrustTier::OperatorTrustedTestnet);
+        // The same evidence on a PRODUCTION app never authorizes, opt-in or not.
+        reg.applications.first_mut().unwrap().production = true;
+        assert!(issue_session_with_evidence(&reg, "idx", "cred", hash, &mut e, &indexer, &trusted()).is_err(),
+            "indexer assertion must never authorize a production application");
+    }
+
+    #[test]
+    fn a_global_tier_ceiling_only_lowers_the_result() {
+        let mut reg = registry_with_tiers();
+        reg.applications.first_mut().unwrap().production = false;
+        let app = reg.application("meme").unwrap();
+        let gold = app.gate("gold").unwrap();
+        let hash = hash_policy(&hasher(), app, gold, 1);
+        let mut e = [0u8; 32];
+        // Production-grade evidence, but the operator pins the ceiling to testnet.
+        let capped = TrustPolicy { operator_trusted_indexer: true, max_tier: TrustTier::OperatorTrustedTestnet };
+        let s = issue_session_with_evidence(&reg, "meme", "gold", hash, &mut e, &production_evidence(), &capped).unwrap();
+        assert_eq!(s.trust_tier, TrustTier::OperatorTrustedTestnet, "the ceiling lowered a production result");
+    }
+
+    #[test]
+    fn promoting_an_app_to_production_refuses_an_existing_testnet_session_at_check_time() {
+        let mut reg = registry_with_tiers();
+        reg.applications.first_mut().unwrap().production = false;
+        let (hash, token) = {
+            let app = reg.application("meme").unwrap();
+            let gold = app.gate("gold").unwrap();
+            (hash_policy(&hasher(), app, gold, 1), String::new())
+        };
+        let _ = token;
+        let mut e = [0u8; 32];
+        let session = issue_session_with_evidence(&reg, "meme", "gold", hash, &mut e, &wallet_receipt(), &trusted()).unwrap();
+        let now = now_unix();
+        // While non-production, the testnet session authorizes.
+        assert!(check_access(&reg, &[session.clone()], &session.token, "meme", "gold", now).authorized);
+        // Promote the application to production: the SAME session is now below the required tier.
+        reg.applications.first_mut().unwrap().production = true;
+        let d = check_access(&reg, &[session.clone()], &session.token, "meme", "gold", now);
+        assert!(!d.authorized, "promotion to production must refuse a session below Production");
+        assert_eq!(d.required_tier, TrustTier::Production);
+        assert_eq!(d.trust_tier, TrustTier::OperatorTrustedTestnet);
+    }
+
+    #[test]
+    fn a_development_or_legacy_session_authorizes_nothing() {
+        // A legacy session: no trust_tier field → Development after serde default. Build one by hand.
+        let mut reg = registry_with_tiers();
+        reg.applications.first_mut().unwrap().production = false; // even the most permissive app
+        let app = reg.application("meme").unwrap();
+        let gold = app.gate("gold").unwrap();
+        let hash = hash_policy(&hasher(), app, gold, 1);
+        let now = now_unix();
+        let legacy = VerifiedSession {
+            token: "legacy-token".into(), authorization_id: None, application_id: "meme".into(),
+            proven_gate: "gold".into(), policy_hash: hash, granted: vec!["gold".into(), "silver".into(), "bronze".into()],
+            issued_unix: now, expires_unix: now + 3600, revoked: false, test_lane: false,
+            trust_tier: TrustTier::Development, evidence_kind: EvidenceKind::None,
+        };
+        let d = check_access(&reg, &[legacy.clone()], &legacy.token, "meme", "gold", now);
+        assert!(!d.authorized, "a Development/legacy session must never authorize, even on a non-production app");
+        assert!(d.reason.contains("trust tier"), "the refusal names the tier gap: {}", d.reason);
+        assert_eq!(d.trust_tier, TrustTier::Development);
+        // And on a production application the same legacy session is likewise refused.
+        reg.applications.first_mut().unwrap().production = true;
+        let dp = check_access(&reg, &[legacy.clone()], &legacy.token, "meme", "gold", now);
+        assert!(!dp.authorized, "a Development/legacy session must never authorize a production app");
+        assert_eq!(dp.required_tier, TrustTier::Production);
     }
 
     #[test]
@@ -1235,12 +1387,15 @@ impl AccessPlane {
         Ok(list)
     }
 
-    /// Issue a session for an accepted proof and persist it. Returns the grant for the wire.
+    /// Issue a session for an accepted proof and persist it. Returns the grant for the wire. The
+    /// trust tier is derived from `evidence` and the gate's proof machinery, never supplied raw.
     pub fn issue(
         &mut self,
         application_id: &str,
         gate_id: &str,
         policy_hash: String,
+        evidence: &Evidence,
+        policy: &TrustPolicy,
     ) -> Result<AccessGrant, String> {
         let reg = self.registry()?;
         let _lock = StoreLock::acquire(&self.paths)?;
@@ -1248,16 +1403,8 @@ impl AccessPlane {
         let mut fresh = load_sessions(&self.paths)?;
         prune_sessions(&mut fresh);
         let mut entropy = [0u8; 32];
-        let session = issue_session(&reg, application_id, gate_id, policy_hash, &mut entropy)?;
-        let grant = AccessGrant {
-            token: session.token.clone(),
-            application_id: session.application_id.clone(),
-            proven_gate: session.proven_gate.clone(),
-            granted: session.granted.clone(),
-            expires_unix: session.expires_unix,
-            test_lane: session.test_lane,
-            trust_tier: session.trust_tier,
-        };
+        let session = issue_session_with_evidence(&reg, application_id, gate_id, policy_hash, &mut entropy, evidence, policy)?;
+        let grant = grant_of(&session);
         fresh.push(session);
         save_sessions(&self.paths, &fresh)?;
         self.cached_sessions = Some((fresh, std::time::SystemTime::now()));
@@ -1267,6 +1414,8 @@ impl AccessPlane {
     /// Install or recover one session for a durable replay authorization. This is deliberately
     /// idempotent rather than pretending two separate files form a transaction: a retry passes
     /// the same durable authorization identity and bearer token and recovers the same session.
+    /// A recovery NEVER upgrades: it returns the session exactly as it was first issued, whatever
+    /// evidence the retry presents.
     pub fn issue_idempotent(
         &mut self,
         application_id: &str,
@@ -1274,21 +1423,8 @@ impl AccessPlane {
         policy_hash: String,
         authorization_id: &str,
         token: &str,
-    ) -> Result<AccessGrant, String> {
-        self.issue_idempotent_with_tier(
-            application_id, gate_id, policy_hash, authorization_id, token,
-            TrustTier::Development,
-        )
-    }
-
-    pub fn issue_idempotent_with_tier(
-        &mut self,
-        application_id: &str,
-        gate_id: &str,
-        policy_hash: String,
-        authorization_id: &str,
-        token: &str,
-        trust_tier: TrustTier,
+        evidence: &Evidence,
+        policy: &TrustPolicy,
     ) -> Result<AccessGrant, String> {
         let reg = self.registry()?;
         let _lock = StoreLock::acquire(&self.paths)?;
@@ -1299,22 +1435,12 @@ impl AccessPlane {
                 || existing.policy_hash != policy_hash || existing.token != token {
                 return Err("authorization identity conflicts with an existing session".into());
             }
-            return Ok(AccessGrant {
-                token: existing.token.clone(), application_id: existing.application_id.clone(),
-                proven_gate: existing.proven_gate.clone(), granted: existing.granted.clone(),
-                expires_unix: existing.expires_unix, test_lane: existing.test_lane,
-                trust_tier: existing.trust_tier,
-            });
+            return Ok(grant_of(existing));
         }
         let session = issue_session_with_token(
-            &reg, application_id, gate_id, policy_hash, authorization_id, token, trust_tier,
+            &reg, application_id, gate_id, policy_hash, authorization_id, token, evidence, policy,
         )?;
-        let grant = AccessGrant {
-            token: session.token.clone(), application_id: session.application_id.clone(),
-            proven_gate: session.proven_gate.clone(), granted: session.granted.clone(),
-            expires_unix: session.expires_unix, test_lane: session.test_lane,
-            trust_tier: session.trust_tier,
-        };
+        let grant = grant_of(&session);
         fresh.push(session);
         save_sessions(&self.paths, &fresh)?;
         self.cached_sessions = Some((fresh, std::time::SystemTime::now()));
@@ -1386,4 +1512,20 @@ pub struct AccessGrant {
     pub expires_unix: u64,
     pub test_lane: bool,
     pub trust_tier: TrustTier,
+    #[serde(default)]
+    pub evidence_kind: EvidenceKind,
+}
+
+/// The wire grant for a session, carrying its server-derived tier and evidence class verbatim.
+fn grant_of(session: &VerifiedSession) -> AccessGrant {
+    AccessGrant {
+        token: session.token.clone(),
+        application_id: session.application_id.clone(),
+        proven_gate: session.proven_gate.clone(),
+        granted: session.granted.clone(),
+        expires_unix: session.expires_unix,
+        test_lane: session.test_lane,
+        trust_tier: session.trust_tier,
+        evidence_kind: session.evidence_kind,
+    }
 }

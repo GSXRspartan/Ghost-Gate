@@ -99,6 +99,17 @@ impl ProofMode {
         matches!(self, ProofMode::Consensus | ProofMode::Credential)
     }
 
+    /// Parse the stable label produced by [`fmt::Display`]. Used by the bridge to recover the mode
+    /// from a bindings snapshot without a second serde round trip.
+    pub fn from_label(s: &str) -> Option<Self> {
+        match s {
+            "consensus" => Some(ProofMode::Consensus),
+            "credential" => Some(ProofMode::Credential),
+            "xtm" => Some(ProofMode::Xtm),
+            _ => None,
+        }
+    }
+
     /// Why a mode cannot be activated, in words an administrator can act on.
     pub fn blocked_reason(self) -> Option<&'static str> {
         match self {
@@ -271,6 +282,198 @@ impl ProofMode {
             ProofMode::Xtm => TrustTier::Development,
         }
     }
+}
+
+/// The kind of evidence a session rests on, recorded with the session and the replay record.
+///
+/// This is a *summary*, not a capability: nothing accepts an `EvidenceKind` to issue a session.
+/// Issuance takes an [`Evidence`], whose strongest variant cannot be constructed outside a
+/// verification path. Legacy records without this field load as `None` and never authorize.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EvidenceKind {
+    #[default]
+    None,
+    /// Chain data read from an indexer whose own `verified` flag is the only assurance (F-04).
+    IndexerAsserted,
+    /// The operator's own wallet daemon reported a finalized transaction.
+    OperatorWalletReceipt,
+    /// Pinned-anchor consensus verification rooted in the operator-approved release bootstrap.
+    ConsensusReleaseBootstrap,
+    /// Independently anchored consensus verification whose freshness is only relative to the
+    /// verifier's own latest handover.
+    ConsensusIndependentRelativeFreshness,
+    /// Independently anchored consensus verification with authenticated current-state freshness.
+    ConsensusIndependentAuthenticatedFreshness,
+}
+
+impl EvidenceKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EvidenceKind::None => "none",
+            EvidenceKind::IndexerAsserted => "indexer-asserted",
+            EvidenceKind::OperatorWalletReceipt => "operator-wallet-receipt",
+            EvidenceKind::ConsensusReleaseBootstrap => "consensus-release-bootstrap",
+            EvidenceKind::ConsensusIndependentRelativeFreshness => "consensus-independent-relative-freshness",
+            EvidenceKind::ConsensusIndependentAuthenticatedFreshness => "consensus-independent-authenticated-freshness",
+        }
+    }
+
+    /// The strongest tier this kind of evidence can support under `policy`.
+    pub fn ceiling(self, policy: &TrustPolicy) -> TrustTier {
+        let tier = match self {
+            EvidenceKind::None => TrustTier::Development,
+            EvidenceKind::IndexerAsserted if policy.operator_trusted_indexer => TrustTier::OperatorTrustedTestnet,
+            EvidenceKind::IndexerAsserted => TrustTier::Development,
+            EvidenceKind::OperatorWalletReceipt
+            | EvidenceKind::ConsensusReleaseBootstrap
+            | EvidenceKind::ConsensusIndependentRelativeFreshness => TrustTier::OperatorTrustedTestnet,
+            EvidenceKind::ConsensusIndependentAuthenticatedFreshness => TrustTier::Production,
+        };
+        tier.min(policy.max_tier)
+    }
+
+    /// Whether this evidence can be produced by a gate's proof machinery at all. A wallet receipt
+    /// is not credential evidence and an indexer read is not a consensus-mode receipt.
+    pub fn compatible_with(self, mode: ProofMode) -> bool {
+        match self {
+            EvidenceKind::None => false,
+            EvidenceKind::IndexerAsserted => mode == ProofMode::Credential,
+            EvidenceKind::OperatorWalletReceipt => mode == ProofMode::Consensus,
+            EvidenceKind::ConsensusReleaseBootstrap
+            | EvidenceKind::ConsensusIndependentRelativeFreshness
+            | EvidenceKind::ConsensusIndependentAuthenticatedFreshness => {
+                matches!(mode, ProofMode::Consensus | ProofMode::Credential)
+            }
+        }
+    }
+}
+
+impl fmt::Display for EvidenceKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnchorClass {
+    ReleaseBootstrap,
+    IndependentlyAuthenticated,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Freshness {
+    RelativeOnly,
+    Authenticated,
+}
+
+/// Consensus evidence attested by the pinned-anchor verifier.
+///
+/// The fields are private and this build has no public constructor: the only producer will be the
+/// authenticated sidecar client, which does not exist yet. Until it does, `Production` is
+/// unreachable outside test fixtures. There is deliberately no `Deserialize`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsensusAttestation {
+    anchor: AnchorClass,
+    freshness: Freshness,
+    digest: String,
+}
+
+impl ConsensusAttestation {
+    pub fn anchor(&self) -> AnchorClass {
+        self.anchor
+    }
+
+    pub fn freshness(&self) -> Freshness {
+        self.freshness
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn fixture(anchor: AnchorClass, freshness: Freshness, digest: impl Into<String>) -> Self {
+        Self { anchor, freshness, digest: digest.into() }
+    }
+}
+
+/// The evidence a verification path hands to session issuance. The digest identifies the exact
+/// verified evidence so a recovery can prove it is re-installing the same authorization.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Evidence {
+    None,
+    IndexerAsserted { digest: String },
+    OperatorWalletReceipt { digest: String },
+    ConsensusVerified(ConsensusAttestation),
+}
+
+impl Evidence {
+    pub fn kind(&self) -> EvidenceKind {
+        match self {
+            Evidence::None => EvidenceKind::None,
+            Evidence::IndexerAsserted { .. } => EvidenceKind::IndexerAsserted,
+            Evidence::OperatorWalletReceipt { .. } => EvidenceKind::OperatorWalletReceipt,
+            Evidence::ConsensusVerified(a) => match (a.anchor, a.freshness) {
+                (AnchorClass::ReleaseBootstrap, _) => EvidenceKind::ConsensusReleaseBootstrap,
+                (AnchorClass::IndependentlyAuthenticated, Freshness::RelativeOnly) => {
+                    EvidenceKind::ConsensusIndependentRelativeFreshness
+                }
+                (AnchorClass::IndependentlyAuthenticated, Freshness::Authenticated) => {
+                    EvidenceKind::ConsensusIndependentAuthenticatedFreshness
+                }
+            },
+        }
+    }
+
+    pub fn digest(&self) -> &str {
+        match self {
+            Evidence::None => "",
+            Evidence::IndexerAsserted { digest } | Evidence::OperatorWalletReceipt { digest } => digest,
+            Evidence::ConsensusVerified(a) => &a.digest,
+        }
+    }
+}
+
+/// Operator configuration that can only *lower* what evidence achieves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrustPolicy {
+    /// `GG_OPERATOR_TRUSTED_INDEXER=1`: the operator vouches for the indexer it configured, so
+    /// indexer-asserted chain data may support non-production sessions.
+    pub operator_trusted_indexer: bool,
+    /// `GG_MAX_TRUST_TIER`: a global ceiling.
+    pub max_tier: TrustTier,
+}
+
+impl Default for TrustPolicy {
+    fn default() -> Self {
+        Self { operator_trusted_indexer: false, max_tier: TrustTier::Production }
+    }
+}
+
+impl TrustPolicy {
+    /// Parses the two operator settings. Only the exact value `1` opts in; an unrecognised
+    /// ceiling fails closed to `Development` rather than being ignored.
+    pub fn parse(operator_trusted_indexer: Option<&str>, max_tier: Option<&str>) -> Self {
+        let max_tier = match max_tier.map(str::trim) {
+            None | Some("") => TrustTier::Production,
+            Some("production") => TrustTier::Production,
+            Some("operator-trusted-testnet") => TrustTier::OperatorTrustedTestnet,
+            Some(_) => TrustTier::Development,
+        };
+        Self { operator_trusted_indexer: operator_trusted_indexer.map(str::trim) == Some("1"), max_tier }
+    }
+}
+
+/// The minimum tier the application's CURRENT policy demands. `Development` never qualifies.
+pub fn required_tier(app: &Application) -> TrustTier {
+    if app.production { TrustTier::Production } else { TrustTier::OperatorTrustedTestnet }
+}
+
+/// The tier evidence of `kind` actually achieves on a gate of `mode`: the evidence ceiling, capped
+/// by the mode's maximum and the operator policy. Incompatible evidence achieves `Development`.
+pub fn achieved_tier(kind: EvidenceKind, mode: ProofMode, policy: &TrustPolicy) -> TrustTier {
+    if !kind.compatible_with(mode) {
+        return TrustTier::Development;
+    }
+    kind.ceiling(policy).min(mode.max_trust_tier())
 }
 
 impl GatePolicy {
@@ -1009,6 +1212,82 @@ mod tests {
         assert_eq!(TrustTier::Production.as_str(), "production");
         assert_eq!(format!("{}", TrustTier::Development), "development");
         assert_eq!(format!("{}", TrustTier::Production), "production");
+    }
+
+    fn opted_in() -> TrustPolicy {
+        TrustPolicy { operator_trusted_indexer: true, max_tier: TrustTier::Production }
+    }
+
+    #[test]
+    fn evidence_classification_table() {
+        let p = opted_in();
+        let independent_fresh = Evidence::ConsensusVerified(ConsensusAttestation::fixture(
+            AnchorClass::IndependentlyAuthenticated, Freshness::Authenticated, "d"));
+        let independent_stale = Evidence::ConsensusVerified(ConsensusAttestation::fixture(
+            AnchorClass::IndependentlyAuthenticated, Freshness::RelativeOnly, "d"));
+        let release_fresh = Evidence::ConsensusVerified(ConsensusAttestation::fixture(
+            AnchorClass::ReleaseBootstrap, Freshness::Authenticated, "d"));
+        let wallet = Evidence::OperatorWalletReceipt { digest: "d".into() };
+        let indexer = Evidence::IndexerAsserted { digest: "d".into() };
+
+        assert_eq!(Evidence::None.kind().ceiling(&p), TrustTier::Development);
+        assert_eq!(indexer.kind().ceiling(&p), TrustTier::OperatorTrustedTestnet);
+        assert_eq!(indexer.kind().ceiling(&TrustPolicy::default()), TrustTier::Development,
+            "indexer assertions need the explicit operator opt-in");
+        assert_eq!(wallet.kind().ceiling(&p), TrustTier::OperatorTrustedTestnet);
+        assert_eq!(release_fresh.kind().ceiling(&p), TrustTier::OperatorTrustedTestnet,
+            "a release-bootstrap anchor never reaches production, whatever its freshness");
+        assert_eq!(independent_stale.kind().ceiling(&p), TrustTier::OperatorTrustedTestnet);
+        assert_eq!(independent_fresh.kind().ceiling(&p), TrustTier::Production);
+    }
+
+    #[test]
+    fn a_consensus_mode_gate_does_not_make_a_wallet_receipt_production() {
+        let p = opted_in();
+        assert_eq!(ProofMode::Consensus.max_trust_tier(), TrustTier::Production, "the mode's ceiling");
+        assert_eq!(achieved_tier(EvidenceKind::OperatorWalletReceipt, ProofMode::Consensus, &p),
+            TrustTier::OperatorTrustedTestnet, "the achieved tier comes from the evidence");
+        assert_eq!(achieved_tier(EvidenceKind::ConsensusIndependentAuthenticatedFreshness, ProofMode::Credential, &p),
+            TrustTier::OperatorTrustedTestnet, "credential mode stays capped by its own ceiling");
+    }
+
+    #[test]
+    fn evidence_from_the_wrong_proof_machinery_achieves_nothing() {
+        let p = opted_in();
+        assert_eq!(achieved_tier(EvidenceKind::IndexerAsserted, ProofMode::Consensus, &p), TrustTier::Development);
+        assert_eq!(achieved_tier(EvidenceKind::OperatorWalletReceipt, ProofMode::Credential, &p), TrustTier::Development);
+        assert_eq!(achieved_tier(EvidenceKind::ConsensusIndependentAuthenticatedFreshness, ProofMode::Xtm, &p), TrustTier::Development);
+        assert_eq!(achieved_tier(EvidenceKind::None, ProofMode::Consensus, &p), TrustTier::Development);
+    }
+
+    #[test]
+    fn the_operator_ceiling_only_lowers() {
+        let fresh = EvidenceKind::ConsensusIndependentAuthenticatedFreshness;
+        let capped = TrustPolicy::parse(Some("1"), Some("operator-trusted-testnet"));
+        assert_eq!(fresh.ceiling(&capped), TrustTier::OperatorTrustedTestnet);
+        assert_eq!(EvidenceKind::None.ceiling(&TrustPolicy::parse(None, Some("production"))), TrustTier::Development,
+            "a high ceiling never raises weak evidence");
+        assert_eq!(TrustPolicy::parse(None, Some("unlimited")).max_tier, TrustTier::Development,
+            "an unrecognised ceiling fails closed");
+        assert_eq!(TrustPolicy::parse(None, None).max_tier, TrustTier::Production);
+        assert!(!TrustPolicy::parse(Some("true"), None).operator_trusted_indexer, "only the exact value 1 opts in");
+        assert!(TrustPolicy::parse(Some("1"), None).operator_trusted_indexer);
+    }
+
+    #[test]
+    fn the_required_tier_follows_the_current_application_policy() {
+        let mut a = app();
+        a.production = false;
+        assert_eq!(required_tier(&a), TrustTier::OperatorTrustedTestnet);
+        a.production = true;
+        assert_eq!(required_tier(&a), TrustTier::Production);
+        assert!(required_tier(&a) > TrustTier::Development);
+    }
+
+    #[test]
+    fn legacy_records_load_as_no_evidence() {
+        assert_eq!(EvidenceKind::default(), EvidenceKind::None);
+        assert_eq!(Evidence::None.digest(), "");
     }
 
     #[test]

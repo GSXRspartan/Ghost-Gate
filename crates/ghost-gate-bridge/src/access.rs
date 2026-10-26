@@ -9,7 +9,8 @@
 //!   it: fresh evidence required, no grandfathering.
 //! - A test-lane session can never authorise a production gate, whatever it proves.
 
-use ghost_gate_registry::{AccessDecision, AccessGrant, AccessPlane, Bindings, GateBindingSnapshot};
+use ghost_gate_core::policy::ProofMode;
+use ghost_gate_registry::{AccessDecision, AccessGrant, AccessPlane, Bindings, Evidence, GateBindingSnapshot, TrustPolicy};
 
 /// What the bridge needs to know about one bound gate, derived from the snapshot. Tier grants
 /// come from the policy, resolved server-side — never from anything a browser says.
@@ -21,6 +22,9 @@ pub struct GateAccessInfo {
     pub session_ttl_secs: u64,
     pub test_lane: bool,
     pub grants: Vec<String>,
+    /// The gate's proof machinery, recovered from the snapshot. The bridge uses it only to sanity
+    /// the evidence it already holds; the registry remains the authority on the issued tier.
+    pub proof_mode: ProofMode,
 }
 
 /// Where the bridge's gates came from when it is registry-backed.
@@ -46,6 +50,10 @@ impl AccessHandle {
                     session_ttl_secs: g.session_ttl_secs,
                     test_lane: g.test_lane,
                     grants: g.grants.clone(),
+                    // A snapshot written before this field (or with an unknown label) falls back to
+                    // Credential, the mode whose ceiling is lowest among the activatable modes, so
+                    // an unparseable snapshot can never over-grant.
+                    proof_mode: ProofMode::from_label(&g.proof_mode).unwrap_or(ProofMode::Credential),
                 },
             );
         }
@@ -90,14 +98,16 @@ impl AccessHandle {
         self.index.get(gate_id)
     }
 
-    /// Issue a session for an accepted proof.
-    pub fn grant(&mut self, gate_id: &str) -> Result<AccessGrant, String> {
+    /// Issue a session for an accepted proof. `evidence` is what the bridge actually verified; the
+    /// registry derives the trust tier from it and the gate's proof machinery, and refuses when the
+    /// tier does not meet the application's requirement.
+    pub fn grant(&mut self, gate_id: &str, evidence: &Evidence, policy: &TrustPolicy) -> Result<AccessGrant, String> {
         let info = self
             .index
             .get(gate_id)
             .ok_or_else(|| format!("gate {gate_id} is not registry-bound"))?
             .clone();
-        self.plane.issue(&info.application_id, gate_id, info.policy_hash)
+        self.plane.issue(&info.application_id, gate_id, info.policy_hash, evidence, policy)
     }
 
     /// Recover the one access session attached to a durable replay authorization. The browser
@@ -107,6 +117,8 @@ impl AccessHandle {
         gate_id: &str,
         authorization_id: &str,
         token: &str,
+        evidence: &Evidence,
+        policy: &TrustPolicy,
     ) -> Result<AccessGrant, String> {
         let info = self
             .index
@@ -119,7 +131,18 @@ impl AccessHandle {
             info.policy_hash,
             authorization_id,
             token,
+            evidence,
+            policy,
         )
+    }
+
+    /// The trust tier the bridge expects for `evidence` on this gate. Used to bind the tier into the
+    /// durable replay record before issuance; the registry independently recomputes the same value.
+    pub fn expected_tier(&self, gate_id: &str, evidence: &Evidence, policy: &TrustPolicy) -> ghost_gate_registry::TrustTier {
+        match self.index.get(gate_id) {
+            Some(info) => ghost_gate_registry::achieved_tier(evidence.kind(), info.proof_mode, policy),
+            None => ghost_gate_registry::TrustTier::Development,
+        }
     }
 
     /// The full server-side access decision.
@@ -131,6 +154,8 @@ impl AccessHandle {
                 granted: vec![],
                 expires_unix: 0,
                 policy_version: 0,
+                trust_tier: ghost_gate_registry::TrustTier::Development,
+                required_tier: ghost_gate_registry::TrustTier::Production,
             };
         };
         match self.plane.check(token, &info.application_id, gate_id) {
@@ -141,6 +166,8 @@ impl AccessHandle {
                 granted: vec![],
                 expires_unix: 0,
                 policy_version: 0,
+                trust_tier: ghost_gate_registry::TrustTier::Development,
+                required_tier: ghost_gate_registry::TrustTier::Production,
             },
         }
     }
