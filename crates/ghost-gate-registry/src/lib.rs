@@ -21,8 +21,9 @@
 //!   nothing about version N+1: re-verification needs fresh evidence.
 
 pub use ghost_gate_core::policy::{
-    hash_policy, now_unix, Application, GatePolicy, PolicyHasher, PolicyVersion,
-    ReplacementRecord, CHALLENGE_TTL, DEFAULT_SESSION_TTL, MAX_SESSION_TTL, MIN_SESSION_TTL,
+    hash_policy, now_unix, Application, GatePolicy, PolicyHasher, PolicyVersion, ProofMode,
+    ReplacementRecord, TrustTier, CHALLENGE_TTL, DEFAULT_SESSION_TTL, MAX_SESSION_TTL,
+    MIN_SESSION_TTL,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -114,6 +115,10 @@ pub struct VerifiedSession {
     pub revoked: bool,
     /// Sessions issued by test-lane gates can never authorise production gates.
     pub test_lane: bool,
+    /// The verification strength at the moment this session was issued. Defaults to
+    /// `Development` so sessions written before this field existed are never silently upgraded.
+    #[serde(default)]
+    pub trust_tier: TrustTier,
 }
 
 /// Why a session was revoked — the audit trail wants the reason, not just the fact.
@@ -477,11 +482,20 @@ pub struct GateBindingSnapshot {
     /// previous meaning: the bridge serves the website and gains no Telegram surface by upgrade.
     #[serde(default = "default_use_mode")]
     pub use_mode: String,
+    /// The highest trust tier this gate's proof mode can reach. Defaults to `"development"`
+    /// so snapshots written before this field existed are never silently upgraded.
+    #[serde(default = "default_trust_tier")]
+    pub max_trust_tier: String,
 }
 
-/// Derive the snapshot from a validated registry: only enabled, activatable gates with a deployed
-/// component appear. Test lanes appear too — the bridge tags their sessions — but a test-lane
-/// session can never authorise a production gate (checked at access time).
+fn default_trust_tier() -> String {
+    "development".to_string()
+}
+
+/// Derive the snapshot from a validated registry: enabled, activatable gates appear. Consensus
+/// gates require a deployed component; credential gates are component-free (empty string in the
+/// snapshot, which the bridge maps to `None`). Test lanes appear too — the bridge tags their
+/// sessions — but a test-lane session can never authorise a production gate (checked at access time).
 pub fn derive_bindings(reg: &Registry) -> Bindings {
     let mut gates = Vec::new();
     for app in &reg.applications {
@@ -489,7 +503,15 @@ pub fn derive_bindings(reg: &Registry) -> Bindings {
             if !g.enabled || !g.proof_mode.is_activatable() {
                 continue;
             }
-            let Some(component) = g.component_address.as_ref() else { continue };
+            // Consensus gates require a real component; credential gates are component-free.
+            let component = match g.proof_mode {
+                ProofMode::Consensus => {
+                    let Some(c) = g.component_address.as_ref() else { continue };
+                    c.clone()
+                }
+                ProofMode::Credential => String::new(),
+                _ => continue,
+            };
             // Only a PUBLISHED gate binds. A draft lives in the dashboard until an administrator
             // publishes it: the publish step is where the version is frozen, the reason is recorded
             // and the audit entry is written, so a draft must never reach the bridge behind the
@@ -500,7 +522,7 @@ pub fn derive_bindings(reg: &Registry) -> Bindings {
                 application_id: app.application_id.clone(),
                 gate_id: g.gate_id.clone(),
                 name: g.name.clone(),
-                component_address: component.clone(),
+                component_address: component,
                 resource_address: g.resource_address.clone(),
                 symbol: g.symbol.clone(),
                 divisibility: g.divisibility,
@@ -515,6 +537,7 @@ pub fn derive_bindings(reg: &Registry) -> Bindings {
                 network: app.network,
                 genesis_hash: app.genesis_hash.clone(),
                 use_mode: g.use_mode.as_str().to_string(),
+                max_trust_tier: g.proof_mode.max_trust_tier().as_str().to_string(),
             });
         }
     }
@@ -583,15 +606,31 @@ pub fn issue_session(
     policy_hash: String,
     fresh_entropy: &mut [u8; 32],
 ) -> Result<VerifiedSession, String> {
+    issue_session_with_tier(reg, application_id, gate_id, policy_hash, fresh_entropy, TrustTier::Development)
+}
+
+/// Issue a session with an explicit trust tier determined by the bridge's verification.
+pub fn issue_session_with_tier(
+    reg: &Registry,
+    application_id: &str,
+    gate_id: &str,
+    policy_hash: String,
+    fresh_entropy: &mut [u8; 32],
+    trust_tier: TrustTier,
+) -> Result<VerifiedSession, String> {
     rand::fill(fresh_entropy);
     let token = hex::encode(fresh_entropy);
     issue_session_with_token(
-        reg, application_id, gate_id, policy_hash, &format!("legacy-{token}"), &token,
+        reg, application_id, gate_id, policy_hash, &format!("legacy-{token}"), &token, trust_tier,
     )
 }
 
 /// Same policy validation as [`issue_session`], with a token already created and durably held by
 /// the replay coordinator. It is never for browser input.
+///
+/// `trust_tier` is the verification strength the caller (the bridge) determined from the actual
+/// evidence — never from the browser. A `production: true` application refuses to issue a session
+/// below `Production` tier.
 pub fn issue_session_with_token(
     reg: &Registry,
     application_id: &str,
@@ -599,6 +638,7 @@ pub fn issue_session_with_token(
     policy_hash: String,
     authorization_id: &str,
     token: &str,
+    trust_tier: TrustTier,
 ) -> Result<VerifiedSession, String> {
     if authorization_id.is_empty() || token.len() != 64 || !token.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err("invalid server-side authorization identity or session token".into());
@@ -614,6 +654,16 @@ pub fn issue_session_with_token(
     }
     if !gate.proof_mode.is_activatable() {
         return Err(format!("gate {gate_id} uses a proof mode that cannot authorise sessions"));
+    }
+    // The tier can never exceed the mode's ceiling.
+    let effective_tier = std::cmp::min(trust_tier, gate.proof_mode.max_trust_tier());
+    // A production application refuses to issue a session below Production tier.
+    if app.production && !effective_tier.permits_production() {
+        return Err(format!(
+            "gate {gate_id}: production application refuses a session at {} tier \
+             (requires production-grade verification)",
+            effective_tier
+        ));
     }
     let ttl = gate.effective_ttl(app.default_session_ttl);
     if ttl < MIN_SESSION_TTL || ttl > MAX_SESSION_TTL {
@@ -636,6 +686,7 @@ pub fn issue_session_with_token(
         expires_unix: issued + ttl.as_secs(),
         revoked: false,
         test_lane: gate.test_lane,
+        trust_tier: effective_tier,
     })
 }
 
@@ -818,14 +869,15 @@ mod tests {
         let gold_hash = hash_policy(&hasher(), app, gold, 1);
         let silver_hash = hash_policy(&hasher(), app, silver, 1);
         let mut entropy = [0u8; 32];
-        let session = issue_session(&reg, "meme", "gold", gold_hash, &mut entropy).unwrap();
+        let session = issue_session_with_tier(&reg, "meme", "gold", gold_hash, &mut entropy, TrustTier::Production).unwrap();
         assert_eq!(session.granted, vec!["gold", "silver", "bronze"]);
+        assert_eq!(session.trust_tier, TrustTier::Production);
 
         let now = now_unix();
         assert!(check_access(&reg, &[session.clone()], &session.token, "meme", "gold", now).authorized);
         assert!(check_access(&reg, &[session.clone()], &session.token, "meme", "bronze", now).authorized);
         // A lower-tier session does NOT reach up.
-        let s2 = issue_session(&reg, "meme", "silver", silver_hash, &mut entropy).unwrap();
+        let s2 = issue_session_with_tier(&reg, "meme", "silver", silver_hash, &mut entropy, TrustTier::Production).unwrap();
         let d = check_access(&reg, &[s2.clone()], &s2.token, "meme", "gold", now);
         assert!(!d.authorized, "a lower tier must not unlock a higher gate");
         // Unknown session / expired / wrong application.
@@ -846,8 +898,8 @@ mod tests {
         let hash = reg.current_version("meme", "gold").unwrap().policy_hash.clone();
         let mut plane = AccessPlane::new(paths.clone());
         let token = "ab".repeat(32);
-        let first = plane.issue_idempotent("meme", "gold", hash.clone(), "auth-1", &token).unwrap();
-        let recovered = plane.issue_idempotent("meme", "gold", hash, "auth-1", &token).unwrap();
+        let first = plane.issue_idempotent_with_tier("meme", "gold", hash.clone(), "auth-1", &token, TrustTier::Production).unwrap();
+        let recovered = plane.issue_idempotent_with_tier("meme", "gold", hash, "auth-1", &token, TrustTier::Production).unwrap();
         assert_eq!(first.token, token);
         assert_eq!(recovered.token, first.token);
         assert_eq!(load_sessions(&paths).unwrap().len(), 1);
@@ -860,7 +912,7 @@ mod tests {
         let app = reg.application("meme").unwrap();
         let gold = app.gate("gold").unwrap();
         let mut entropy = [0u8; 32];
-        let session = issue_session(&reg, "meme", "gold", hash_policy(&hasher(), app, gold, 1), &mut entropy).unwrap();
+        let session = issue_session_with_tier(&reg, "meme", "gold", hash_policy(&hasher(), app, gold, 1), &mut entropy, TrustTier::Production).unwrap();
 
         // Publish v2 with a raised threshold: same session, new hash required.
         let token = session.token.clone();
@@ -942,23 +994,175 @@ mod tests {
     }
 
     #[test]
-    fn bindings_contain_only_activatable_enabled_gates_with_components() {
+    fn bindings_contain_only_activatable_enabled_gates() {
         let mut reg = registry_with_tiers();
         let app = reg.applications.first_mut().unwrap();
         let mut draft = gate("draft", 5, false);
         draft.enabled = false;
         draft.proof_mode = ProofMode::Xtm;
         app.gates.push(draft);
-        // An ENABLED gate with no deployed component is refused outright, not quietly excluded.
+        // An enabled CONSENSUS gate with no deployed component is refused outright.
         let mut no_component = gate("ghost", 5, false);
         no_component.component_address = None;
+        no_component.proof_mode = ProofMode::Consensus;
         app.gates.push(no_component);
-        assert!(app.validate().is_err(), "an enabled gate without a component must be refused");
+        assert!(app.validate().is_err(), "an enabled consensus gate without a component must be refused");
         app.gates.pop();
         app.validate().unwrap();
         let b = derive_bindings(&reg);
-        assert_eq!(b.gates.len(), 3, "only enabled, activatable, deployed gates bind");
+        assert_eq!(b.gates.len(), 3, "only enabled, activatable, published gates bind");
         assert!(b.gates.iter().all(|g| g.policy_version == 1));
+    }
+
+    #[test]
+    fn credential_gate_without_component_appears_in_bindings() {
+        let mut reg = Registry::default();
+        reg.credentials.push(cred("admin-1"));
+        let mut a = app("cred-app", "admin-1");
+        let mut cred_gate = GatePolicy {
+            gate_id: "crypt".into(),
+            name: "10 tTARI credential".into(),
+            resource_address: "resource_0101010101010101010101010101010101010101010101010101010101010101".into(),
+            symbol: "tTARI".into(),
+            divisibility: 6,
+            threshold_raw: 10_000_000,
+            proof_mode: ProofMode::Credential,
+            challenge_domain: "cred-app.localhost".into(),
+            session_ttl_override: None,
+            grants: vec![],
+            enabled: true,
+            test_lane: false,
+            use_mode: Default::default(),
+            component_address: None,
+        };
+        a.gates.push(cred_gate.clone());
+        a.validate().unwrap();
+        reg.applications.push(a.clone());
+        // Publish the credential gate.
+        reg.versions.push(PolicyVersion {
+            application_id: a.application_id.clone(),
+            gate_id: "crypt".into(),
+            version: 1,
+            policy_hash: hash_policy(&hasher(), &a, &cred_gate, 1),
+            network: ghost_gate_core::network::LOCALNET,
+            genesis_hash: GENESIS.to_string(),
+            policy: cred_gate.clone(),
+            app_revision: 1,
+            created_unix: 1,
+        });
+        let b = derive_bindings(&reg);
+        assert_eq!(b.gates.len(), 1, "the credential gate must appear in bindings");
+        let snap = &b.gates[0];
+        assert_eq!(snap.gate_id, "crypt");
+        assert_eq!(snap.component_address, "", "credential gate has empty component");
+        assert_eq!(snap.proof_mode, "credential");
+        assert_eq!(snap.max_trust_tier, "operator-trusted-testnet");
+    }
+
+    #[test]
+    fn credential_gate_with_component_is_refused_by_validation() {
+        let mut reg = Registry::default();
+        reg.credentials.push(cred("admin-1"));
+        let mut a = app("bad-cred", "admin-1");
+        a.gates.push(GatePolicy {
+            gate_id: "bad".into(),
+            name: "bad".into(),
+            resource_address: "resource_abc".into(),
+            symbol: "t".into(),
+            divisibility: 6,
+            threshold_raw: 1,
+            proof_mode: ProofMode::Credential,
+            challenge_domain: "x.localhost".into(),
+            session_ttl_override: None,
+            grants: vec![],
+            enabled: true,
+            test_lane: false,
+            use_mode: Default::default(),
+            component_address: Some("component_abc".into()),
+        });
+        assert!(a.validate().is_err(), "a credential gate with a component must be refused");
+    }
+
+    #[test]
+    fn production_app_refuses_session_below_production_tier() {
+        let mut reg = registry_with_tiers();
+        let app = reg.application("meme").unwrap();
+        let gold = app.gate("gold").unwrap();
+        let gold_hash = hash_policy(&hasher(), app, gold, 1);
+        let mut entropy = [0u8; 32];
+        // The test registry is production:true, so Development tier must be refused.
+        let err = issue_session_with_tier(
+            &reg, "meme", "gold", gold_hash.clone(), &mut entropy, TrustTier::Development,
+        );
+        assert!(err.is_err(), "production app must refuse a development-tier session");
+        let msg = err.unwrap_err();
+        assert!(msg.contains("production"), "error should mention production: {msg}");
+
+        // OperatorTrustedTestnet must also be refused for a production app.
+        let err2 = issue_session_with_tier(
+            &reg, "meme", "gold", gold_hash, &mut entropy, TrustTier::OperatorTrustedTestnet,
+        );
+        assert!(err2.is_err(), "production app must refuse an operator-trusted-testnet session");
+    }
+
+    #[test]
+    fn non_production_app_accepts_testnet_tier() {
+        let mut reg = registry_with_tiers();
+        reg.applications.first_mut().unwrap().production = false;
+        let app = reg.application("meme").unwrap();
+        let gold = app.gate("gold").unwrap();
+        let gold_hash = hash_policy(&hasher(), app, gold, 1);
+        let mut entropy = [0u8; 32];
+        let session = issue_session_with_tier(
+            &reg, "meme", "gold", gold_hash, &mut entropy, TrustTier::OperatorTrustedTestnet,
+        ).unwrap();
+        assert_eq!(session.trust_tier, TrustTier::OperatorTrustedTestnet);
+    }
+
+    #[test]
+    fn credential_mode_caps_tier_at_operator_trusted_testnet() {
+        let mut reg = Registry::default();
+        reg.credentials.push(cred("admin-1"));
+        let mut a = app("cap-test", "admin-1");
+        a.production = false;
+        a.gates.push(GatePolicy {
+            gate_id: "cred".into(),
+            name: "cred".into(),
+            resource_address: "resource_abc".into(),
+            symbol: "t".into(),
+            divisibility: 6,
+            threshold_raw: 1,
+            proof_mode: ProofMode::Credential,
+            challenge_domain: "x.localhost".into(),
+            session_ttl_override: None,
+            grants: vec![],
+            enabled: true,
+            test_lane: false,
+            use_mode: Default::default(),
+            component_address: None,
+        });
+        a.validate().unwrap();
+        reg.applications.push(a.clone());
+        let g = a.gate("cred").unwrap();
+        reg.versions.push(PolicyVersion {
+            application_id: a.application_id.clone(),
+            gate_id: "cred".into(),
+            version: 1,
+            policy_hash: hash_policy(&hasher(), &a, g, 1),
+            network: ghost_gate_core::network::LOCALNET,
+            genesis_hash: GENESIS.to_string(),
+            policy: g.clone(),
+            app_revision: 1,
+            created_unix: 1,
+        });
+        let mut entropy = [0u8; 32];
+        // Even if the caller claims Production, credential mode caps it.
+        let session = issue_session_with_tier(
+            &reg, "cap-test", "cred", hash_policy(&hasher(), &a, g, 1),
+            &mut entropy, TrustTier::Production,
+        ).unwrap();
+        assert_eq!(session.trust_tier, TrustTier::OperatorTrustedTestnet,
+            "credential mode must cap the tier at OperatorTrustedTestnet");
     }
 
     #[test]
@@ -1052,6 +1256,7 @@ impl AccessPlane {
             granted: session.granted.clone(),
             expires_unix: session.expires_unix,
             test_lane: session.test_lane,
+            trust_tier: session.trust_tier,
         };
         fresh.push(session);
         save_sessions(&self.paths, &fresh)?;
@@ -1070,6 +1275,21 @@ impl AccessPlane {
         authorization_id: &str,
         token: &str,
     ) -> Result<AccessGrant, String> {
+        self.issue_idempotent_with_tier(
+            application_id, gate_id, policy_hash, authorization_id, token,
+            TrustTier::Development,
+        )
+    }
+
+    pub fn issue_idempotent_with_tier(
+        &mut self,
+        application_id: &str,
+        gate_id: &str,
+        policy_hash: String,
+        authorization_id: &str,
+        token: &str,
+        trust_tier: TrustTier,
+    ) -> Result<AccessGrant, String> {
         let reg = self.registry()?;
         let _lock = StoreLock::acquire(&self.paths)?;
         let mut fresh = load_sessions(&self.paths)?;
@@ -1083,15 +1303,17 @@ impl AccessPlane {
                 token: existing.token.clone(), application_id: existing.application_id.clone(),
                 proven_gate: existing.proven_gate.clone(), granted: existing.granted.clone(),
                 expires_unix: existing.expires_unix, test_lane: existing.test_lane,
+                trust_tier: existing.trust_tier,
             });
         }
         let session = issue_session_with_token(
-            &reg, application_id, gate_id, policy_hash, authorization_id, token,
+            &reg, application_id, gate_id, policy_hash, authorization_id, token, trust_tier,
         )?;
         let grant = AccessGrant {
             token: session.token.clone(), application_id: session.application_id.clone(),
             proven_gate: session.proven_gate.clone(), granted: session.granted.clone(),
             expires_unix: session.expires_unix, test_lane: session.test_lane,
+            trust_tier: session.trust_tier,
         };
         fresh.push(session);
         save_sessions(&self.paths, &fresh)?;
@@ -1163,4 +1385,5 @@ pub struct AccessGrant {
     pub granted: Vec<String>,
     pub expires_unix: u64,
     pub test_lane: bool,
+    pub trust_tier: TrustTier,
 }

@@ -240,7 +240,7 @@ function renderApps(state) {
 
     // Gates table.
     const table = document.createElement("table");
-    table.innerHTML = "<tr><th>Gate</th><th>Name</th><th>Threshold</th><th>Mode</th><th>Session</th><th>Used on</th><th>Grants</th><th>State</th><th></th></tr>";
+    table.innerHTML = "<tr><th>Gate</th><th>Name</th><th>Threshold</th><th>Mode</th><th>Max tier</th><th>Session</th><th>Used on</th><th>Grants</th><th>State</th><th></th></tr>";
     for (const g of app.gates) {
       const tr = document.createElement("tr");
       const th = g.thresholdRaw;
@@ -251,6 +251,7 @@ function renderApps(state) {
         <td>${esc(g.name)}</td>
         <td title="${esc(th)} raw units">${esc(human)} ${esc(g.symbol)}</td>
         <td>${esc(g.proofMode)}${g.activatable ? "" : " (draft — " + esc(g.blockedReason || "unsupported") + ")"}</td>
+        <td><span class="badge ${g.proofMode === "consensus" ? "tier-prod" : g.proofMode === "credential" ? "tier-testnet" : "tier-dev"}">${g.proofMode === "consensus" ? "production" : g.proofMode === "credential" ? "testnet" : "dev"}</span></td>
         <td>${g.sessionTtlOverrideSecs ? humanTtl(g.sessionTtlOverrideSecs) : "default"}</td>
         <td>${esc(g.useMode === "both" ? "site + Telegram" : g.useMode === "telegram" ? "Telegram only" : "site only")}</td>
         <td class="mono">${esc((g.grants || []).join(", ")) || "—"}</td>
@@ -264,6 +265,7 @@ function renderApps(state) {
     if (app.ownedByYou) {
       const editor = document.createElement("div");
       editor.className = "stacked";
+      const componentField = editorField(app, "gate-component", "Gate component address (component_…)");
       editor.append(
         editorField(app, "gate-id", "Gate ID (stable, unique)"),
         editorField(app, "gate-name", "Display name"),
@@ -271,15 +273,28 @@ function renderApps(state) {
         editorField(app, "gate-symbol", "Symbol (display only)"),
         editorField(app, "gate-div", "Divisibility"),
         editorField(app, "gate-amount", "Human amount (e.g. 10 or 100000)"),
-        editorField(app, "gate-component", "Gate component address (component_…)"),
+        componentField,
       );
+      const componentNote = document.createElement("small");
+      componentNote.className = "field-note";
+      componentNote.textContent = "Credential gates verify off-chain and do not use a component.";
+      componentNote.style.display = "none";
+      componentField.append(componentNote);
       const mode = document.createElement("label");
       mode.textContent = "Proof mode";
       const sel = document.createElement("select");
       sel.innerHTML = `<option value="consensus">Consensus (wallet daemon)</option><option value="credential">Credential (browser wallet)</option><option value="xtm">Native L1 XTM (draft only — cannot activate yet)</option>`;
       sel.id = `mode-${app.applicationId}`;
+      const updateComponentVisibility = () => {
+        const isCredential = sel.value === "credential";
+        const input = componentField.querySelector("input");
+        if (input) { input.disabled = isCredential; if (isCredential) input.value = ""; }
+        componentNote.style.display = isCredential ? "" : "none";
+      };
+      sel.addEventListener("change", updateComponentVisibility);
       mode.append(sel);
       editor.append(mode);
+      updateComponentVisibility();
       const ttlSel = document.createElement("label");
       ttlSel.textContent = "Session override";
       const ts = document.createElement("select");
@@ -523,9 +538,12 @@ async function reorderGates(app) {
   else fail(`msg-${app.applicationId}`, r.json.error || String(r.status));
 }
 
+// Returns the /admin/api/state reply so callers can branch on what the SERVER now says (the
+// step-up flow must re-read state, not trust its own memory of the window).
 async function refresh() {
   const s = await api("/admin/api/state");
   if (s.status === 200) enterDashboard(s.json);
+  return s;
 }
 
 /* ------------------------------ sessions & audit ------------------------------ */
@@ -601,7 +619,44 @@ $("new-app-go").onclick = async () => {
   if (r.status === 200) { await refresh(); set(`Application ${r.json.created} created.`); }
   else set(r.json.error || String(r.status));
 };
-$("btn-stepup").onclick = async () => {
+/* ------------------------------ step-up ------------------------------ */
+// The method to step up with is the SERVER's knowledge about the signed-in credential (the actor),
+// never a guess: a wallet-prefixed actor signs a wallet challenge, a passkey-prefixed actor runs
+// the same WebAuthn ceremony sign-in runs. The dashboard carries no authority of its own either
+// way; the server always re-verifies the ceremony and refreshes the window.
+function actorKind() {
+  if (!actor) return null;
+  if (actor.startsWith("passkey:")) return "passkey";
+  if (actor.startsWith("wallet:")) return "wallet";
+  return null;
+}
+
+// Step-up is server-authoritative: after the ceremony we re-read /admin/api/state and render what
+// the SERVER says about the window, rather than trusting the login reply.
+async function applyStepupResult(r) {
+  if (r.status !== 200) {
+    set(`Step-up refused: ${r.json.error || String(r.status)} — policy changes stay locked.`);
+    await refresh();
+    return;
+  }
+  const s = await refresh();
+  if (s.status !== 200) { set("Step-up accepted, but the dashboard could not re-read its state."); return; }
+  set(stepupValid
+    ? "Step-up accepted: fresh approval is in force; policy changes are allowed."
+    : "The step-up ceremony was accepted but the fresh-approval window is not open.");
+}
+
+async function passkeyStepup() {
+  const c = await api("/admin/api/auth/challenge", { body: JSON.stringify({ kind: "login", method: "passkey" }) });
+  if (c.status !== 200) { set(`Step-up refused: ${c.json.error || String(c.status)}`); return; }
+  // Exactly the flow the sign-in button uses (passkeyLogin), plus stepup: true. The server
+  // requires user verification (Windows Hello) for a step-up and refuses without it.
+  const payload = await passkeyLogin(c.json.challenge);
+  const r = await api("/admin/api/auth/login", { body: JSON.stringify({ ...payload, stepup: true }) });
+  await applyStepupResult(r);
+}
+
+async function walletStepup() {
   const c = await api("/admin/api/auth/challenge", { body: JSON.stringify({ kind: "login", method: "wallet" }) });
   const sig = window.prompt(
     "Step-up: sign this challenge with your registered wallet key and paste the signature hex.\n" +
@@ -614,8 +669,31 @@ $("btn-stepup").onclick = async () => {
     signature: sig.trim(), publicNonce: window.prompt("Public nonce hex:", "") || "",
     stepup: true,
   })});
-  if (r.status === 200) { stepupValid = true; renderStepup(); set("Step-up accepted."); }
-  else set(r.json.error || String(r.status));
+  await applyStepupResult(r);
+}
+
+$("btn-stepup").onclick = async () => {
+  const kind = actorKind();
+  if (kind === "passkey") {
+    try {
+      await passkeyStepup();
+    } catch (e) {
+      if (/NotAllowedError/i.test(String(e))) {
+        // The user dismissed Windows Hello (or it timed out): a normal, non-failure outcome.
+        set("Step-up cancelled before Windows Hello completed — policy changes stay locked until you step up.");
+        return;
+      }
+      // The same translation the sign-in button gives for an unusable RP ID.
+      const msg = /invalid domain|SecurityError/i.test(String(e))
+        ? "The passkey ceremony did not complete. If the dashboard address is not a domain, passkeys " +
+          "cannot run at all — open it through GG_ADMIN_HOSTNAME=localhost (or your domain) and sign in again."
+        : String(e);
+      set(`Step-up refused: ${msg} — policy changes stay locked.`);
+      await refresh();
+    }
+    return;
+  }
+  await walletStepup();
 };
 $("btn-logout").onclick = async () => {
   await api("/admin/api/auth/logout", { mutating: true, body: "{}" });

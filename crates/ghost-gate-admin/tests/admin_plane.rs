@@ -396,7 +396,8 @@ fn a_test_lane_gate_cannot_be_enabled_on_a_production_application() {
 #[test]
 fn one_week_session_issue_use_expiry_and_revocation() {
     use ghost_gate_core::policy::{hash_policy, GateTopology, ProofMode};
-    use ghost_gate_registry::{check_access, issue_session, PolicyVersion};
+    use ghost_gate_core::policy::TrustTier;
+    use ghost_gate_registry::{check_access, issue_session_with_tier, PolicyVersion};
 
     let dir = unique_dir("gg-admin-t4");
     let _ = std::fs::remove_dir_all(&dir);
@@ -463,7 +464,7 @@ fn one_week_session_issue_use_expiry_and_revocation() {
     let app_ref = reg.application("community").unwrap();
     let gate_ref = app_ref.gate("members").unwrap();
     let mut entropy = [0u8; 32];
-    let session = issue_session(&reg, "community", "members", hash_policy(&ghost_gate_registry::Blake3Hasher, app_ref, gate_ref, 1), &mut entropy).unwrap();
+    let session = issue_session_with_tier(&reg, "community", "members", hash_policy(&ghost_gate_registry::Blake3Hasher, app_ref, gate_ref, 1), &mut entropy, TrustTier::Production).unwrap();
     assert_eq!(session.expires_unix - session.issued_unix, 7 * 86_400, "exactly one week");
 
     // In-window use succeeds.
@@ -681,7 +682,8 @@ fn tamper_8_a_proof_against_another_gate_or_policy_cannot_verify() {
     // The challenge domain + policy hash binding: a session proven for gate A is refused for gate
     // C unless the policy says A grants C; a session proven under v1 is refused after v2 exists.
     use ghost_gate_core::policy::{hash_policy, GateTopology, ProofMode};
-    use ghost_gate_registry::{check_access, issue_session, Registry};
+    use ghost_gate_core::policy::TrustTier;
+    use ghost_gate_registry::{check_access, issue_session_with_tier, Registry};
     let mut reg = Registry::default();
     let mut app = ghost_gate_core::policy::Application {
         application_id: "app".into(), display_name: "app".into(), owner_credential: "w".into(),
@@ -717,7 +719,7 @@ fn tamper_8_a_proof_against_another_gate_or_policy_cannot_verify() {
     let app_ref = reg.application("app").unwrap();
     let a = app_ref.gate("a").unwrap();
     let mut e = [0u8; 32];
-    let session = issue_session(&reg, "app", "a", hash_policy(&ghost_gate_registry::Blake3Hasher, app_ref, a, 1), &mut e).unwrap();
+    let session = issue_session_with_tier(&reg, "app", "a", hash_policy(&ghost_gate_registry::Blake3Hasher, app_ref, a, 1), &mut e, TrustTier::Production).unwrap();
     let now = ghost_gate_registry::now_unix();
     let token = session.token.clone();
     assert!(check_access(&reg, &[session.clone()], &token, "app", "a", now).authorized);
@@ -764,7 +766,8 @@ fn tamper_10_a_lower_tier_session_cannot_reach_a_higher_tier() {
     // Covered exhaustively in the registry tests; repeated here as the product-level statement:
     // silver grants bronze, never the reverse.
     use ghost_gate_core::policy::{hash_policy, GateTopology, ProofMode};
-    use ghost_gate_registry::{check_access, issue_session, Registry};
+    use ghost_gate_core::policy::TrustTier;
+    use ghost_gate_registry::{check_access, issue_session_with_tier, Registry};
     let mut reg = Registry::default();
     let mut app = ghost_gate_core::policy::Application {
         application_id: "t".into(), display_name: "t".into(), owner_credential: "w".into(),
@@ -772,7 +775,7 @@ fn tamper_10_a_lower_tier_session_cannot_reach_a_higher_tier() {
         gates: vec![], revision: 1, production: true,
             network: ghost_gate_core::network::LOCALNET, genesis_hash: GENESIS.into(),
     };
-    let mut silver = ghost_gate_core::policy::GatePolicy {
+    let silver = ghost_gate_core::policy::GatePolicy {
         gate_id: "silver".into(), name: "s".into(), resource_address: "resource_x".into(),
         symbol: "G".into(), divisibility: 6, threshold_raw: 200, proof_mode: ProofMode::Consensus,
         challenge_domain: "t.localhost".into(), session_ttl_override: None,
@@ -805,7 +808,7 @@ fn tamper_10_a_lower_tier_session_cannot_reach_a_higher_tier() {
     let app_ref = reg.application("t").unwrap();
     let bronze = app_ref.gate("bronze").unwrap();
     let mut e = [0u8; 32];
-    let s = issue_session(&reg, "t", "bronze", hash_policy(&ghost_gate_registry::Blake3Hasher, app_ref, bronze, 1), &mut e).unwrap();
+    let s = issue_session_with_tier(&reg, "t", "bronze", hash_policy(&ghost_gate_registry::Blake3Hasher, app_ref, bronze, 1), &mut e, TrustTier::Production).unwrap();
     let now = ghost_gate_registry::now_unix();
     assert!(check_access(&reg, &[s.clone()], &s.token, "t", "bronze", now).authorized);
     let token = s.token.clone();
@@ -820,7 +823,8 @@ fn tamper_11_client_side_expiry_extension_is_meaningless() {
     // the expiry — only the token — and /access/check recomputes everything server-side. This test
     // proves the check ignores any client claim: there is no parameter for it.
     use ghost_gate_core::policy::{hash_policy, GateTopology, ProofMode};
-    use ghost_gate_registry::{check_access, issue_session, Registry};
+    use ghost_gate_core::policy::TrustTier;
+    use ghost_gate_registry::{check_access, issue_session_with_tier, Registry};
     let mut reg = Registry::default();
     let mut app = ghost_gate_core::policy::Application {
         application_id: "e".into(), display_name: "e".into(), owner_credential: "w".into(),
@@ -846,7 +850,7 @@ fn tamper_11_client_side_expiry_extension_is_meaningless() {
     let app_ref = reg.application("e").unwrap();
     let g = app_ref.gate("g").unwrap();
     let mut e2 = [0u8; 32];
-    let s = issue_session(&reg, "e", "g", hash_policy(&ghost_gate_registry::Blake3Hasher, app_ref, g, 1), &mut e2).unwrap();
+    let s = issue_session_with_tier(&reg, "e", "g", hash_policy(&ghost_gate_registry::Blake3Hasher, app_ref, g, 1), &mut e2, TrustTier::Production).unwrap();
     let now = ghost_gate_registry::now_unix();
     let expiry = s.expires_unix;
     let token = s.token.clone();
@@ -1092,6 +1096,54 @@ fn an_application_needs_a_known_cohort_and_a_ledger_identity() {
 }
 
 // ---------------------------------------------------------------------------
+// Negative regression: a credential gate on a production app cannot issue at Production tier
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_credential_gate_on_a_production_app_refuses_production_tier() {
+    use ghost_gate_core::policy::{hash_policy, GateTopology, ProofMode};
+    use ghost_gate_core::policy::TrustTier;
+    use ghost_gate_registry::{issue_session_with_tier, Registry};
+
+    let mut reg = Registry::default();
+    let mut app = ghost_gate_core::policy::Application {
+        application_id: "prod-cred".into(), display_name: "pc".into(), owner_credential: "w".into(),
+        topology: GateTopology::Independent, default_session_ttl: 86_400, max_gates: 5,
+        gates: vec![], revision: 1, production: true,
+        network: ghost_gate_core::network::LOCALNET, genesis_hash: GENESIS.into(),
+    };
+    app.gates.push(ghost_gate_core::policy::GatePolicy {
+        gate_id: "cred".into(), name: "cred".into(), resource_address: "resource_x".into(),
+        symbol: "G".into(), divisibility: 6, threshold_raw: 100, proof_mode: ProofMode::Credential,
+        challenge_domain: "pc.localhost".into(), session_ttl_override: None, grants: vec![],
+        enabled: true, test_lane: false, use_mode: Default::default(), component_address: None,
+    });
+    app.validate().unwrap();
+    reg.applications.push(app);
+    let (policy_hash, policy_clone) = {
+        let app_ref = reg.application("prod-cred").unwrap();
+        let g = app_ref.gate("cred").unwrap();
+        (hash_policy(&ghost_gate_registry::Blake3Hasher, app_ref, g, 1), g.clone())
+    };
+    reg.versions.push(ghost_gate_registry::PolicyVersion {
+        application_id: "prod-cred".into(), gate_id: "cred".into(), version: 1,
+        policy_hash: policy_hash.clone(),
+        network: ghost_gate_core::network::LOCALNET, genesis_hash: GENESIS.into(),
+        policy: policy_clone, app_revision: 1, created_unix: 1,
+    });
+    let mut entropy = [0u8; 32];
+    let err = issue_session_with_tier(
+        &reg, "prod-cred", "cred", policy_hash,
+        &mut entropy, TrustTier::Production,
+    );
+    assert!(err.is_err(), "a credential gate on a production app must refuse Production tier");
+    let msg = err.unwrap_err();
+    assert!(msg.contains("production"), "error must mention production: {msg}");
+    assert!(msg.contains("operator-trusted-testnet") || msg.contains("refuses"),
+        "error must explain the tier cap: {msg}");
+}
+
+// ---------------------------------------------------------------------------
 // Scalability: real measurements, not invented maximums
 // ---------------------------------------------------------------------------
 
@@ -1102,7 +1154,8 @@ fn an_application_needs_a_known_cohort_and_a_ledger_identity() {
 #[test]
 fn measured_scalability_at_1_3_10_25_and_50_gates() {
     use ghost_gate_core::policy::{hash_policy, GateTopology, ProofMode};
-    use ghost_gate_registry::{check_access, derive_bindings, issue_session, Blake3Hasher, Registry, StoreLock};
+    use ghost_gate_core::policy::TrustTier;
+    use ghost_gate_registry::{check_access, derive_bindings, issue_session_with_tier, Blake3Hasher, Registry, StoreLock};
     use std::time::Instant;
 
     let dir = unique_dir("gg-scale");
@@ -1195,7 +1248,7 @@ fn measured_scalability_at_1_3_10_25_and_50_gates() {
         let a = loaded.application("scale").unwrap();
         let top = a.gate(&format!("gate-{}", count - 1)).unwrap();
         let mut entropy = [0u8; 32];
-        let session = issue_session(&loaded, "scale", &format!("gate-{}", count - 1), hash_policy(&Blake3Hasher, a, top, 1), &mut entropy).unwrap();
+        let session = issue_session_with_tier(&loaded, "scale", &format!("gate-{}", count - 1), hash_policy(&Blake3Hasher, a, top, 1), &mut entropy, TrustTier::Production).unwrap();
         let sessions = vec![session.clone()];
         let _ = check_access(&loaded, &sessions, &session.token, "scale", &format!("gate-{}", count - 1), ghost_gate_registry::now_unix());
         let t0 = Instant::now();
@@ -1275,3 +1328,279 @@ fn a_gate_records_which_surfaces_it_may_authorize() {
     let back: ghost_gate_core::policy::GatePolicy = serde_json::from_str(&json).unwrap();
     assert_eq!(back.use_mode, GateUseMode::Telegram, "and it round-trips");
 }
+
+// ---------------------------------------------------------------------------
+// Passkey step-up regression tests: the dashboard's fresh-approval path over REAL HTTP.
+// The production registration ceremony's byte-level verification is covered in auth.rs; here we
+// prove the login-plane consequences the operator experiences.
+// ---------------------------------------------------------------------------
+
+/// A passkey administrator. The ES256 key is generated deterministically INSIDE the test (the
+/// private key exists only here to craft assertions — the server only ever holds the public key),
+/// and the credential is seeded the way the registry legitimately stores passkey credentials.
+struct PasskeyAdmin {
+    signing: p256::ecdsa::SigningKey,
+    /// base64url credential id, exactly as the dashboard reports it
+    credential_id: String,
+    sec1: Vec<u8>,
+}
+
+impl PasskeyAdmin {
+    fn new() -> Self {
+        use p256::ecdsa::SigningKey;
+        let signing = SigningKey::from_slice(&[9u8; 32]).unwrap();
+        let sec1 = signing.verifying_key().to_encoded_point(false).as_bytes().to_vec();
+        Self {
+            signing,
+            credential_id: ghost_gate_admin::auth::base64url_nopad(b"test-passkey-cred"),
+            sec1,
+        }
+    }
+
+    fn seed(&self, server: &TestServer) {
+        let _lock = StoreLock::acquire(&server.state.paths).unwrap();
+        let mut reg = load_registry(&server.state.paths).unwrap();
+        reg.credentials.push(ghost_gate_registry::AdminCredential {
+            credential_id: format!("passkey:{}", self.credential_id),
+            kind: ghost_gate_registry::CredentialKind::Passkey,
+            label: "operator".into(),
+            registered_unix: ghost_gate_registry::now_unix(),
+            es256_public_sec1: Some(self.sec1.clone()),
+            ristretto_public_hex: None,
+        });
+        ghost_gate_registry::save_registry(&server.state.paths, &reg).unwrap();
+    }
+
+    /// A real WebAuthn assertion, byte-for-byte the way a browser produces it: clientDataJSON
+    /// naming the exact challenge and origin, authenticator data hashing the rpId with the
+    /// user-present flag (plus user-verification when Windows Hello was invoked), and a DER ES256
+    /// signature over authenticatorData || SHA-256(clientDataJSON).
+    fn assertion(&self, server: &TestServer, challenge: &str, uv: bool) -> serde_json::Value {
+        use p256::ecdsa::signature::{Signer, SignatureEncoding};
+        use sha2::{Digest, Sha256};
+        let origin = format!("http://127.0.0.1:{}", server.port);
+        let client_data = format!(r#"{{"type":"webauthn.get","challenge":"{challenge}","origin":"{origin}"}}"#);
+        let mut auth_data = [0u8; 37];
+        let rp_hash: [u8; 32] = Sha256::digest(server.state.rp_id.as_bytes()).into();
+        auth_data[..32].copy_from_slice(&rp_hash);
+        auth_data[32] = if uv { 0x05 } else { 0x01 }; // UP (| UV when user verification ran)
+        let mut signed = auth_data.to_vec();
+        signed.extend_from_slice(Sha256::digest(client_data.as_bytes()).as_slice());
+        let sig: p256::ecdsa::Signature = self.signing.sign(&signed);
+        serde_json::json!({
+            "method": "passkey",
+            "challenge": challenge,
+            "credentialId": self.credential_id,
+            "webauthn": {
+                "client_data_b64": ghost_gate_admin::auth::base64url_nopad(client_data.as_bytes()),
+                "authenticator_data_b64": ghost_gate_admin::auth::base64url_nopad(&auth_data),
+                "signature_b64": ghost_gate_admin::auth::base64url_nopad(sig.to_der().as_bytes()),
+                "credential_id_b64": self.credential_id,
+            },
+        })
+    }
+
+    fn passkey_challenge(&self, server: &TestServer) -> String {
+        let origin = format!("http://127.0.0.1:{}", server.port);
+        let reply = http(server.port, "POST", "/admin/api/auth/challenge",
+            &[("Origin", origin.as_str())], r#"{"kind":"login","method":"passkey"}"#);
+        as_str(&reply.body, "challenge").to_string()
+    }
+
+    /// Attempt a login (or a step-up on an existing session) over the real HTTP plane.
+    fn login(&self, server: &TestServer, stepup: bool, uv: bool, cookie: Option<&str>) -> HttpReply {
+        let challenge = self.passkey_challenge(server);
+        let mut body = self.assertion(server, &challenge, uv);
+        body["stepup"] = serde_json::Value::Bool(stepup);
+        let mut headers: Vec<(String, String)> =
+            vec![("Origin".into(), format!("http://127.0.0.1:{}", server.port))];
+        if let Some(c) = cookie {
+            headers.push(("Cookie".into(), c.to_string()));
+        }
+        http(server.port, "POST", "/admin/api/auth/login", &hdrs(&headers), &body.to_string())
+    }
+}
+
+fn state_field(server: &TestServer, cookie: &str, key: &str) -> serde_json::Value {
+    let state = http(server.port, "GET", "/admin/api/state", &[("Cookie", cookie)], "");
+    assert_eq!(state.status, 200, "{}", state.body);
+    state.body.get(key).cloned().unwrap_or(serde_json::Value::Null)
+}
+
+fn create_app(server: &TestServer, cookie: &str, csrf: &str, id: &str) -> HttpReply {
+    http(server.port, "POST", "/admin/api/app/create", &hdrs(&auth_headers(server.port, cookie, csrf)),
+        &serde_json::json!({
+            "applicationId": id,
+            "displayName": id,
+            "topology": "independent",
+            "defaultSessionTtl": 3600u64,
+            "production": true,
+        }).to_string())
+}
+
+#[test]
+fn passkey_login_without_stepup_is_locked_but_a_passkey_stepup_unlocks_policy() {
+    let dir = unique_dir("gg-admin-pk1");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let server = spawn_server(&dir);
+    let admin = PasskeyAdmin::new();
+    admin.seed(&server);
+
+    // Ordinary passkey login WITHOUT step-up: an honest authentication ceremony that mints a
+    // session, but one with NO fresh approval.
+    let login = admin.login(&server, false, false, None);
+    assert_eq!(login.status, 200, "an ordinary passkey login must succeed: {}", login.body);
+    let cookie = login.set_cookie.expect("a session cookie from login");
+    let stepup_valid = state_field(&server, &cookie, "stepupValid");
+    assert_eq!(stepup_valid, serde_json::Value::Bool(false), "an ordinary login is not a fresh approval");
+
+    // ...and the policy change the dashboard tries is refused, naming why.
+    let csrf = as_str(&state_field_value(&server, &cookie), "csrf").to_string();
+    let create = create_app(&server, &cookie, &csrf, "locked-out");
+    assert_eq!(create.status, 403, "creating an application without step-up must be refused: {}", create.body);
+
+    // Step-up: the SAME credential re-runs the WebAuthn ceremony, now requiring user verification
+    // (Windows Hello) — on the CURRENT session, which is exactly what the dashboard does.
+    let step = admin.login(&server, true, true, Some(&cookie));
+    assert_eq!(step.status, 200, "a verified passkey step-up must succeed: {}", step.body);
+    assert_eq!(step.body.get("stepup").and_then(|s| s.as_bool()), Some(true), "{}", step.body);
+
+    // The server-authoritative window is now fresh, and the refused action is accepted.
+    assert_eq!(state_field(&server, &cookie, "stepupValid"), serde_json::Value::Bool(true),
+        "the SERVER must report the fresh approval, not the dashboard");
+    let create2 = create_app(&server, &cookie, &csrf, "unlocked");
+    assert_eq!(create2.status, 200, "the same action now succeeds: {}", create2.body);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The `/admin/api/state` full reply (for extracting the session's CSRF token).
+fn state_field_value(server: &TestServer, cookie: &str) -> serde_json::Value {
+    let state = http(server.port, "GET", "/admin/api/state", &[("Cookie", cookie)], "");
+    assert_eq!(state.status, 200, "{}", state.body);
+    state.body
+}
+
+#[test]
+fn an_expired_approval_locks_policy_again_and_a_new_stepup_restores_it() {
+    let dir = unique_dir("gg-admin-pk2");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let server = spawn_server(&dir);
+    let admin = PasskeyAdmin::new();
+    admin.seed(&server);
+    let login = admin.login(&server, false, false, None);
+    assert_eq!(login.status, 200, "{}", login.body);
+    let cookie = login.set_cookie.expect("cookie");
+    let step = admin.login(&server, true, true, Some(&cookie));
+    assert_eq!(step.status, 200, "{}", step.body);
+    assert_eq!(state_field(&server, &cookie, "stepupValid"), serde_json::Value::Bool(true));
+
+    // Move the approval window into the past exactly the way time would: the session record's
+    // window expires server-side and the dashboard's freshest action is again refused.
+    {
+        let _lock = StoreLock::acquire(&server.state.paths).unwrap();
+        let mut reg = load_registry(&server.state.paths).unwrap();
+        let past = ghost_gate_registry::now_unix().saturating_sub(1);
+        for s in reg.admin_sessions.iter_mut() {
+            s.stepup_until_unix = past;
+        }
+        ghost_gate_registry::save_registry(&server.state.paths, &reg).unwrap();
+    }
+    assert_eq!(state_field(&server, &cookie, "stepupValid"), serde_json::Value::Bool(false),
+        "an expired approval must read as absent from the server's own bookkeeping");
+    let csrf = as_str(&state_field_value(&server, &cookie), "csrf").to_string();
+    let create = create_app(&server, &cookie, &csrf, "too-late");
+    assert_eq!(create.status, 403, "an expired approval must not authorize policy: {}", create.body);
+
+    // Stepping up again restores the window — the dashboard's answer to exactly this state.
+    let step2 = admin.login(&server, true, true, Some(&cookie));
+    assert_eq!(step2.status, 200, "{}", step2.body);
+    assert_eq!(state_field(&server, &cookie, "stepupValid"), serde_json::Value::Bool(true));
+    let create2 = create_app(&server, &cookie, &csrf, "back-again");
+    assert_eq!(create2.status, 200, "{}", create2.body);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn invalid_and_replayed_passkey_assertions_are_refused() {
+    let dir = unique_dir("gg-admin-pk3");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let server = spawn_server(&dir);
+    let admin = PasskeyAdmin::new();
+    admin.seed(&server);
+    let login = admin.login(&server, false, false, None);
+    assert_eq!(login.status, 200, "{}", login.body);
+    let cookie = login.set_cookie.expect("cookie");
+
+    // INVALID: a well-formed ceremony whose signature is not a DER ECDSA signature is refused
+    // before anything about the session changes.
+    let step = admin.login(&server, true, true, Some(&cookie));
+    assert_eq!(step.status, 200, "{}", step.body);
+    let garbage = ghost_gate_admin::auth::base64url_nopad(b"definitely-not-a-der-signature");
+    let mut valid_stepup_body = {
+        let challenge = admin.passkey_challenge(&server);
+        let mut b = admin.assertion(&server, &challenge, true);
+        b["stepup"] = serde_json::Value::Bool(true);
+        b
+    };
+    let mut invalid = valid_stepup_body.clone();
+    invalid["webauthn"]["signature_b64"] = serde_json::json!(garbage);
+    let origin = format!("http://127.0.0.1:{}", server.port);
+    let r = http(server.port, "POST", "/admin/api/auth/login",
+        &[("Origin", origin.as_str()), ("Cookie", cookie.as_str())], &invalid.to_string());
+    assert_eq!(r.status, 403, "an invalid assertion must be refused: {}", r.body);
+    assert!(r.body.to_string().contains("refused"), "{}", r.body);
+
+    // REPLAYED: the exact same request body a second time must not re-verify — every challenge is
+    // single-use, so a captured ceremony cannot be recycled by an attacker or by accident.
+    valid_stepup_body = {
+        let challenge = admin.passkey_challenge(&server);
+        let mut b = admin.assertion(&server, &challenge, true);
+        b["stepup"] = serde_json::Value::Bool(true);
+        b
+    };
+    let first = http(server.port, "POST", "/admin/api/auth/login",
+        &[("Origin", origin.as_str()), ("Cookie", cookie.as_str())], &valid_stepup_body.to_string());
+    assert_eq!(first.status, 200, "the first use of a fresh ceremony works: {}", first.body);
+    let replay = http(server.port, "POST", "/admin/api/auth/login",
+        &[("Origin", origin.as_str()), ("Cookie", cookie.as_str())], &valid_stepup_body.to_string());
+    assert_ne!(replay.status, 200, "the SAME ceremony must not verify twice: {}", replay.body);
+    assert!(replay.body.to_string().contains("challenge"), "{}", replay.body);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn wallet_authentication_covers_ordinary_login_and_stepup() {
+    let dir = unique_dir("gg-admin-wl");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let server = spawn_server(&dir);
+    let admin = WalletAdmin::new();
+    let (cookie, csrf) = admin.register(server.port);
+
+    // Sign out first: what follows is the ordinary login path the dashboard offers AFTER
+    // registration, with no inherited privileged start.
+    let logout = http(server.port, "POST", "/admin/api/auth/logout",
+        &hdrs(&auth_headers(server.port, &cookie, &csrf)), "{}");
+    assert_eq!(logout.status, 200, "{}", logout.body);
+
+    // Ordinary wallet login: authentication succeeds, no fresh approval.
+    let login = admin.login(server.port, false, None);
+    assert_eq!(login.status, 200, "an ordinary wallet login must succeed: {}", login.body);
+    let cookie2 = login.set_cookie.expect("cookie");
+    assert_eq!(state_field(&server, &cookie2, "stepupValid"), serde_json::Value::Bool(false));
+    let csrf2 = as_str(&state_field_value(&server, &cookie2), "csrf").to_string();
+    let create = create_app(&server, &cookie2, &csrf2, "wallet-locked");
+    assert_eq!(create.status, 403, "a fresh wallet login is not a fresh approval: {}", create.body);
+
+    // The wallet step-up on the CURRENT session unlocks it, the same as the passkey path.
+    let step = admin.login(server.port, true, Some(&cookie2));
+    assert_eq!(step.status, 200, "a wallet step-up must succeed: {}", step.body);
+    assert_eq!(state_field(&server, &cookie2, "stepupValid"), serde_json::Value::Bool(true));
+    let create2 = create_app(&server, &cookie2, &csrf2, "wallet-unlocked");
+    assert_eq!(create2.status, 200, "{}", create2.body);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+

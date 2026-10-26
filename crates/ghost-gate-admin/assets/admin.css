@@ -1,5 +1,29 @@
 /* Ghost Gate administrator dashboard — plain, legible, no frameworks. */
 
+/* Self-contained palette. The dashboard used to pull the bridge's /app.css, which is not an asset
+   of THIS server (the request came back 401) and defined none of the variables these rules use
+   anyway. Everything the page needs is declared here, so the only stylesheets served are the ones
+   the admin plane itself embeds. */
+:root {
+  color-scheme: dark;
+  --bg: #0b0d12;
+  --card: #141822;
+  --line: #232a38;
+  --text: #e7ecf3;
+  --text-dim: #8b97ab;
+  --ember: #e0b96a;
+  --ok: #7ee0c0;
+  --mono: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+body {
+  margin: 0;
+  padding: 0 1rem 1rem;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+
 .admin-head h1 { margin: 1.2rem 0 .4rem; letter-spacing: .08em; }
 .admin-accent { color: var(--ember); }
 #admin-root { max-width: 1100px; margin: 0 auto; padding: 1rem 1.2rem 4rem; }
@@ -41,6 +65,10 @@ code { color: #9aa4c0; }
 }
 .badge.test { border-color: #7a5a2a; color: #e0b96a; }
 .badge.enabled { border-color: #2a6a3a; color: #8ee0a0; }
+.badge.tier-prod { border-color: #2a6a3a; color: #8ee0a0; }
+.badge.tier-testnet { border-color: #5a6a2a; color: #e0d07a; }
+.badge.tier-dev { border-color: #6a3a2a; color: #e07a7a; }
+.field-note { display: block; color: var(--text-dim); font-size: .8rem; margin-top: .2rem; }
 /* A gate row carries an address, a raw threshold and a version: it cannot be squeezed into a
    phone without either wrapping or scrolling. Wrap long values, and let the table scroll inside
    its own box instead of pushing the whole page sideways. */

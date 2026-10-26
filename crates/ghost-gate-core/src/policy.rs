@@ -206,6 +206,73 @@ impl GateUseMode {
     }
 }
 
+/// How strong the verification evidence behind an authorization actually is.
+///
+/// Computed **server-side only**, never from anything a browser supplies. A session, receipt, or
+/// bindings snapshot records its tier at issuance time, and no code path may silently upgrade a
+/// weaker verdict. A `production: true` application refuses to issue a session below `Production`.
+///
+/// The tier is orthogonal to `test_lane`: a test-lane session on a testnet deployment may be
+/// `OperatorTrustedTestnet`, but it still cannot authorize a production gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TrustTier {
+    /// No chain reader, no anchor, fixture data, or unknown/failed verdict. Never authorizes
+    /// real access — development and testing only.
+    Development,
+    /// Credential mode with an operator-controlled indexer, or consensus mode with a
+    /// release-bootstrap anchor under explicit operator opt-in. The indexer's `verified` flag
+    /// is accepted as evidence but labeled honestly: the operator trusts the indexer, and
+    /// downstream consumers see that.
+    OperatorTrustedTestnet,
+    /// Consensus mode backed by an independently-authenticated, network-bound validator-set
+    /// root with satisfied freshness. This is the only tier that may authorize production
+    /// sessions in a `production: true` application.
+    Production,
+}
+
+impl TrustTier {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TrustTier::Development => "development",
+            TrustTier::OperatorTrustedTestnet => "operator-trusted-testnet",
+            TrustTier::Production => "production",
+        }
+    }
+
+    /// Whether this tier is strong enough to authorize a session in a production application.
+    pub fn permits_production(self) -> bool {
+        matches!(self, TrustTier::Production)
+    }
+}
+
+impl Default for TrustTier {
+    fn default() -> Self {
+        TrustTier::Development
+    }
+}
+
+impl fmt::Display for TrustTier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl ProofMode {
+    /// The highest trust tier this proof mode can ever reach, regardless of evidence quality.
+    /// Credential mode tops out at OperatorTrustedTestnet because the indexer's `verified`
+    /// flag is not independently verifiable (F-04). Consensus can reach Production with an
+    /// authenticated anchor.
+    pub fn max_trust_tier(self) -> TrustTier {
+        match self {
+            ProofMode::Consensus => TrustTier::Production,
+            ProofMode::Credential => TrustTier::OperatorTrustedTestnet,
+            ProofMode::Xtm => TrustTier::Development,
+        }
+    }
+}
+
 impl GatePolicy {
     /// Exact, divisibility-aware conversion from a human amount to raw units.
     ///
@@ -483,14 +550,27 @@ fn validate_gate(g: &GatePolicy, app: &Application) -> Result<(), String> {
             g.proof_mode.blocked_reason().unwrap_or("unsupported")
         ));
     }
-    // An enabled gate must be deployed: the component is where consensus keeps the gate's state.
-    if g.enabled && g.proof_mode.is_activatable() {
+    // Consensus gates require a deployed component: the component is where consensus keeps the
+    // gate's state. Credential gates are component-free by protocol: the bridge verifies an
+    // on-chain output + ownership signature entirely off-chain.
+    if g.enabled && g.proof_mode == ProofMode::Consensus {
         match &g.component_address {
             Some(a) if a.starts_with("component_") && a.len() > "component_".len() => {}
             _ => return Err(format!(
-                "gate {:?} is enabled but has no deployed gate component address",
+                "gate {:?} is enabled consensus gate but has no deployed gate component address",
                 g.gate_id
             )),
+        }
+    }
+    // A credential gate must NOT have a component address: it would be unused and misleading.
+    if g.enabled && g.proof_mode == ProofMode::Credential && g.component_address.is_some() {
+        let addr = g.component_address.as_deref().unwrap_or("");
+        if !addr.trim().is_empty() {
+            return Err(format!(
+                "gate {:?} is a credential gate and must not have a component address \
+                 (credential verification is off-chain)",
+                g.gate_id
+            ));
         }
     }
     if g.enabled && g.test_lane && app.production {
@@ -865,6 +945,70 @@ mod tests {
         let mut g3 = g2.clone();
         g3.gate_id = "other".into();
         assert!(v1.next(&h, &a, &g3).is_err());
+    }
+
+    #[test]
+    fn credential_gate_without_component_is_valid() {
+        let mut a = app();
+        let mut g = gate("cred");
+        g.proof_mode = ProofMode::Credential;
+        g.component_address = None;
+        a.gates.push(g);
+        assert!(a.validate().is_ok(), "a credential gate without a component must be accepted");
+    }
+
+    #[test]
+    fn credential_gate_with_component_is_refused() {
+        let mut a = app();
+        let mut g = gate("cred");
+        g.proof_mode = ProofMode::Credential;
+        g.component_address = Some("component_abc".into());
+        a.gates.push(g);
+        assert!(a.validate().is_err(), "a credential gate with a component must be refused");
+    }
+
+    #[test]
+    fn consensus_gate_without_component_is_refused() {
+        let mut a = app();
+        let mut g = gate("cons");
+        g.proof_mode = ProofMode::Consensus;
+        g.component_address = None;
+        a.gates.push(g);
+        assert!(a.validate().is_err(), "a consensus gate without a component must be refused");
+    }
+
+    #[test]
+    fn consensus_gate_with_component_is_valid() {
+        let mut a = app();
+        let g = gate("cons"); // default: Consensus + component_abc
+        a.gates.push(g);
+        assert!(a.validate().is_ok(), "a consensus gate with a valid component must be accepted");
+    }
+
+    #[test]
+    fn trust_tier_ordering_and_properties() {
+        assert!(TrustTier::Development < TrustTier::OperatorTrustedTestnet);
+        assert!(TrustTier::OperatorTrustedTestnet < TrustTier::Production);
+        assert!(!TrustTier::Development.permits_production());
+        assert!(!TrustTier::OperatorTrustedTestnet.permits_production());
+        assert!(TrustTier::Production.permits_production());
+        assert_eq!(TrustTier::default(), TrustTier::Development);
+    }
+
+    #[test]
+    fn proof_mode_max_trust_tier() {
+        assert_eq!(ProofMode::Consensus.max_trust_tier(), TrustTier::Production);
+        assert_eq!(ProofMode::Credential.max_trust_tier(), TrustTier::OperatorTrustedTestnet);
+        assert_eq!(ProofMode::Xtm.max_trust_tier(), TrustTier::Development);
+    }
+
+    #[test]
+    fn trust_tier_display_and_as_str() {
+        assert_eq!(TrustTier::Development.as_str(), "development");
+        assert_eq!(TrustTier::OperatorTrustedTestnet.as_str(), "operator-trusted-testnet");
+        assert_eq!(TrustTier::Production.as_str(), "production");
+        assert_eq!(format!("{}", TrustTier::Development), "development");
+        assert_eq!(format!("{}", TrustTier::Production), "production");
     }
 
     #[test]
