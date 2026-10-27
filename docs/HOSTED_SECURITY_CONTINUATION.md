@@ -1,0 +1,19 @@
+# Hosted security continuation — public authorization is not ready
+
+The hosted adapter and browser flow have local fixes, but the system is **NO-GO for public authorization** until the following cross-component work is implemented and independently reviewed. The local bridge's established flow is separate.
+
+## Generation and trust boundary
+
+`cloudflare/src/worker.js` creates hosted challenges and reads sessions from `ReplayCoordinator`; neither request nor record contains an authoritative bridge generation. `crates/ghost-gate-bridge/src/server.rs::hosted_verify` calls `CredentialVerifier` directly, bypassing the local `grant_access_for` path that applies the configured evidence tier and generation. It does not check the reset halt. Consequently, a halt or generation activation can leave already issued hosted sessions usable, and the hosted verifier may report VERIFIED without applying the local trust policy. Passing either component's unit tests does not prove this protocol safe.
+
+Proposed design to review before implementation: the bridge supplies a fresh authenticated gate-specific status including an operator-controlled generation, policy identity, effective trust eligibility and halt state. The Worker obtains and verifies it at issuance, redemption and every protected/session decision; the durable record binds the accepted status and rejects older, missing, expired, halted, changed or mismatched state. A generation change during an in-flight verification must prevent the grant. Require a fresh bridge check after verification and before access; define and test ordering against concurrent activation, revocation and halt, including bridge failures and restart. A status response needs a request nonce or equivalent replay protection and a bounded lifetime. Do not let a single unauthenticated indexer report activate a generation. Keep existing durable records and manual operator halt/recovery. This is a proposal, not implemented synchronization or automatic reset detection.
+
+An independent reviewer must verify the cross-component linearization point, status freshness and replay resistance, policy and evidence-tier equivalence with local grants, revocation behavior, Worker deployment rollback, and Telegram membership revalidation. Review must also verify Cloudflare Durable Object execution semantics under concurrent calls and real Sapient signatures against the full live wire protocol.
+
+## Chain wire format
+
+`crates/ghost-gate-walletd/src/esmeralda.rs::JsonChainReader` is the live JSON credential reader; `ghost-gate-cbor` is an isolated decoder and is not connected to it. Do not infer the engine UTXO layout from a generic CBOR value. Capture a real supported response and upstream schema, then add strict typed mapping and malformed, unknown-version, resource, liveness, key and balance fixtures before enabling CBOR. Decoding does not provide independent consensus verification.
+
+## Deployment safeguards
+
+The previous tunnel template forwarded every bridge path, including administrative and diagnostic routes. The narrowed template permits only the hosted verifier, the Telegram credential paths, and the bot claim endpoint; verify with the installed `cloudflared tunnel ingress validate` and `cloudflared tunnel ingress rule` commands before use. Path routing is not authentication. Check URL normalization and method behavior in the deployed version and confirm all unrelated paths return 404. `web/telegram/join.html` requires exact HTTPS origin metadata for both bridge and claim; leaving it blank intentionally fails closed. Do not publish or configure secrets until the unresolved authorization boundary is fixed and reviewed. Local checks do not prove a live wallet, Telegram admission, VPS build, Cloudflare routing, or current indexer compatibility.
