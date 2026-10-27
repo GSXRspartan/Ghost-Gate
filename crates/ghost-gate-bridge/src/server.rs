@@ -921,6 +921,21 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             return Response::error(400, r#"{"error":"GG: invalid hosted verifier request"}"#);
         }
 
+        let gate_id = &hv_req.gate_id;
+        let gate = match self.gates.get(gate_id).cloned() {
+            Some(g) => g,
+            None => return Response::error(404, r#"{"error":"GG: no such gate"}"#),
+        };
+        let gate_resource = gate.resource().map(|r| hex::encode(r.as_ref())).unwrap_or_default();
+        let req_resource = hv_req.resource_address.strip_prefix("resource_")
+            .unwrap_or(&hv_req.resource_address);
+        if hv_req.network != gate.network
+            || req_resource != gate_resource
+            || hv_req.threshold_raw != gate.threshold().to_string()
+        {
+            return Response::error(409, r#"{"error":"GG: request scope does not match this gate"}"#);
+        }
+
         let vid = hosted::verification_id(&hv_req);
 
         let proof_json = serde_json::to_string(&hv_req.proof).unwrap_or_default();
@@ -939,12 +954,6 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                 let sig = hosted::sign_result(&result, resp_key.as_bytes());
                 return Response::json_with_header(200, &body, "X-GG-Verifier-Signature", &sig);
             }
-        };
-
-        let gate_id = &hv_req.gate_id;
-        let gate = match self.gates.get(gate_id).cloned() {
-            Some(g) => g,
-            None => return Response::error(404, r#"{"error":"GG: no such gate"}"#),
         };
         let chain = match self.chain.as_ref() {
             Some(c) => c,
@@ -3768,5 +3777,49 @@ mod tests {
         let r = b.handle(&request).await;
         assert_eq!(r.status, 401, "tampered HMAC is refused: {}", r.body);
         assert!(r.body.contains("signature is invalid"), "{}", r.body);
+    }
+
+    #[tokio::test]
+    async fn hosted_verify_rejects_scope_mismatch() {
+        use ghost_gate_verifier::hosted::{self, HostedVerificationRequest};
+
+        let token = "test-bearer-token";
+        let req_key = "test-request-key";
+
+        let res = *binding().resource().unwrap();
+        let mut b = credential_bridge(
+            FakeWallet::new(),
+            FakeChain::with("unused".into(), 0, [0u8; 32]),
+        );
+        b.hosted_verifier_token = Some(token.into());
+        b.hosted_verifier_request_key = Some(req_key.into());
+        b.hosted_verifier_response_key = Some("resp".into());
+
+        let hv_req = HostedVerificationRequest {
+            nonce: "a".repeat(64), tenant: "t".into(), gate_id: "g1".into(),
+            relying_site: "https://x.example".into(),
+            network: binding().network,
+            resource_address: hex::encode(res.as_ref()),
+            threshold_raw: "999".into(),
+            policy_version: "v1".into(), proof_digest: "b".repeat(64),
+            proof: serde_json::json!({}),
+        };
+        let canonical = hosted::canonical_request(&hv_req);
+        let req_sig = hosted::hmac_sha256_hex(req_key.as_bytes(), canonical.as_bytes());
+
+        let request = Request {
+            method: "POST",
+            path: "/v1/hosted/verify".into(),
+            origin: None,
+            host: Some("127.0.0.1:7899".into()),
+            query: Default::default(),
+            body: serde_json::to_string(&hv_req).unwrap(),
+            attempt: None,
+            authorization: Some(format!("Bearer {token}")),
+            verifier_request_signature: Some(req_sig),
+        };
+        let r = b.handle(&request).await;
+        assert_eq!(r.status, 409, "scope mismatch refused: {}", r.body);
+        assert!(r.body.contains("scope does not match"), "{}", r.body);
     }
 }
