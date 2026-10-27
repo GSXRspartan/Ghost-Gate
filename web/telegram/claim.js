@@ -45,6 +45,23 @@ function fail(message) {
   $("tg-line").textContent = "The verification did not complete.";
 }
 
+function showRejection(heading, explanation) {
+  $("tg-line").textContent = "";
+  const banner = document.createElement("div");
+  banner.style.cssText =
+    "margin:1.5rem auto;padding:1.5rem;text-align:center;border:2px solid #f44;" +
+    "border-radius:12px;background:rgba(255,50,50,0.08);max-width:440px;";
+  const h = document.createElement("div");
+  h.textContent = heading;
+  h.style.cssText = "font-size:1.4rem;font-weight:700;color:#f44;margin-bottom:0.75rem;";
+  const p = document.createElement("div");
+  p.textContent = explanation;
+  p.style.cssText = "font-size:1rem;line-height:1.5;opacity:0.9;";
+  banner.appendChild(h);
+  banner.appendChild(p);
+  $("tg-line").parentNode.insertBefore(banner, $("tg-line").nextSibling);
+}
+
 async function post(path, body) {
   const res = await fetch(path, {
     method: "POST",
@@ -135,7 +152,7 @@ async function main() {
       resourceAddress: meta.resource_address,
       amount: String(BigInt(meta.threshold)),
       minimumValuePromise: String(BigInt(meta.threshold)),
-      maxFee: "5000",
+      maxFee: "50000",
     });
 
     step("output", "done");
@@ -178,13 +195,54 @@ async function main() {
         "and no production access were granted.";
       return;
     }
-    $("tg-line").textContent =
-      "Access authorized. Check Telegram and submit the join request from your one-time invite; " +
-      "the bot approves only the Telegram account bound to this proof. Expired or revoked access is removed.";
+    const inviteLink = claim.invite_link;
+    if (inviteLink) {
+      $("tg-line").textContent = "Access authorized — your proof was verified on-chain.";
+      const banner = document.createElement("div");
+      banner.style.cssText =
+        "margin:1.5rem auto;padding:1.5rem;text-align:center;border:2px solid #0f0;" +
+        "border-radius:12px;background:rgba(0,255,0,0.08);max-width:400px;";
+      const heading = document.createElement("div");
+      heading.textContent = "You're in.";
+      heading.style.cssText = "font-size:1.4rem;font-weight:700;color:#0f0;margin-bottom:0.75rem;";
+      const a = document.createElement("a");
+      a.href = inviteLink;
+      a.target = "_blank";
+      a.rel = "noopener";
+      a.textContent = "Join the group on Telegram";
+      a.style.cssText =
+        "display:inline-block;padding:0.75rem 2rem;background:#0f0;color:#000;font-weight:700;" +
+        "font-size:1.1rem;border-radius:8px;text-decoration:none;";
+      const hint = document.createElement("div");
+      hint.textContent = "This invite is single-use and bound to your Telegram account.";
+      hint.style.cssText = "margin-top:0.75rem;font-size:0.85rem;opacity:0.7;";
+      banner.appendChild(heading);
+      banner.appendChild(a);
+      banner.appendChild(hint);
+      $("tg-line").parentNode.insertBefore(banner, $("tg-line").nextSibling);
+    } else {
+      $("tg-line").textContent =
+        "Access authorized. Check Telegram — the bot approves only the Telegram account bound to this proof.";
+    }
   } catch (e) {
     const msg = e && e.message ? e.message : String(e);
     if (e && e.code === 4001) {
       return fail("You declined the request in your wallet. Nothing was submitted.");
+    }
+    const lc = msg.toLowerCase();
+    if (lc.includes("insufficientfunds") || lc.includes("insufficient") || lc.includes("insufficient balance")) {
+      return showRejection(
+        "Not enough funds.",
+        "Your wallet does not hold enough of the required token to pass this gate. " +
+        "Unshield more tTARI and try again with /join.",
+      );
+    }
+    if (lc.includes("the bridge refused") || lc.includes("refused the proof")) {
+      return showRejection(
+        "Proof rejected.",
+        "The bridge could not verify your proof against the chain. " +
+        "Make sure your wallet holds the required balance and try again with /join.",
+      );
     }
     fail(msg);
   }

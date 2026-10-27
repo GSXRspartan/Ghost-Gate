@@ -50,9 +50,9 @@
     </ol>
     <p class="error" id="tg-error" hidden></p>
     <p class="hint" style="margin-top:1rem">
-      Proof accepted is not the same as access authorized. Production Telegram admission remains
-      unavailable while Ghost Gate's independent consensus trust bootstrap is pending. In explicit
-      local fixture mode, results are labelled test-only and never change Telegram membership.
+      Proof accepted is not the same as access authorized. The bot re-verifies every proof against
+      the bridge before admitting anyone. In local fixture mode, results are labelled test-only
+      and never change Telegram membership.
     </p>
     <p class="hint" style="margin-top:1rem">
       You'll be asked for one wallet approval to create a publicly-auditable proof output (a public
@@ -61,6 +61,7 @@
     </p>
   </section>
 </main>
+<script src="/vendor/tari-connector.js"></script>
 <script type="module" src="/js/ghost/provider.js"></script>
 <script type="module" src="/telegram/claim.js"></script>
 </body>

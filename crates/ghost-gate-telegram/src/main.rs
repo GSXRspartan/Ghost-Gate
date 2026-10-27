@@ -580,7 +580,7 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
         Ok(format!(
             "To prove you hold enough of the vault's token, open this link in the browser where your wallet lives:\n\n{}\n\nThis link is for you alone, works once, and expires in 10 minutes. I will never ask for your seed, keys, or exact balance — the check is a public minimum, verified by the network.",
             format_args!(
-                "{}/telegram/join/{token}?gate={}&claim={}/claim",
+                "{}/telegram/join?token={token}&gate={}&claim={}/claim",
                 base_url.trim_end_matches('/'),
                 self.gate,
                 claim_base.trim_end_matches('/'),
@@ -675,8 +675,8 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
             )
         } else {
             format!(
-                "Verified: the network attested at least the threshold, and I never learned a balance. Doors open for {} minute(s). I'll ask for a fresh proof when it lapses.",
-                minutes
+                "Verified: the network attested at least the threshold, and I never learned a balance. Doors open for {} minute(s). I'll ask for a fresh proof when it lapses.\n\nJoin the group: {}",
+                minutes, link
             )
         };
         self.telegram
@@ -769,13 +769,25 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
                     .ok();
             }
         } else if text.starts_with("/start") {
-            self.telegram
-                .send_message(
-                    user,
-                    "Send /join to prove you hold enough of the vault's token. I'll ask for a wallet proof, never for your seed or keys, and never for an exact balance.",
-                )
-                .await
-                .ok();
+            let payload = text.strip_prefix("/start").unwrap_or("").trim();
+            if payload == "join" {
+                if let Ok(reply) = self.join(user, base_url, claim_base).await {
+                    self.telegram.send_message(user, &reply).await.ok();
+                } else {
+                    self.telegram
+                        .send_message(user, "Something went wrong minting your join link; try again.")
+                        .await
+                        .ok();
+                }
+            } else {
+                self.telegram
+                    .send_message(
+                        user,
+                        "Send /join to prove you hold enough of the vault's token. I'll ask for a wallet proof, never for your seed or keys, and never for an exact balance.",
+                    )
+                    .await
+                    .ok();
+            }
         }
     }
 
@@ -907,9 +919,9 @@ async fn run() -> i32 {
             .join(FIXTURE_TG_USER, &bridge_base, &format!("http://127.0.0.1:{claim_port}"))
             .await
             .expect("fixture join");
-        let marker = "/telegram/join/";
+        let marker = "token=";
         let token_part = reply[reply.find(marker).expect("join link") + marker.len()..]
-            .split('?')
+            .split('&')
             .next()
             .expect("token")
             .to_string();
@@ -969,6 +981,36 @@ async fn run() -> i32 {
         );
         return serve(bot, &bridge_base, &format!("http://127.0.0.1:{claim_port}"), claim_port, &gate).await;
     }
+    // Live testnet: real Telegram + real bridge, operator-trusted evidence only. The bridge must
+    // be registry-backed and issuing real access sessions (operatorTrustedTestnet tier).
+    let live_testnet = std::env::var("GG_TG_LIVE_TESTNET").ok().as_deref() == Some("1");
+    if live_testnet {
+        let test_chat = match std::env::var("GG_TG_TEST_CHAT_ID")
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok())
+        {
+            Some(value) if value == chat => value,
+            _ => {
+                eprintln!(
+                    "ghost-gate-telegram: live testnet mode requires GG_TG_TEST_CHAT_ID to equal GG_TG_CHAT_ID; \
+                     it can only operate on the explicitly configured private test group"
+                );
+                return 1;
+            }
+        };
+        eprintln!(
+            "ghost-gate-telegram: LIVE TESTNET — real Telegram, real bridge at {bridge}; \
+             operator-trusted-testnet evidence only, not consensus-verified production"
+        );
+        let bot = Bot::new(
+            telegram,
+            HttpBridge::new(&bridge),
+            test_chat,
+            gate.clone(),
+        );
+        return serve(bot, &bridge_base, &format!("http://127.0.0.1:{claim_port}"), claim_port, &gate).await;
+    }
+
     eprintln!(
         "ghost-gate-telegram: production admission is disabled: the Stage 5 consensus trust bootstrap is not independently authenticated"
     );
@@ -1320,11 +1362,11 @@ mod tests {
 
     async fn mint_join(bot: &mut Bot<Wrap, FakeBridge>, user: i64) -> (String, String) {
         let reply = bot.join(user, "http://127.0.0.1:7799", "http://127.0.0.1:7808").await.unwrap();
-        // Extract the token from the reply (the link's path segment before '?').
-        let marker = "/telegram/join/";
+        // Extract the token from the reply (the `token=` query param).
+        let marker = "token=";
         let i = reply.find(marker).expect("the reply embeds the join link") + marker.len();
         let rest = &reply[i..];
-        let token = rest.split('?').next().expect("token before query").to_string();
+        let token = rest.split('&').next().expect("token value").to_string();
         (token, reply)
     }
 
@@ -1642,6 +1684,6 @@ mod tests {
         bot.claim(&token, "proofs4").await.expect("granted");
         let reply = bot.join(24, "http://127.0.0.1:7799", "http://127.0.0.1:7808").await.unwrap();
         assert!(!reply.contains("already verified"), "the dead session is not claimed as live: {reply}");
-        assert!(reply.contains("/telegram/join/"), "a fresh join link is minted: {reply}");
+        assert!(reply.contains("/telegram/join?token="), "a fresh join link is minted: {reply}");
     }
 }
