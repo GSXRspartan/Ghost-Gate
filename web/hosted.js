@@ -111,8 +111,58 @@ async function requestChallenge() {
     const expires = new Date(issued.challenge.expiresUnix * 1000).toLocaleTimeString();
     $("challenge-status").textContent = `Challenge issued; it expires at ${expires}. No wallet proof or fee was requested.`;
     $("verification-status").textContent = "Challenge is live, but no eligible proof has been submitted.";
+    $("submit-proof").disabled = false;
+    $("proof-status").textContent = "Challenge ready. Click Submit proof to build and verify your holdings.";
   } catch (error) { $("challenge-status").textContent = error.message; }
   finally { refreshChallengeAvailability(); }
+}
+
+async function submitProof() {
+  if (!state.challenge || !state.provider || !state.gate) return;
+  $("submit-proof").disabled = true;
+  $("proof-status").textContent = "Approve the proof output in your wallet — it is public and permanent.";
+  try {
+    const gate = state.gate;
+    const built = await state.provider.approveAndBuildProof("credential", {
+      resourceAddress: gate.resourceAddress,
+      amount: String(BigInt(gate.thresholdRaw)),
+      minimumValuePromise: String(BigInt(gate.thresholdRaw)),
+      maxFee: "50000",
+    });
+    $("proof-status").textContent = "Now sign the gate's challenge in your wallet.";
+    const ownership = await state.provider.signChallenge(built.substateId, state.challenge.nonce);
+    $("proof-status").textContent = "The bridge is verifying your proof against chain state…";
+    const result = await api(gatePath("proof"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        nonce: state.challenge.nonce,
+        proof: {
+          substate_id: built.substateId,
+          public_key: ownership.publicKey,
+          public_nonce: ownership.publicNonce,
+          signature: ownership.signature,
+          session_commitment: state.challenge.sessionCommitment,
+        },
+      }),
+    });
+    if (result.verdict === "Verified" || result.state === "accepted") {
+      $("proof-status").textContent = "Proof verified — access granted.";
+      $("verification-status").textContent = "ACCESS GRANTED: the bridge verified your on-chain proof.";
+    } else if (result.verdict === "Pending") {
+      $("proof-status").textContent = "Proof submitted and pending. Check back shortly.";
+    } else {
+      $("proof-status").textContent = `Proof rejected: ${result.verdict || result.refused || "unknown reason"}.`;
+    }
+    state.challenge = null;
+  } catch (error) {
+    const msg = error && error.message ? error.message : String(error);
+    if (error && error.code === 4001) {
+      $("proof-status").textContent = "You declined the request in your wallet. Nothing was submitted.";
+    } else {
+      $("proof-status").textContent = `Proof failed: ${msg}`;
+    }
+  }
 }
 
 async function init() {
@@ -129,6 +179,7 @@ async function init() {
 $("gate").addEventListener("change", selectedGate);
 $("connect").addEventListener("click", connect);
 $("challenge").addEventListener("click", requestChallenge);
+$("submit-proof").addEventListener("click", submitProof);
 $("disconnect").addEventListener("click", () => disconnect());
 $("protected").addEventListener("click", checkProtected);
 $("logout").addEventListener("click", logout);

@@ -49,13 +49,21 @@
     </section>
 
     <section class="card">
+      <h2>Submit proof</h2>
+      <p class="simple">After the challenge is ready, your wallet builds and signs a proof of holdings. No funds leave your wallet.</p>
+      <p class="technical" hidden>The proof output (minimumValuePromise) is created on-chain, then the ownership signature is verified by the bridge through the Worker's trusted-verify relay.</p>
+      <button id="submit-proof" type="button" class="primary" disabled>Submit proof</button>
+      <p id="proof-status" class="muted">Request a challenge first.</p>
+    </section>
+
+    <section class="card">
       <h2>Eligibility verification</h2>
       <p id="verification-status">No authorization has been issued.</p>
-      <p class="warning">Hosted credential verification remains unavailable until Ghost Gate independently validates current Esmeralda committee/finality evidence. A wallet connection, signature, claimed balance, or indexer assertion alone cannot open this gate.</p>
       <button id="protected" type="button">Check protected area</button>
       <button id="logout" type="button">Log out of this browser</button>
     </section>
   </main>
+  <script src="/vendor/tari-connector.js"></script>
   <script type="module" src="/hosted.js"></script>
 </body>
 </html>

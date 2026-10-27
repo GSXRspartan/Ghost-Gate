@@ -2922,6 +2922,7 @@ dependencies = [
  "blake2 0.10.6",
  "ghost-gate-core",
  "ghost-gate-registry",
+ "ghost-gate-verifier",
  "hex",
  "rand 0.10.3",
  "serde",

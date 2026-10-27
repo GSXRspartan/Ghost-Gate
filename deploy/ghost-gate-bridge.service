@@ -1,0 +1,29 @@
+[Unit]
+Description=Ghost Gate Bridge (Esmeralda credential verification)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ghostgate
+Group=ghostgate
+WorkingDirectory=/opt/ghost-gate
+ExecStart=/opt/ghost-gate/bin/ghost-gate-bridge
+EnvironmentFile=/opt/ghost-gate/etc/ghost-gate.env
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/opt/ghost-gate/data
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ghost-gate-bridge
+
+[Install]
+WantedBy=multi-user.target

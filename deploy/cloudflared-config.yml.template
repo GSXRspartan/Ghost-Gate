@@ -1,0 +1,26 @@
+# Cloudflare Tunnel configuration for Ghost Gate VPS
+# Copy to /opt/ghost-gate/etc/cloudflared-config.yml
+# Replace TUNNEL_ID and domain names.
+
+tunnel: TUNNEL_ID_HERE
+credentials-file: /opt/ghost-gate/etc/cloudflared-tunnel.json
+
+ingress:
+  # Bridge: credential verification, challenge, gate metadata.
+  # The CF Worker's trustedVerify() calls this for proof verification.
+  # Also serves join.html with bridge routes for the Telegram flow.
+  - hostname: bridge.DOMAIN_HERE
+    service: http://127.0.0.1:7899
+    originRequest:
+      noTLSVerify: false
+      connectTimeout: 10s
+
+  # Telegram claim endpoint
+  - hostname: claim.DOMAIN_HERE
+    service: http://127.0.0.1:7808
+    originRequest:
+      noTLSVerify: false
+      connectTimeout: 10s
+
+  # Catch-all: reject unmatched hostnames
+  - service: http_status:404

@@ -307,6 +307,7 @@ fn main() -> ExitCode {
                             eprintln!("ghost-gate-bridge: {e}");
                             return ExitCode::FAILURE;
                         }
+                        configure_tunnel_support(&mut bridge);
                         let recovered = runtime.block_on(bridge.recover_pending_jobs());
                         if recovered > 0 { println!("  replay recovery: resumed {recovered} durable Ootle finality job(s)"); }
                         runtime.block_on(ghost_gate_bridge::server::serve(&config.bind, bridge))
@@ -326,6 +327,7 @@ fn main() -> ExitCode {
                             eprintln!("ghost-gate-bridge: {e}");
                             return ExitCode::FAILURE;
                         }
+                        configure_tunnel_support(&mut bridge);
                         let recovered = runtime.block_on(bridge.recover_pending_jobs());
                         if recovered > 0 { println!("  replay recovery: resumed {recovered} durable Ootle finality job(s)"); }
                         runtime.block_on(ghost_gate_bridge::server::serve(&config.bind, bridge))
@@ -348,6 +350,7 @@ fn main() -> ExitCode {
                 eprintln!("ghost-gate-bridge: {e}");
                 return ExitCode::FAILURE;
             }
+            configure_tunnel_support(&mut bridge);
             let recovered = runtime.block_on(bridge.recover_pending_jobs());
             if recovered > 0 { println!("  replay recovery: resumed {recovered} durable Ootle finality job(s)"); }
             runtime.block_on(ghost_gate_bridge::server::serve(&config.bind, bridge))
@@ -794,4 +797,30 @@ where
         snapshot.revoked_session_prefixes.len()
     );
     Ok(())
+}
+
+fn configure_tunnel_support<W, R, X, XR>(
+    bridge: &mut Bridge<W, R, X, XR>,
+) where
+    W: ghost_gate_bridge::wallet::WalletChannel,
+    R: ghost_gate_bridge::credential::ChainReader,
+    X: ghost_gate_bridge::xtm::XtmChannel,
+    XR: ghost_gate_bridge::xtm::XtmChainReader,
+{
+    if let Ok(hosts) = std::env::var("GG_BRIDGE_PERMITTED_HOSTS") {
+        for host in hosts.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            bridge.permitted_hosts.insert(host.to_lowercase());
+            println!("  permitted host (tunnel): {host}");
+        }
+    }
+
+    let token = std::env::var("GG_VERIFIER_TOKEN").ok().filter(|v| !v.is_empty());
+    let req_key = std::env::var("GG_VERIFIER_REQUEST_KEY").ok().filter(|v| !v.is_empty());
+    let resp_key = std::env::var("GG_VERIFIER_RESPONSE_KEY").ok().filter(|v| !v.is_empty());
+    if token.is_some() && req_key.is_some() && resp_key.is_some() {
+        bridge.hosted_verifier_token = token;
+        bridge.hosted_verifier_request_key = req_key;
+        bridge.hosted_verifier_response_key = resp_key;
+        println!("  hosted verifier adapter: enabled (POST /v1/hosted/verify)");
+    }
 }

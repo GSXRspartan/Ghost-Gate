@@ -127,6 +127,12 @@ pub struct Bridge<
     /// derived tier: the default trusts no indexer and caps at `Production` (so it imposes no cap
     /// on its own). The bridge binary parses the env into this once at startup.
     pub trust_policy: ghost_gate_registry::TrustPolicy,
+    /// Hosted-verifier adapter: when all three are set, the bridge serves `/v1/hosted/verify`
+    /// using the same HMAC contract the standalone hosted verifier speaks, but runs the real
+    /// `CredentialVerifier::verify` instead of returning UNKNOWN.
+    pub hosted_verifier_token: Option<String>,
+    pub hosted_verifier_request_key: Option<String>,
+    pub hosted_verifier_response_key: Option<String>,
 }
 
 impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChannel, XR: crate::xtm::XtmChainReader>
@@ -218,6 +224,9 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             xtm_chain,
             component_session: None,
             trust_policy: ghost_gate_registry::TrustPolicy::default(),
+            hosted_verifier_token: None,
+            hosted_verifier_request_key: None,
+            hosted_verifier_response_key: None,
         }
     }
 
@@ -250,6 +259,9 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             xtm_chain,
             component_session: None,
             trust_policy: ghost_gate_registry::TrustPolicy::default(),
+            hosted_verifier_token: None,
+            hosted_verifier_request_key: None,
+            hosted_verifier_response_key: None,
         }
     }
 }
@@ -362,6 +374,9 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R, crate::xt
             xtm_chain: None,
             component_session: None,
             trust_policy: ghost_gate_registry::TrustPolicy::default(),
+            hosted_verifier_token: None,
+            hosted_verifier_request_key: None,
+            hosted_verifier_response_key: None,
         }
     }
 }
@@ -398,6 +413,9 @@ impl<W: WalletChannel, X: crate::xtm::XtmChannel, XR: crate::xtm::XtmChainReader
             xtm_chain,
             component_session: None,
             trust_policy: ghost_gate_registry::TrustPolicy::default(),
+            hosted_verifier_token: None,
+            hosted_verifier_request_key: None,
+            hosted_verifier_response_key: None,
         }
     }
 }
@@ -433,6 +451,9 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             xtm_chain,
             component_session: None,
             trust_policy: ghost_gate_registry::TrustPolicy::default(),
+            hosted_verifier_token: None,
+            hosted_verifier_request_key: None,
+            hosted_verifier_response_key: None,
         }
     }
 }
@@ -601,6 +622,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                     None => Response::error(503, "GG: this bridge is not registry-backed; no access plane"),
                 }
             }
+            Route::HostedVerify => self.hosted_verify(request).await,
             Route::NotFound => Response::error(404, "GG: no such route"),
         }
     }
@@ -863,6 +885,97 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
         }
     }
 
+    /// Hosted-verifier adapter: accepts the same `POST /v1/hosted/verify` contract the
+    /// standalone hosted verifier speaks, but runs the real `CredentialVerifier::verify`
+    /// instead of returning UNKNOWN. This lets the CF Worker call the bridge through the
+    /// tunnel without any Worker-side code changes.
+    async fn hosted_verify(&mut self, request: &Request) -> Response {
+        use ghost_gate_verifier::hosted::{
+            self, HostedVerdict, HostedVerificationRequest, HostedVerificationResult,
+        };
+        let (Some(token), Some(req_key), Some(resp_key)) = (
+            self.hosted_verifier_token.clone(),
+            self.hosted_verifier_request_key.clone(),
+            self.hosted_verifier_response_key.clone(),
+        ) else {
+            return Response::error(503, "GG: hosted verifier adapter is not configured");
+        };
+
+        let auth = request.authorization.as_deref().unwrap_or("");
+        if auth != format!("Bearer {}", token) {
+            return Response::error(401, r#"{"error":"GG: verifier caller is not authorized"}"#);
+        }
+
+        let hv_req: HostedVerificationRequest = match serde_json::from_str(&request.body) {
+            Ok(v) => v,
+            Err(_) => return Response::error(400, r#"{"error":"GG: invalid hosted verifier request"}"#),
+        };
+
+        let req_sig = request.verifier_request_signature.as_deref().unwrap_or("");
+        let canonical = hosted::canonical_request(&hv_req);
+        if !hosted::verify_hmac_sha256_hex(req_sig, req_key.as_bytes(), canonical.as_bytes()) {
+            return Response::error(401, r#"{"error":"GG: verifier request signature is invalid"}"#);
+        }
+
+        if let Err(_) = hv_req.validate() {
+            return Response::error(400, r#"{"error":"GG: invalid hosted verifier request"}"#);
+        }
+
+        let vid = hosted::verification_id(&hv_req);
+
+        let proof_json = serde_json::to_string(&hv_req.proof).unwrap_or_default();
+        let parsed: crate::credential::CredentialProofRequest = match serde_json::from_str(&proof_json) {
+            Ok(v) => v,
+            Err(_) => {
+                let result = HostedVerificationResult {
+                    nonce: hv_req.nonce.clone(), tenant: hv_req.tenant.clone(),
+                    gate_id: hv_req.gate_id.clone(), relying_site: hv_req.relying_site.clone(),
+                    network: hv_req.network, resource_address: hv_req.resource_address.clone(),
+                    threshold_raw: hv_req.threshold_raw.clone(), policy_version: hv_req.policy_version.clone(),
+                    proof_digest: hv_req.proof_digest.clone(), verdict: HostedVerdict::Rejected,
+                    verification_id: vid,
+                };
+                let body = serde_json::to_string(&result).unwrap_or_default();
+                let sig = hosted::sign_result(&result, resp_key.as_bytes());
+                return Response::json_with_header(200, &body, "X-GG-Verifier-Signature", &sig);
+            }
+        };
+
+        let gate_id = &hv_req.gate_id;
+        let gate = match self.gates.get(gate_id).cloned() {
+            Some(g) => g,
+            None => return Response::error(404, r#"{"error":"GG: no such gate"}"#),
+        };
+        let chain = match self.chain.as_ref() {
+            Some(c) => c,
+            None => return Response::error(503, r#"{"error":"GG: no chain reader configured"}"#),
+        };
+
+        let verifier = crate::credential::CredentialVerifier {
+            gate_id,
+            network: gate.network,
+            threshold: gate.threshold(),
+            resource: &gate.resource().copied().unwrap(),
+            challenge_string: &parsed.challenge_nonce,
+        };
+        let verdict = match verifier.verify(chain, &parsed).await {
+            Ok(_receipt) => HostedVerdict::Verified,
+            Err(_) => HostedVerdict::Rejected,
+        };
+
+        let result = HostedVerificationResult {
+            nonce: hv_req.nonce.clone(), tenant: hv_req.tenant.clone(),
+            gate_id: hv_req.gate_id.clone(), relying_site: hv_req.relying_site.clone(),
+            network: hv_req.network, resource_address: hv_req.resource_address.clone(),
+            threshold_raw: hv_req.threshold_raw.clone(), policy_version: hv_req.policy_version.clone(),
+            proof_digest: hv_req.proof_digest.clone(), verdict,
+            verification_id: vid,
+        };
+        let body = serde_json::to_string(&result).unwrap_or_default();
+        let sig = hosted::sign_result(&result, resp_key.as_bytes());
+        Response::json_with_header(200, &body, "X-GG-Verifier-Signature", &sig)
+    }
+
     /// Serves one of the three static files this bridge is willing to serve.
     ///
     /// `no-store` on every asset because a cached `app.js` from a previous run would be a stale client
@@ -910,6 +1023,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                     _ => "text/javascript; charset=utf-8",
                 },
                 body: String::from_utf8_lossy(&bytes).to_string(),
+                extra_headers: Vec::new(),
             },
             Err(_) => Response::error(
                 404,
@@ -2048,9 +2162,7 @@ mod tests {
     fn credential_bridge(wallet: FakeWallet, chain: FakeChain) -> Bridge<FakeWallet, FakeChain> {
         let mut gates = GateRegistry::new();
         gates.register("g1", binding()).unwrap();
-        // The credential route is the Telegram membership path, so this fixture's gate is scoped
-        // for Telegram. The website-only refusal has its own test.
-        gates.set_use_mode("g1", "telegram");
+        gates.set_use_mode("g1", "both");
         Bridge::with_chain_reader(
             gates,
             wallet,
@@ -2114,6 +2226,8 @@ mod tests {
             query: Default::default(),
             body: String::new(),
             attempt: None,
+            authorization: None,
+            verifier_request_signature: None,
         }
     }
 
@@ -2126,6 +2240,8 @@ mod tests {
             query: Default::default(),
             body: body.to_string(),
             attempt: None,
+            authorization: None,
+            verifier_request_signature: None,
         }
     }
 
@@ -2179,6 +2295,8 @@ mod tests {
                 query: Default::default(),
                 body: "{}".into(),
                 attempt: None,
+                authorization: None,
+                verifier_request_signature: None,
             };
             assert_eq!(b.handle(&req).await.status, 404, "{path}");
         }
@@ -2521,6 +2639,8 @@ mod tests {
                 query: Default::default(),
                 body: body.into(),
                 attempt: None,
+                authorization: None,
+                verifier_request_signature: None,
             };
             let r = b.handle(&req).await;
             assert_eq!(r.status, 403, "{method} {path}: {}", r.body);
@@ -2546,6 +2666,8 @@ mod tests {
             host: Some("127.0.0.1:7799".into()),
             query: Default::default(),
             attempt: None,
+            authorization: None,
+            verifier_request_signature: None,
             body: serde_json::json!({
                 "gate_id": "g1",
                 "challenge_nonce": nonce,
@@ -2572,6 +2694,8 @@ mod tests {
                 query: Default::default(),
                 body: "{}".into(),
                 attempt: None,
+                authorization: None,
+                verifier_request_signature: None,
             };
             let r = b.handle(&req).await;
             assert_eq!(r.status, 200, "{host}: {}", r.body);
@@ -2585,6 +2709,8 @@ mod tests {
             query: Default::default(),
             body: "{}".into(),
             attempt: None,
+            authorization: None,
+            verifier_request_signature: None,
         };
         assert_eq!(b.handle(&req).await.status, 200);
     }
@@ -3313,6 +3439,8 @@ mod tests {
             query: Default::default(),
             body: body.to_string(),
             attempt: None,
+            authorization: None,
+            verifier_request_signature: None,
         }
     }
 
@@ -3463,5 +3591,167 @@ mod tests {
 
         // nonce1 is consumed
         assert!(b.challenges.check_live(&nonce1_bytes, &session_bytes).is_err());
+    }
+
+    #[tokio::test]
+    async fn hosted_verify_adapter_accepts_a_valid_hmac_authenticated_proof() {
+        use ghost_gate_verifier::hosted::{
+            self, HostedVerificationRequest, HostedVerdict,
+        };
+
+        let token = "test-bearer-token";
+        let req_key = "test-request-key";
+        let resp_key = "test-response-key";
+
+        let res = *binding().resource().unwrap();
+        let sk = RistrettoSecretKey::random(&mut rng());
+        let key_bytes = {
+            let pk = RistrettoPublicKey::from_secret_key(&sk);
+            let mut b = [0u8; 32];
+            b.copy_from_slice(pk.as_bytes());
+            b
+        };
+        let substate_id = format!(
+            "utxo_{}_2c713522a4aaf79f2b219d869b5033d3d71d63c0537e5e0bbed2d717d8b2a67e",
+            hex::encode([7u8; 32])
+        );
+
+        let mut b = credential_bridge(
+            FakeWallet::new(),
+            FakeChain::with(substate_id.clone(), 50_000, key_bytes),
+        );
+        b.hosted_verifier_token = Some(token.into());
+        b.hosted_verifier_request_key = Some(req_key.into());
+        b.hosted_verifier_response_key = Some(resp_key.into());
+
+        let nonce = hex::encode(crate::session::random_nonce());
+        let session = hex::encode(crate::session::random_nonce().into_iter().chain(crate::session::random_nonce()).collect::<Vec<_>>());
+
+        let message = crate::credential::ownership_proof_message(
+            ghost_gate_core::network::LOCALNET,
+            &res,
+            &substate_id,
+            &nonce,
+        );
+        let signature = SchnorrSignature::<
+            RistrettoPublicKey,
+            RistrettoSecretKey,
+            SchnorrSigChallenge,
+        >::sign(&sk, &message, &mut rng())
+        .unwrap();
+        let pk = RistrettoPublicKey::from_secret_key(&sk);
+
+        let hv_req = HostedVerificationRequest {
+            nonce: "a".repeat(64),
+            tenant: "default".into(),
+            gate_id: "g1".into(),
+            relying_site: "https://gate.example".into(),
+            network: ghost_gate_core::network::LOCALNET,
+            resource_address: hex::encode(res.as_bytes()),
+            threshold_raw: "10000".into(),
+            policy_version: "v1".into(),
+            proof_digest: "b".repeat(64),
+            proof: serde_json::json!({
+                "gate_id": "g1",
+                "challenge_nonce": nonce,
+                "session_commitment": session,
+                "substate_id": substate_id,
+                "public_key": hex::encode(pk.as_bytes()),
+                "public_nonce": hex::encode(signature.get_public_nonce().as_bytes()),
+                "signature": hex::encode(signature.get_signature().as_bytes()),
+            }),
+        };
+
+        let canonical = hosted::canonical_request(&hv_req);
+        let req_sig = hosted::hmac_sha256_hex(req_key.as_bytes(), canonical.as_bytes());
+
+        let request = Request {
+            method: "POST",
+            path: "/v1/hosted/verify".into(),
+            origin: None,
+            host: Some("127.0.0.1:7899".into()),
+            query: Default::default(),
+            body: serde_json::to_string(&hv_req).unwrap(),
+            attempt: None,
+            authorization: Some(format!("Bearer {token}")),
+            verifier_request_signature: Some(req_sig),
+        };
+
+        let r = b.handle(&request).await;
+        assert_eq!(r.status, 200, "hosted verify accepted: {}", r.body);
+
+        let result: hosted::HostedVerificationResult =
+            serde_json::from_str(&r.body).expect("valid result JSON");
+        assert_eq!(result.verdict, HostedVerdict::Verified, "proof is Verified");
+        assert_eq!(result.gate_id, "g1");
+        assert_eq!(result.tenant, "default");
+        assert_eq!(result.nonce, "a".repeat(64));
+
+        let resp_sig = r.extra_headers.iter()
+            .find(|(k, _)| k == "X-GG-Verifier-Signature")
+            .map(|(_, v)| v.as_str())
+            .expect("response has X-GG-Verifier-Signature");
+        assert!(
+            hosted::verify_hmac_sha256_hex(resp_sig, resp_key.as_bytes(), hosted::canonical_result(&result).as_bytes()),
+            "response HMAC is valid"
+        );
+    }
+
+    #[tokio::test]
+    async fn hosted_verify_rejects_wrong_bearer_token() {
+        let mut b = credential_bridge(FakeWallet::new(), FakeChain { outputs: Default::default() });
+        b.hosted_verifier_token = Some("correct-token".into());
+        b.hosted_verifier_request_key = Some("k".into());
+        b.hosted_verifier_response_key = Some("k".into());
+
+        let request = Request {
+            method: "POST",
+            path: "/v1/hosted/verify".into(),
+            origin: None,
+            host: Some("127.0.0.1:7899".into()),
+            query: Default::default(),
+            body: "{}".into(),
+            attempt: None,
+            authorization: Some("Bearer wrong-token".into()),
+            verifier_request_signature: None,
+        };
+        let r = b.handle(&request).await;
+        assert_eq!(r.status, 401, "wrong token is refused: {}", r.body);
+    }
+
+    #[tokio::test]
+    async fn hosted_verify_rejects_tampered_request_hmac() {
+        use ghost_gate_verifier::hosted::{self, HostedVerificationRequest};
+
+        let token = "test-token";
+        let req_key = "test-key";
+
+        let mut b = credential_bridge(FakeWallet::new(), FakeChain { outputs: Default::default() });
+        b.hosted_verifier_token = Some(token.into());
+        b.hosted_verifier_request_key = Some(req_key.into());
+        b.hosted_verifier_response_key = Some("resp-key".into());
+
+        let hv_req = HostedVerificationRequest {
+            nonce: "a".repeat(64), tenant: "t".into(), gate_id: "g1".into(),
+            relying_site: "https://x.example".into(), network: 0,
+            resource_address: "r".into(), threshold_raw: "1".into(),
+            policy_version: "v1".into(), proof_digest: "b".repeat(64),
+            proof: serde_json::json!({}),
+        };
+
+        let request = Request {
+            method: "POST",
+            path: "/v1/hosted/verify".into(),
+            origin: None,
+            host: Some("127.0.0.1:7899".into()),
+            query: Default::default(),
+            body: serde_json::to_string(&hv_req).unwrap(),
+            attempt: None,
+            authorization: Some(format!("Bearer {token}")),
+            verifier_request_signature: Some("deadbeef".repeat(8)),
+        };
+        let r = b.handle(&request).await;
+        assert_eq!(r.status, 401, "tampered HMAC is refused: {}", r.body);
+        assert!(r.body.contains("signature is invalid"), "{}", r.body);
     }
 }

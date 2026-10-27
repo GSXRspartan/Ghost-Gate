@@ -526,7 +526,7 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
     }
 
     /// `/join`: mints a single-use token bound to this Telegram account.
-    pub async fn join(&mut self, user: i64, base_url: &str, claim_base: &str) -> Result<String, String> {
+    pub async fn join(&mut self, user: i64, base_url: &str, claim_base: &str, bridge_public_url: Option<&str>) -> Result<String, String> {
         // A user rejoining while a grant is live gets told, rather than silently minting a second
         // proof obligation. A server-backed grant is ASKED, not trusted from memory: if the session
         // was revoked or expired while the bot was looking away, the user simply rejoins.
@@ -579,12 +579,18 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
         );
         Ok(format!(
             "To prove you hold enough of the vault's token, open this link in the browser where your wallet lives:\n\n{}\n\nThis link is for you alone, works once, and expires in 10 minutes. I will never ask for your seed, keys, or exact balance — the check is a public minimum, verified by the network.",
-            format_args!(
-                "{}/telegram/join?token={token}&gate={}&claim={}/claim",
-                base_url.trim_end_matches('/'),
-                self.gate,
-                claim_base.trim_end_matches('/'),
-            )
+            {
+                let base = format!(
+                    "{}/telegram/join?token={token}&gate={}&claim={}/claim",
+                    base_url.trim_end_matches('/'),
+                    self.gate,
+                    claim_base.trim_end_matches('/'),
+                );
+                match bridge_public_url {
+                    Some(url) => format!("{base}&bridge={}", url.trim_end_matches('/')),
+                    None => base,
+                }
+            }
         ))
     }
 
@@ -751,7 +757,7 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
     }
 
     /// Acts on one update: commands and no-op resends.
-    pub async fn handle_update(&mut self, update: TgUpdate, base_url: &str, claim_base: &str) {
+    pub async fn handle_update(&mut self, update: TgUpdate, base_url: &str, claim_base: &str, bridge_public_url: Option<&str>) {
         if let Some(request) = update.chat_join_request {
             self.handle_join_request(request).await;
             return;
@@ -760,7 +766,7 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
         let Some(user) = message.from.as_ref().map(|f| f.id) else { return };
         let text = message.text.clone().unwrap_or_default();
         if text.starts_with("/join") {
-            if let Ok(reply) = self.join(user, base_url, claim_base).await {
+            if let Ok(reply) = self.join(user, base_url, claim_base, bridge_public_url).await {
                 self.telegram.send_message(user, &reply).await.ok();
             } else {
                 self.telegram
@@ -771,7 +777,7 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
         } else if text.starts_with("/start") {
             let payload = text.strip_prefix("/start").unwrap_or("").trim();
             if payload == "join" {
-                if let Ok(reply) = self.join(user, base_url, claim_base).await {
+                if let Ok(reply) = self.join(user, base_url, claim_base, bridge_public_url).await {
                     self.telegram.send_message(user, &reply).await.ok();
                 } else {
                     self.telegram
@@ -889,6 +895,7 @@ async fn run() -> i32 {
     let gate = std::env::var("GG_TG_GATE").unwrap_or_else(|_| DEFAULT_GATE.into());
     let claim_port: u16 = std::env::var("GG_TG_CLAIM_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_CLAIM_PORT);
     let bridge_base = std::env::var("GG_JOIN_BASE_URL").unwrap_or_else(|_| bridge.clone());
+    let bridge_public_url: Option<String> = std::env::var("GG_BRIDGE_PUBLIC_URL").ok().filter(|v| !v.is_empty());
 
     // Two arms, because the fixture and real bots are different types (the clients are type
     // parameters, never trait objects), and unifying them would need an extra enum for one
@@ -916,7 +923,7 @@ async fn run() -> i32 {
             gate.clone(),
         );
         let reply = bot
-            .join(FIXTURE_TG_USER, &bridge_base, &format!("http://127.0.0.1:{claim_port}"))
+            .join(FIXTURE_TG_USER, &bridge_base, &format!("http://127.0.0.1:{claim_port}"), bridge_public_url.as_deref())
             .await
             .expect("fixture join");
         let marker = "token=";
@@ -933,7 +940,7 @@ async fn run() -> i32 {
                curl -s -X POST http://127.0.0.1:{claim_port}/claim -H 'Content-Type: application/json' \\
                  -d '{{\"token\":\"{token_part}\",\"proof_id\":\"fixture_smoke\"}}'"
         );
-        return serve(bot, &bridge_base, &format!("http://127.0.0.1:{claim_port}"), claim_port, &gate).await;
+        return serve(bot, &bridge_base, &format!("http://127.0.0.1:{claim_port}"), claim_port, &gate, bridge_public_url.as_deref()).await;
     }
 
     let telegram = TelegramBot::new(&token);
@@ -979,7 +986,7 @@ async fn run() -> i32 {
             test_chat,
             gate.clone(),
         );
-        return serve(bot, &bridge_base, &format!("http://127.0.0.1:{claim_port}"), claim_port, &gate).await;
+        return serve(bot, &bridge_base, &format!("http://127.0.0.1:{claim_port}"), claim_port, &gate, bridge_public_url.as_deref()).await;
     }
     // Live testnet: real Telegram + real bridge, operator-trusted evidence only. The bridge must
     // be registry-backed and issuing real access sessions (operatorTrustedTestnet tier).
@@ -1008,7 +1015,7 @@ async fn run() -> i32 {
             test_chat,
             gate.clone(),
         );
-        return serve(bot, &bridge_base, &format!("http://127.0.0.1:{claim_port}"), claim_port, &gate).await;
+        return serve(bot, &bridge_base, &format!("http://127.0.0.1:{claim_port}"), claim_port, &gate, bridge_public_url.as_deref()).await;
     }
 
     eprintln!(
@@ -1029,6 +1036,7 @@ pub async fn serve<T: TelegramApi, B: BridgeClient>(
     claim_base: &str,
     claim_port: u16,
     gate: &str,
+    bridge_public_url: Option<&str>,
 ) -> i32 {
     let listener = match tokio::net::TcpListener::bind(("127.0.0.1", claim_port)).await {
         Ok(l) => l,
@@ -1100,7 +1108,7 @@ pub async fn serve<T: TelegramApi, B: BridgeClient>(
                             if !bot.seen_updates.insert(update.update_id) {
                                 continue; // a resend, not a new command
                             }
-                            bot.handle_update(update, join_base, claim_base).await;
+                            bot.handle_update(update, join_base, claim_base, bridge_public_url).await;
                         }
                     },
                     Err(_) => { /* transient Telegram errors: try again next cycle */ },
@@ -1361,7 +1369,7 @@ mod tests {
     }
 
     async fn mint_join(bot: &mut Bot<Wrap, FakeBridge>, user: i64) -> (String, String) {
-        let reply = bot.join(user, "http://127.0.0.1:7799", "http://127.0.0.1:7808").await.unwrap();
+        let reply = bot.join(user, "http://127.0.0.1:7799", "http://127.0.0.1:7808", None).await.unwrap();
         // Extract the token from the reply (the `token=` query param).
         let marker = "token=";
         let i = reply.find(marker).expect("the reply embeds the join link") + marker.len();
@@ -1527,7 +1535,7 @@ mod tests {
         bot.claim(&token, "proof6").await.unwrap();
 
         // The user rejoins while verified: no second obligation, no second proof.
-        let reply = bot.join(11, "http://127.0.0.1:7799", "http://127.0.0.1:7808").await.unwrap();
+        let reply = bot.join(11, "http://127.0.0.1:7799", "http://127.0.0.1:7808", None).await.unwrap();
         assert!(reply.contains("already verified"), "{reply}");
         assert_eq!(bot.grant_count(), 1);
     }
@@ -1579,7 +1587,7 @@ mod tests {
         let bridge = FakeBridge { answers: HashMap::new(), access: None };
         let (mut bot, _tg) = bot_owned(bridge);
         for u in 0..(MAX_PENDING_TOKENS + 10) {
-            bot.join(u as i64, "http://x", "http://y").await.unwrap();
+            bot.join(u as i64, "http://x", "http://y", None).await.unwrap();
         }
         assert!(
             bot.tokens.len() <= MAX_PENDING_TOKENS,
@@ -1682,7 +1690,7 @@ mod tests {
         let (mut bot, _tg) = bot_owned(bridge);
         let (token, _) = mint_join(&mut bot, 24).await;
         bot.claim(&token, "proofs4").await.expect("granted");
-        let reply = bot.join(24, "http://127.0.0.1:7799", "http://127.0.0.1:7808").await.unwrap();
+        let reply = bot.join(24, "http://127.0.0.1:7799", "http://127.0.0.1:7808", None).await.unwrap();
         assert!(!reply.contains("already verified"), "the dead session is not claimed as live: {reply}");
         assert!(reply.contains("/telegram/join?token="), "a fresh join link is minted: {reply}");
     }

@@ -52,6 +52,10 @@ pub struct Request {
     /// one. Parsed into its own field (rather than kept as a header map) so that only this one
     /// header can ever be read by a route, and so nothing else a client sends is even in memory.
     pub attempt: Option<String>,
+    /// The `Authorization` header, for the hosted-verifier adapter route.
+    pub authorization: Option<String>,
+    /// The `X-GG-Verifier-Request-Signature` header, for the hosted-verifier adapter route.
+    pub verifier_request_signature: Option<String>,
 }
 
 /// A response, ready to serialise.
@@ -60,9 +64,19 @@ pub struct Response {
     pub status: u16,
     pub content_type: &'static str,
     pub body: String,
+    pub extra_headers: Vec<(String, String)>,
 }
 
 impl Response {
+    pub fn json_with_header(status: u16, body: &str, header_name: &str, header_value: &str) -> Self {
+        Self {
+            status,
+            content_type: "application/json",
+            body: body.to_string(),
+            extra_headers: vec![(header_name.to_string(), header_value.to_string())],
+        }
+    }
+
     pub fn json<T: Serialize>(status: u16, value: &T) -> Self {
         // Serialising our own types cannot fail; a failure here would mean a type with a map key that is
         // not a string, which serde_json reports rather than panicking.
@@ -76,6 +90,7 @@ impl Response {
             status,
             content_type: "application/json",
             body,
+            extra_headers: Vec::new(),
         }
     }
 
@@ -114,6 +129,8 @@ pub enum Route<'a> {
     /// That is not cosmetic: a page on any other origin would need CORS, and a CORS-enabled wallet
     /// bridge is a wallet bridge every page can reach.
     Asset(&'a str),
+    /// `POST /v1/hosted/verify` — the hosted-verifier adapter that wraps the credential path.
+    HostedVerify,
     /// No such route.
     NotFound,
 }
@@ -161,6 +178,7 @@ impl<'a> Route<'a> {
             // The Telegram join flow, served same-origin so the credential flow works.
             ("GET", ["telegram", "join"]) => Route::Asset("telegram/join.html"),
             ("GET", ["telegram", "claim.js"]) => Route::Asset("telegram/claim.js"),
+            ("POST", ["v1", "hosted", "verify"]) => Route::HostedVerify,
             _ => Route::NotFound,
         }
     }
@@ -201,6 +219,8 @@ pub fn parse_request(raw: &str) -> Option<Request> {
     let mut origin = None;
     let mut host = None;
     let mut attempt = None;
+    let mut authorization = None;
+    let mut verifier_request_signature = None;
     for line in lines {
         if line.is_empty() {
             break;
@@ -218,6 +238,10 @@ pub fn parse_request(raw: &str) -> Option<Request> {
                 if trimmed.len() == 32 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
                     attempt = Some(trimmed.to_string());
                 }
+            } else if name.eq_ignore_ascii_case("authorization") {
+                authorization = Some(value);
+            } else if name.eq_ignore_ascii_case("x-gg-verifier-request-signature") {
+                verifier_request_signature = Some(value);
             }
         }
     }
@@ -231,6 +255,8 @@ pub fn parse_request(raw: &str) -> Option<Request> {
         host,
         body: raw[body_start..].to_string(),
         attempt,
+        authorization,
+        verifier_request_signature,
     })
 }
 
@@ -278,8 +304,11 @@ pub fn render(response: &Response) -> String {
         503 => "Service Unavailable",
         _ => "OK",
     };
+    let extra = response.extra_headers.iter()
+        .map(|(k, v)| format!("{k}: {v}\r\n"))
+        .collect::<String>();
     format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n{extra}Connection: close\r\n\r\n{}",
         response.status,
         reason,
         response.content_type,

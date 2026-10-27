@@ -6,9 +6,11 @@
  * grant anything by lying — and it doesn't try.
  *
  * Query params (all minted by the bot):
- *   token — the single-use join token
- *   gate  — which registered gate to prove (e.g. "crypt")
- *   claim — the bot's claim endpoint base URL (its own origin; the bot's CORS names ours exactly)
+ *   token  — the single-use join token
+ *   gate   — which registered gate to prove (e.g. "crypt")
+ *   claim  — the bot's claim endpoint base URL (its own origin; the bot's CORS names ours exactly)
+ *   bridge — (optional) the bridge's public URL through the tunnel; when set, gate metadata,
+ *            challenges, and credential proofs are sent there instead of the page's own origin
  */
 
 import { sapientProvider, universeProvider } from "/js/ghost/provider.js";
@@ -36,6 +38,29 @@ const claimUrl = (() => {
     }
   } catch { /* fall through */ }
   return null;
+})();
+const bridgeBase = (() => {
+  const raw = params.get("bridge") || "";
+  if (!raw) return "";
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== "https:") return "";
+    const allowed = document.querySelector('meta[name="gg-trusted-bridges"]');
+    if (allowed) {
+      const origins = allowed.content.split(",").map((s) => s.trim().toLowerCase());
+      if (origins.includes(u.origin.toLowerCase())) return `${u.protocol}//${u.host}`;
+      return "";
+    }
+    const pageParts = location.hostname.toLowerCase().split(".");
+    const bridgeParts = u.hostname.toLowerCase().split(".");
+    if (pageParts.length >= 2 && bridgeParts.length >= 2) {
+      const pageDomain = pageParts.slice(-2).join(".");
+      const bridgeDomain = bridgeParts.slice(-2).join(".");
+      if (pageDomain === bridgeDomain) return `${u.protocol}//${u.host}`;
+    }
+    return "";
+  } catch { /* fall through */ }
+  return "";
 })();
 
 function fail(message) {
@@ -130,7 +155,7 @@ async function main() {
   // The gate's resource and threshold come from the bridge — the page has no opinion.
   let meta;
   try {
-    meta = await fetch(`/gate/${encodeURIComponent(gate)}`).then((r) => r.json());
+    meta = await fetch(`${bridgeBase}/gate/${encodeURIComponent(gate)}`).then((r) => r.json());
     if (!meta.resource_address) throw new Error(meta.error || "not registered");
   } catch (e) {
     return fail(`The gate ${gate} is not available on this bridge: ${e && e.message ? e.message : e}`);
@@ -143,7 +168,7 @@ async function main() {
 
   try {
     step("challenge", "active");
-    const ch = await post(`/gate/${gate}/challenge`, {});
+    const ch = await post(`${bridgeBase}/gate/${gate}/challenge`, {});
     step("challenge", "done");
 
     step("output", "active");
@@ -163,7 +188,7 @@ async function main() {
 
     step("verify", "active");
     $("tg-line").textContent = "The bridge is verifying against chain state…";
-    const verdict = await post(`/gate/${gate}/credential`, {
+    const verdict = await post(`${bridgeBase}/gate/${gate}/credential`, {
       gate_id: gate,
       challenge_nonce: ch.challenge_nonce,
       session_commitment: ch.session_commitment,
