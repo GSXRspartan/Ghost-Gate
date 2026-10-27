@@ -15,6 +15,7 @@
 
 import { sapientProvider, universeProvider } from "/js/ghost/provider.js";
 import { formatAmount } from "/js/ghost/capabilities.js";
+import { trustedBase } from "./trusted-url.js";
 
 const $ = (id) => document.getElementById(id);
 const step = (name, state) => {
@@ -25,42 +26,15 @@ const step = (name, state) => {
 const params = new URLSearchParams(window.location.search);
 const token = params.get("token") || "";
 const gate = params.get("gate") || "crypt";
-// The claim endpoint is the bot's origin. Validated against https and loopback http only: a join
-// link that points your proof receipt at an arbitrary host is a leak vector, and the bot mints
-// these links itself — a tampered one is refused here before any wallet is involved.
+// A query string is not a trust configuration: validate destinations before any wallet request.
 const claimRaw = params.get("claim") || "";
-const claimUrl = (() => {
-  try {
-    const u = new URL(claimRaw);
-    const loopback = u.hostname === "127.0.0.1" || u.hostname === "localhost" || u.hostname === "[::1]" || u.hostname === "::1";
-    if (u.protocol === "https:" || (u.protocol === "http:" && loopback)) {
-      return `${u.protocol}//${u.host}${u.pathname.replace(/\/$/, "")}`;
-    }
-  } catch { /* fall through */ }
-  return null;
-})();
+const configured = name => document.querySelector(`meta[name="${name}"]`)?.content || "";
+const claimBase = trustedBase(claimRaw, configured("gg-trusted-claims"), location.origin, { allowPath: true });
+const claimUrl = claimBase && new URL(claimBase).pathname === "/claim" ? claimBase : null;
 const bridgeBase = (() => {
   const raw = params.get("bridge") || "";
   if (!raw) return "";
-  try {
-    const u = new URL(raw);
-    if (u.protocol !== "https:") return "";
-    const allowed = document.querySelector('meta[name="gg-trusted-bridges"]');
-    if (allowed) {
-      const origins = allowed.content.split(",").map((s) => s.trim().toLowerCase());
-      if (origins.includes(u.origin.toLowerCase())) return `${u.protocol}//${u.host}`;
-      return "";
-    }
-    const pageParts = location.hostname.toLowerCase().split(".");
-    const bridgeParts = u.hostname.toLowerCase().split(".");
-    if (pageParts.length >= 2 && bridgeParts.length >= 2) {
-      const pageDomain = pageParts.slice(-2).join(".");
-      const bridgeDomain = bridgeParts.slice(-2).join(".");
-      if (pageDomain === bridgeDomain) return `${u.protocol}//${u.host}`;
-    }
-    return "";
-  } catch { /* fall through */ }
-  return "";
+  return trustedBase(raw, configured("gg-trusted-bridges"), location.origin);
 })();
 
 function fail(message) {
@@ -89,7 +63,7 @@ function showRejection(heading, explanation) {
 
 async function post(path, body) {
   const res = await fetch(path, {
-    method: "POST",
+    method: "POST", redirect: "error", credentials: "omit",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
@@ -99,6 +73,7 @@ async function post(path, body) {
 }
 
 async function main() {
+  if (bridgeBase === null) return fail("The bridge origin is not trusted by this page.");
   if (!token) return fail("This page needs a join link from the bot. Send /join there first.");
   if (!claimUrl) {
     return fail(
@@ -155,7 +130,7 @@ async function main() {
   // The gate's resource and threshold come from the bridge — the page has no opinion.
   let meta;
   try {
-    meta = await fetch(`${bridgeBase}/gate/${encodeURIComponent(gate)}`).then((r) => r.json());
+    meta = await fetch(`${bridgeBase}/gate/${encodeURIComponent(gate)}`, { redirect: "error", credentials: "omit" }).then((r) => r.json());
     if (!meta.resource_address) throw new Error(meta.error || "not registered");
   } catch (e) {
     return fail(`The gate ${gate} is not available on this bridge: ${e && e.message ? e.message : e}`);
@@ -204,8 +179,8 @@ async function main() {
 
     step("claim", "active");
     $("tg-line").textContent = "Claiming your seat with the bot…";
-    const claimRes = await fetch(`${claimUrl}/claim`, {
-      method: "POST",
+    const claimRes = await fetch(claimUrl, {
+      method: "POST", redirect: "error", credentials: "omit",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ token, proof_id: verdict.proof_id }),
     });

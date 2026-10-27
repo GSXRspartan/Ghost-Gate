@@ -12,9 +12,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<!-- Set by the CF Worker at deploy: comma-separated trusted bridge origins for the &bridge= param.
-     Without this, claim.js falls back to same-registrable-domain validation. -->
+<!-- Configure exact HTTPS origins before staging; blank values fail closed for cross-origin links. -->
 <!-- <meta name="gg-trusted-bridges" content="https://bridge.your-tunnel-domain.example"> -->
+<!-- <meta name="gg-trusted-claims" content="https://claim.your-tunnel-domain.example"> -->
 <title>Ghost Gate — Telegram verification</title>
 <!-- Same design system as the Privacy Lab, so the verification flow reads as one product. -->
 <link rel="stylesheet" href="/lab/lab.css">
