@@ -54,5 +54,8 @@ export function gateFor(catalog, tenant, gateId) {
 }
 
 export function originMatches(request, gate) {
-  return request.headers.get("origin") === gate.relyingSite;
+  const origin = request.headers.get("origin");
+  if (origin !== null) return origin === gate.relyingSite;
+  // Browsers normally omit Origin on same-origin GET requests. Never infer it for writes.
+  return request.method === "GET" && new URL(request.url).origin === gate.relyingSite;
 }

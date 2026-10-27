@@ -138,18 +138,20 @@ async function submitProof() {
       body: JSON.stringify({
         nonce: state.challenge.nonce,
         proof: {
+          gate_id: gate.gateId,
+          challenge_nonce: state.challenge.nonce,
           substate_id: built.substateId,
           public_key: ownership.publicKey,
           public_nonce: ownership.publicNonce,
           signature: ownership.signature,
-          session_commitment: state.challenge.sessionCommitment,
+          session_commitment: "",
         },
       }),
     });
-    if (result.verdict === "Verified" || result.state === "accepted") {
+    if (result.authorized === true && result.state === "authorized") {
       $("proof-status").textContent = "Proof verified — access granted.";
       $("verification-status").textContent = "ACCESS GRANTED: the bridge verified your on-chain proof.";
-    } else if (result.verdict === "Pending") {
+    } else if (result.state === "pending") {
       $("proof-status").textContent = "Proof submitted and pending. Check back shortly.";
     } else {
       $("proof-status").textContent = `Proof rejected: ${result.verdict || result.refused || "unknown reason"}.`;

@@ -956,11 +956,12 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             network: gate.network,
             threshold: gate.threshold(),
             resource: &gate.resource().copied().unwrap(),
-            challenge_string: &parsed.challenge_nonce,
+            challenge_string: &hv_req.nonce,
         };
-        let verdict = match verifier.verify(chain, &parsed).await {
-            Ok(_receipt) => HostedVerdict::Verified,
-            Err(_) => HostedVerdict::Rejected,
+        let verdict = match (parsed.gate_id == hv_req.gate_id && parsed.challenge_nonce == hv_req.nonce)
+            && verifier.verify(chain, &parsed).await.is_ok() {
+            true => HostedVerdict::Verified,
+            false => HostedVerdict::Rejected,
         };
 
         let result = HostedVerificationResult {
@@ -3642,7 +3643,7 @@ mod tests {
         let pk = RistrettoPublicKey::from_secret_key(&sk);
 
         let hv_req = HostedVerificationRequest {
-            nonce: "a".repeat(64),
+            nonce: nonce.clone(),
             tenant: "default".into(),
             gate_id: "g1".into(),
             relying_site: "https://gate.example".into(),
@@ -3685,7 +3686,7 @@ mod tests {
         assert_eq!(result.verdict, HostedVerdict::Verified, "proof is Verified");
         assert_eq!(result.gate_id, "g1");
         assert_eq!(result.tenant, "default");
-        assert_eq!(result.nonce, "a".repeat(64));
+        assert_eq!(result.nonce, nonce);
 
         let resp_sig = r.extra_headers.iter()
             .find(|(k, _)| k == "X-GG-Verifier-Signature")
@@ -3695,6 +3696,20 @@ mod tests {
             hosted::verify_hmac_sha256_hex(resp_sig, resp_key.as_bytes(), hosted::canonical_result(&result).as_bytes()),
             "response HMAC is valid"
         );
+
+        // A valid signature over one challenge must not authorize a different issued nonce,
+        // even when the Worker-authenticated request is otherwise valid.
+        let mut substituted = hv_req.clone();
+        substituted.nonce = "a".repeat(64);
+        let mut replay = request.clone();
+        replay.body = serde_json::to_string(&substituted).unwrap();
+        replay.verifier_request_signature = Some(hosted::hmac_sha256_hex(
+            req_key.as_bytes(), hosted::canonical_request(&substituted).as_bytes(),
+        ));
+        let denied = b.handle(&replay).await;
+        assert_eq!(denied.status, 200);
+        let denied: hosted::HostedVerificationResult = serde_json::from_str(&denied.body).unwrap();
+        assert_eq!(denied.verdict, HostedVerdict::Rejected);
     }
 
     #[tokio::test]

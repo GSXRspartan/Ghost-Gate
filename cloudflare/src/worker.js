@@ -118,7 +118,7 @@ async function trustedVerify(env, verificationRequest) {
   let response;
   try {
     response = await fetch(`${env.GG_VERIFIER_ORIGIN.replace(/\/$/, "")}/v1/hosted/verify`, {
-      method: "POST", headers: {
+      method: "POST", redirect: "error", headers: {
         "content-type": "application/json", authorization: `Bearer ${env.GG_VERIFIER_TOKEN}`,
         "x-gg-verifier-request-signature": requestSignature,
       },
@@ -212,21 +212,26 @@ export default {
       // A same-visitor retry with the exact same evidence returns the original durable job and
       // may safely recontact the verifier. A changed proof is refused by the DO; it cannot turn an
       // ambiguous outcome into another authorization attempt.
-      const verifierInput = { ...reserved.challenge, proofDigest, proof: payload.proof || null };
+      const c = reserved.challenge;
+      const verifierInput = {
+        nonce: c.nonce, tenant: c.tenant, gateId: c.gateId, relyingSite: c.relyingSite,
+        network: c.network, resourceAddress: c.resourceAddress, thresholdRaw: c.thresholdRaw,
+        policyVersion: c.policyVersion, proofDigest, proof: payload.proof || null,
+      };
       const result = await trustedVerify(env, verifierInput);
       if (!verifierMatches(result, verifierInput, proofDigest)) return json(202, { state: "pending", proofId: proofJobId, reason: "verification outcome is unavailable" });
       if (result.verdict === "PENDING" || result.verdict === "UNKNOWN") return json(202, { state: "pending", proofId: proofJobId });
       if (result.verdict === "REJECTED") {
         // A definite rejection is safe to retry against this still-live challenge. Unknown and
         // timeout results never take this release path.
-        await coordinatorCall(env, gate, nonce, "release", { ...binding(gate, nonce, visitorSession), proofJobId });
+        await coordinatorCall(env, gate, nonce, "release", { ...binding(gate, nonce, visitorSession), proofJobId: reserved.proofJobId });
         return json(403, { state: "rejected", authorized: false, reason: "proof was not eligible" });
       }
       const sessionToken = randomId();
       const sessionExpiresUnix = Math.floor(Date.now() / 1000) + gate.sessionTtlSecs;
       const authorizationId = `gg-auth-${nonce}`;
       const authorized = await coordinatorCall(env, gate, nonce, "authorize", {
-        ...binding(gate, nonce, visitorSession), proofJobId, verificationId: result.verificationId,
+        ...binding(gate, nonce, visitorSession), proofJobId: reserved.proofJobId, verificationId: result.verificationId,
         proofDigest, authorizationId, sessionToken, sessionExpiresUnix,
       });
       if (!authorized.ok) return authorized;

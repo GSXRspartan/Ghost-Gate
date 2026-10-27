@@ -65,6 +65,8 @@ export class ReplayCoordinator {
     try { body = await request.json(); } catch { return json(400, { error: "GG: invalid coordinator body" }); }
     if (!validText(body?.visitorSession, 256)) return json(400, { error: "GG: visitor session is missing" });
     const visitorHash = await sha256(body.visitorSession);
+    // Complete all asynchronous work before reading the row and making a state transition.
+    const tokenHash = validText(body?.sessionToken, 256) ? await sha256(body.sessionToken) : null;
     const now = Math.floor(Date.now() / 1000);
     const action = new URL(request.url).pathname.split("/").filter(Boolean).pop();
     const row = this.row();
@@ -87,7 +89,7 @@ export class ReplayCoordinator {
 
     if (!row) return json(404, { error: "GG: replay identity is unknown" });
     if (!this.bindingMatches(row, body, visitorHash)) return json(409, { error: "GG: challenge binding mismatch" });
-    if (row.expires_unix < now && action !== "access") return json(409, { error: "GG: challenge has expired" });
+    if (row.expires_unix <= now && action !== "access" && action !== "revoke") return json(409, { error: "GG: challenge has expired" });
 
     if (action === "reserve") {
       if (!validText(body?.proofJobId, 128) || !/^[0-9a-f]{64}$/i.test(body?.proofDigest || "")) {
@@ -120,16 +122,11 @@ export class ReplayCoordinator {
         || !Number.isInteger(body?.sessionExpiresUnix) || body.sessionExpiresUnix <= now) {
         return json(400, { error: "GG: incomplete verified authorization" });
       }
-      if (row.state === "submitted" && row.proof_job_id === body.proofJobId) {
-        const tokenHash = await sha256(body.sessionToken);
+      if (row.state === "submitted" && row.proof_job_id === body.proofJobId && row.proof_digest === body.proofDigest) {
         this.state.storage.sql.exec(`UPDATE replay_records SET state='authorized', verification_id=?, proof_digest=?, authorization_id=?,
           access_token_hash=?, session_expires_unix=?, updated_unix=? WHERE nonce=? AND state='submitted'`,
           body.verificationId, body.proofDigest, body.authorizationId, tokenHash, body.sessionExpiresUnix, now, row.nonce);
         return json(200, { state: "authorized", authorizationId: body.authorizationId, sessionExpiresUnix: body.sessionExpiresUnix });
-      }
-      if (row.state === "authorized" && row.authorization_id === body.authorizationId
-        && row.verification_id === body.verificationId && row.proof_digest === body.proofDigest) {
-        return json(200, { state: "authorized", authorizationId: row.authorization_id, sessionExpiresUnix: row.session_expires_unix });
       }
       return json(409, { error: "GG: challenge authorization is final" });
     }
@@ -138,7 +135,6 @@ export class ReplayCoordinator {
 
     if (action === "access" || action === "revoke") {
       if (!validText(body?.sessionToken, 256)) return json(401, { authorized: false, error: "GG: session is missing" });
-      const tokenHash = await sha256(body.sessionToken);
       const live = row.state === "authorized" && !row.revoked && row.session_expires_unix > now
         && row.access_token_hash === tokenHash;
       if (action === "access") return json(live ? 200 : 401, { authorized: live, expiresUnix: live ? row.session_expires_unix : 0 });

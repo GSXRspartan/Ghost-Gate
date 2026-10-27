@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import worker from "../src/worker.js";
-import { parseGateCatalog } from "../src/contracts.js";
+import { originMatches, parseGateCatalog } from "../src/contracts.js";
 
 const catalog = JSON.stringify([{ tenant: "tenant-a", gateId: "esm10", relyingSite: "https://gate.example", network: 38, resourceAddress: "resource_test", thresholdRaw: "10000000", divisibility: 6, proofMode: "credential" }]);
 
@@ -15,6 +15,14 @@ test("localhost HTTP is opt-in development configuration only", () => {
   const local = JSON.stringify([{ tenant: "tenant-a", gateId: "esm10", relyingSite: "http://127.0.0.1:8787", network: 38, resourceAddress: "resource_test", thresholdRaw: "10000000" }]);
   assert.throws(() => parseGateCatalog(local));
   assert.equal(parseGateCatalog(local, { allowLocalHttp: true })[0].relyingSite, "http://127.0.0.1:8787");
+});
+
+test("same-origin GET may omit Origin, but writes and foreign origins cannot", () => {
+  const gate = parseGateCatalog(catalog)[0];
+  assert.equal(originMatches(new Request("https://gate.example/api/session"), gate), true);
+  assert.equal(originMatches(new Request("https://gate.example/api/session", { method: "POST" }), gate), false);
+  assert.equal(originMatches(new Request("https://gate.example/api/session", { headers: { origin: "https://evil.example" } }), gate), false);
+  assert.equal(originMatches(new Request("https://evil.example/api/session"), gate), false);
 });
 
 test("hosted Worker sends root to the hosted static entrypoint", async () => {
@@ -111,6 +119,7 @@ test("authenticated verifier result authorizes one durable hosted replay record"
   globalThis.fetch = async (_url, init) => {
     assert.equal(init.headers.authorization, "Bearer verifier-secret");
     const input = JSON.parse(init.body); const { proof, ...signed } = input;
+    assert.deepEqual(Object.keys(input).sort(), ["gateId", "network", "nonce", "policyVersion", "proof", "proofDigest", "relyingSite", "resourceAddress", "tenant", "thresholdRaw"].sort());
     assert.equal(init.headers["x-gg-verifier-request-signature"], await hmac(input, "request-secret"));
     const result = { ...signed, verdict: "VERIFIED", verificationId: "verify-1234567890" };
     return new Response(JSON.stringify(result), { status: 200, headers: { "content-type": "application/json", "x-gg-verifier-signature": await hmac(result, "response-secret") } });
