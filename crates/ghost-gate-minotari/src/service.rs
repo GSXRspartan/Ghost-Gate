@@ -36,7 +36,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::artifact::{XtmProofWire};
+use crate::artifact::XtmProofWire;
 use ghost_gate_bridge::XtmProofArtifact;
 
 /// The proof outcome the wallet service produces.
@@ -77,7 +77,8 @@ pub enum ProveResponseWire {
 
 impl ProveResponseWire {
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_else(|_| r#"{"state":"failed","reason":"internal"}"#.to_string())
+        serde_json::to_string(self)
+            .unwrap_or_else(|_| r#"{"state":"failed","reason":"internal"}"#.to_string())
     }
 }
 
@@ -198,7 +199,10 @@ mod tests {
 
     #[test]
     fn a_zero_fee_function_carries_the_whole_balance() {
-        assert_eq!(largest_affordable_output_value(5_000_000, |_| 0), Some(5_000_000));
+        assert_eq!(
+            largest_affordable_output_value(5_000_000, |_| 0),
+            Some(5_000_000)
+        );
     }
 
     #[test]

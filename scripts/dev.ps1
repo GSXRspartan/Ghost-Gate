@@ -34,19 +34,25 @@ function Get-WalletdInfo {
     $reply.result
 }
 function Get-BridgeBinary {
-    $target = ((cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).target_directory)
-    $candidate = Join-Path $target 'debug\ghost-gate-bridge.exe'
-    if (Test-Path $candidate) { return $candidate }
-    $rustHost = (rustc -vV | Select-String '^host:' | ForEach-Object { $_.ToString().Split(':', 2)[1].Trim() })
-    throw @"
-No native Windows Ghost Gate bridge executable was found.
-  searched: $candidate
-  cargo target directory: $target
-  rust host: $rustHost
-Build separately (the launcher never compiles Rust):
-  cargo build -p ghost-gate-walletd --bin ghost-gate-bridge
-The configured target directory may be a WSL/Linux path; a native PowerShell launcher requires ghost-gate-bridge.exe.
-"@
+    $target = (
+        (cargo metadata --no-deps --format-version 1 |
+        ConvertFrom-Json).target_directory
+    )
+
+    $candidates = @(
+    (Join-Path $target 'release\ghost-gate-bridge.exe'),
+    'C:\home\pdark\gg-ootle-target\release\ghost-gate-bridge.exe',
+    (Join-Path $target 'debug\ghost-gate-bridge.exe')
+)
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            Write-Host "Using bridge: $candidate"
+            return $candidate
+        }
+    }
+
+    throw "No native Windows Ghost Gate bridge executable found."
 }
 function Assert-Configuration {
     if (!$env:GG_BRIDGE_GATES) { $env:GG_BRIDGE_GATES = 'esm10=:resource_0101010101010101010101010101010101010101010101010101010101010101:10000000:6:tTARI' }

@@ -92,9 +92,20 @@
           <label>Deployment
             <select id="new-app-production">
               <option value="true">Production (test-lane gates cannot be enabled)</option>
-              <option value="false">Test / demo (test-lane gates allowed)</option>
+              <option value="false" selected>Test / demo (test-lane gates allowed)</option>
             </select>
           </label>
+          <label>Network
+            <select id="new-app-network">
+              <option value="esmeralda" selected>Esmeralda (testnet, byte 38)</option>
+              <option value="localnet">Localnet (byte 16)</option>
+              <option value="igor">Igor</option>
+              <option value="nextnet">Nextnet</option>
+              <option value="stagenet">Stagenet</option>
+              <option value="mainnet">Mainnet</option>
+            </select>
+          </label>
+          <label>Genesis hash (ledger identity, hex) <input id="new-app-genesis" placeholder="the ledger's genesis identity, hex"></label>
           <button id="new-app-go" class="btn primary">Create application</button>
         </div>
         <div id="apps-list"></div>

@@ -13,8 +13,12 @@ let actor = null;
 let stepupValid = false;
 const ORIGIN = window.location.origin;
 
-function set(status) {
-  $("admin-status").textContent = status;
+function set(status, isError) {
+  const el = $("admin-status");
+  el.textContent = status;
+  el.style.cssText = isError
+    ? "border:2px solid #c00;background:#fee;color:#900;padding:8px 12px;border-radius:6px;margin:8px 0;font-weight:600"
+    : "border:none;background:none;color:inherit;padding:0;margin:0;font-weight:normal";
 }
 function fail(id, msg) {
   const el = $(id);
@@ -25,6 +29,15 @@ function clearFail(id) {
   const el = $(id);
   el.hidden = true;
   el.textContent = "";
+}
+function appMsg(app, msg, isError) {
+  const el = $(`msg-${app.applicationId}`);
+  if (!el) { set(msg, isError); return; }
+  el.textContent = msg;
+  el.style.cssText = isError
+    ? "border:2px solid #c00;background:#fee;color:#900;padding:8px 12px;border-radius:6px;margin:8px 0;font-weight:600"
+    : "color:#0a0;padding:4px 0;margin:4px 0;font-weight:600";
+  el.hidden = false;
 }
 
 async function api(path, opts = {}) {
@@ -129,15 +142,26 @@ function skipCbor(b, i) {
   return 1;
 }
 
-async function passkeyLogin(challengeB64) {
-  const cred = await navigator.credentials.get({
-    publicKey: {
-      challenge: b64uDecode(challengeB64),
-      rpId: new URL(ORIGIN).hostname,
-      userVerification: "required",
-      timeout: 120_000,
-    },
-  });
+async function passkeyLogin(challengeB64, allowCredentials) {
+  // Target the specific registered credential. Without allowCredentials a non-discoverable
+  // Windows Hello credential cannot be found on the platform authenticator and the browser falls
+  // back to asking for a roaming USB security key. The "internal"/"hybrid" transport hints steer
+  // the browser to the platform authenticator (Windows Hello) rather than a USB key.
+  const allow = (allowCredentials || []).map((c) => ({
+    type: "public-key",
+    id: b64uDecode(c.id),
+    transports: ["internal", "hybrid"],
+  }));
+  const publicKey = {
+    challenge: b64uDecode(challengeB64),
+    rpId: new URL(ORIGIN).hostname,
+    userVerification: "required",
+    timeout: 120_000,
+  };
+  if (allow.length) {
+    publicKey.allowCredentials = allow;
+  }
+  const cred = await navigator.credentials.get({ publicKey });
   const r = cred.response;
   return {
     method: "passkey",
@@ -194,6 +218,11 @@ function enterDashboard(state) {
   $("bootstrap-panel").hidden = true;
   $("login-panel").hidden = true;
   $("dashboard").hidden = false;
+  // Keep the module state in sync whenever the dashboard renders — including after a login, which
+  // reaches here through refresh(). Without this the signed-in credential kind (actor) stayed unset
+  // until a full page reload, so step-up defaulted to the wallet-key ceremony for a passkey admin.
+  actor = state.actor;
+  if (state.csrf) { csrf = state.csrf; }
   $("actor-line").textContent = `Signed in as ${state.actor}`;
   stepupValid = state.stepupValid;
   renderStepup();
@@ -366,7 +395,7 @@ function renderApps(state) {
       add.onclick = () => addGate(app);
       const publish = document.createElement("button");
       publish.className = "btn";
-      publish.textContent = "Publish replacement for a gate";
+      publish.textContent = "Publish gate";
       publish.onclick = () => publishGate(app);
       const remove = document.createElement("button");
       remove.className = "btn ghost";
@@ -376,7 +405,17 @@ function renderApps(state) {
       reorder.className = "btn ghost";
       reorder.textContent = "Reorder (save current table order)";
       reorder.onclick = () => reorderGates(app);
-      buttons.append(add, publish, remove, reorder);
+      const deleteApp = document.createElement("button");
+      deleteApp.className = "btn ghost";
+      deleteApp.style.cssText = "color:#c00;border-color:#c00";
+      deleteApp.textContent = "Delete application";
+      deleteApp.onclick = async () => {
+        if (!confirm(`Permanently delete "${app.applicationId}" and all its gates? This cannot be undone.`)) return;
+        const r = await api("/admin/api/app/delete", { mutating: true, body: JSON.stringify({ applicationId: app.applicationId }) });
+        if (r.status === 200) { await refresh(); set(`Application ${app.applicationId} deleted.`); }
+        else set(r.json.error || String(r.status), true);
+      };
+      buttons.append(add, publish, remove, reorder, deleteApp);
       editor.append(buttons);
       const msg = document.createElement("p");
       msg.className = "hint";
@@ -457,8 +496,8 @@ async function addGate(app) {
     componentAddress: $(`gate-component-${app.applicationId}`).value.trim() || null,
   };
   const r = await api("/admin/api/gate/set", { mutating: true, body: JSON.stringify({ applicationId: app.applicationId, gate }) });
-  if (r.status === 200) { await refresh(); set(`Gate ${id} saved.`); }
-  else fail(`msg-${app.applicationId}`, r.json.error || String(r.status));
+  if (r.status === 200) { await refresh(); appMsg(app, `Gate ${id} saved.`); }
+  else appMsg(app, r.json.error || String(r.status), true);
 }
 
 /// Write a gate back with a new grant set. The server validates the whole app after the change, so
@@ -493,24 +532,24 @@ async function wireTiers(app, gateId, box) {
       },
     }),
   });
-  if (r.status === 200) { await refresh(); set(`${gateId} tiers saved.`); }
-  else { fail(`msg-${app.applicationId}`, r.json.error || String(r.status)); await refresh(); }
+  if (r.status === 200) { await refresh(); appMsg(app, `${gateId} tiers saved.`); }
+  else { appMsg(app, r.json.error || String(r.status), true); await refresh(); }
 }
 
 async function publishGate(app) {
   const gateId = $(`gate-id-${app.applicationId}`).value.trim();
   if (!gateId) { fail(`msg-${app.applicationId}`, "Type the gate id to publish."); return; }
   const r = await api("/admin/api/policy/publish", { mutating: true, body: JSON.stringify({ applicationId: app.applicationId, gateId, reason: "published from the dashboard" }) });
-  if (r.status === 200) { await refresh(); set(`Published ${gateId}. The bridge picks it up on the next request.`); }
-  else fail(`msg-${app.applicationId}`, r.json.error || String(r.status));
+  if (r.status === 200) { await refresh(); appMsg(app, `Published ${gateId}. The bridge picks it up on the next request.`); }
+  else appMsg(app, r.json.error || String(r.status), true);
 }
 
 async function removeGate(app) {
   const gateId = $(`gate-id-${app.applicationId}`).value.trim();
   if (!gateId) { fail(`msg-${app.applicationId}`, "Type the gate id to remove."); return; }
   const r = await api("/admin/api/gate/remove", { mutating: true, body: JSON.stringify({ applicationId: app.applicationId, gateId }) });
-  if (r.status === 200) { await refresh(); set(`Removed ${gateId}.`); }
-  else fail(`msg-${app.applicationId}`, r.json.error || String(r.status));
+  if (r.status === 200) { await refresh(); appMsg(app, `Removed ${gateId}.`); }
+  else appMsg(app, r.json.error || String(r.status), true);
 }
 
 async function reorderGates(app) {
@@ -534,8 +573,8 @@ async function reorderGates(app) {
   mine.splice(target, 1);
   mine.splice(index, 0, gateId);
   const r = await api("/admin/api/gate/reorder", { mutating: true, body: JSON.stringify({ applicationId: app.applicationId, order: mine }) });
-  if (r.status === 200) { await refresh(); set("Order saved (cosmetic — order never grants anything)."); }
-  else fail(`msg-${app.applicationId}`, r.json.error || String(r.status));
+  if (r.status === 200) { await refresh(); appMsg(app, "Order saved (cosmetic — order never grants anything)."); }
+  else appMsg(app, r.json.error || String(r.status), true);
 }
 
 // Returns the /admin/api/state reply so callers can branch on what the SERVER now says (the
@@ -621,9 +660,11 @@ $("new-app-go").onclick = async () => {
     topology: $("new-app-topology").value,
     defaultSessionTtl: Number($("new-app-ttl").value),
     production: $("new-app-production").value === "true",
+    network: $("new-app-network").value,
+    genesisHash: $("new-app-genesis").value.trim(),
   })});
   if (r.status === 200) { await refresh(); set(`Application ${r.json.created} created.`); }
-  else set(r.json.error || String(r.status));
+  else set(r.json.error || String(r.status), true);
 };
 /* ------------------------------ step-up ------------------------------ */
 // The method to step up with is the SERVER's knowledge about the signed-in credential (the actor),
@@ -657,7 +698,7 @@ async function passkeyStepup() {
   if (c.status !== 200) { set(`Step-up refused: ${c.json.error || String(c.status)}`); return; }
   // Exactly the flow the sign-in button uses (passkeyLogin), plus stepup: true. The server
   // requires user verification (Windows Hello) for a step-up and refuses without it.
-  const payload = await passkeyLogin(c.json.challenge);
+  const payload = await passkeyLogin(c.json.challenge, c.json.allowCredentials);
   const r = await api("/admin/api/auth/login", { body: JSON.stringify({ ...payload, stepup: true }) });
   await applyStepupResult(r);
 }
@@ -679,6 +720,10 @@ async function walletStepup() {
 }
 
 $("btn-stepup").onclick = async () => {
+  // Choose the ceremony from the signed-in credential's kind. If the actor is not loaded yet (e.g.
+  // immediately after a login with no page reload), re-read state first: a passkey administrator
+  // must never silently fall back to the wallet-key step-up path just because the actor was unknown.
+  if (!actorKind()) { await refresh(); }
   const kind = actorKind();
   if (kind === "passkey") {
     try {
@@ -730,7 +775,7 @@ $("login-passkey").onclick = async () => {
   clearFail("login-error");
   const c = await api("/admin/api/auth/challenge", { body: JSON.stringify({ kind: "login", method: "passkey" }) });
   try {
-    const payload = await passkeyLogin(c.json.challenge);
+    const payload = await passkeyLogin(c.json.challenge, c.json.allowCredentials);
     const r = await api("/admin/api/auth/login", { body: JSON.stringify(payload) });
     if (r.status === 200) { csrf = r.json.csrf; await refresh(); }
     else fail("login-error", r.json.error || String(r.status));

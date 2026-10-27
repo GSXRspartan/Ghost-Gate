@@ -8,14 +8,9 @@
 //! that answers "unknown kernel" is `Ok(None)`, which the verifier treats as "not mined yet".
 
 use minotari_node_grpc_client::grpc::{
+    Empty as ProtoEmpty, FetchMatchingUtxosRequest, SearchKernelsRequest,
+    Signature as ProtoSignature, SubmitTransactionRequest, SubmitTransactionResponse, Transaction,
     base_node_client::BaseNodeClient,
-    FetchMatchingUtxosRequest,
-    SearchKernelsRequest,
-    Signature as ProtoSignature,
-    SubmitTransactionRequest,
-    SubmitTransactionResponse,
-    Transaction,
-    Empty as ProtoEmpty,
 };
 
 use ghost_gate_bridge::xtm::{MinedKernel, XtmChainError, XtmChainReader, XtmMinedOutput, XtmTip};
@@ -41,7 +36,10 @@ impl BaseNodeXtmReader {
     }
 
     /// Submits a full transaction to the mempool. Returns the node's own verdict word.
-    pub async fn submit_transaction(&mut self, transaction: Transaction) -> Result<String, XtmChainError> {
+    pub async fn submit_transaction(
+        &mut self,
+        transaction: Transaction,
+    ) -> Result<String, XtmChainError> {
         let response: SubmitTransactionResponse = self
             .client
             .submit_transaction(SubmitTransactionRequest {
@@ -92,9 +90,7 @@ async fn find_kernel_block(
     }
 }
 
-fn reduce_block(
-    block: &minotari_node_grpc_client::grpc::HistoricalBlock,
-) -> Option<MinedKernel> {
+fn reduce_block(block: &minotari_node_grpc_client::grpc::HistoricalBlock) -> Option<MinedKernel> {
     let block = block.block.as_ref()?;
     let header = block.header.as_ref()?;
     let kernel = block.body.as_ref()?.kernels.iter().next()?;
@@ -108,7 +104,13 @@ fn reduce_block(
             .outputs
             .iter()
             .map(|o| {
-                let hash: [u8; 32] = o.hash.iter().copied().collect::<Vec<u8>>().try_into().unwrap_or([0u8; 32]);
+                let hash: [u8; 32] = o
+                    .hash
+                    .iter()
+                    .copied()
+                    .collect::<Vec<u8>>()
+                    .try_into()
+                    .unwrap_or([0u8; 32]);
                 // The script is read for a single PushPubKey opcode: the standard pay-to-self
                 // shape. Anything else reports None, which the verdict refuses.
                 let script_public_key = read_push_pubkey(&o.script);
@@ -151,7 +153,10 @@ impl XtmChainReader for BaseNodeXtmReader {
         })
     }
 
-    async fn kernel_block(&mut self, excess_sig: &[u8; 64]) -> Result<Option<MinedKernel>, XtmChainError> {
+    async fn kernel_block(
+        &mut self,
+        excess_sig: &[u8; 64],
+    ) -> Result<Option<MinedKernel>, XtmChainError> {
         let _ = ProtoEmpty {};
         match find_kernel_block(&mut self.client, excess_sig).await? {
             Some(block) => Ok(reduce_block(&block)),

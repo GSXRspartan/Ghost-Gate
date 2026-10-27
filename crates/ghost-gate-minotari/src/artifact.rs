@@ -70,7 +70,9 @@ pub enum XtmProofOutcomeWire {
 impl From<XtmProofOutcome> for XtmProofOutcomeWire {
     fn from(o: XtmProofOutcome) -> Self {
         match o {
-            XtmProofOutcome::Broadcast(a) => Self::Broadcast { artifact: XtmProofWire::from_artifact(&a) },
+            XtmProofOutcome::Broadcast(a) => Self::Broadcast {
+                artifact: XtmProofWire::from_artifact(&a),
+            },
             XtmProofOutcome::CannotAfford => Self::CannotAfford,
             XtmProofOutcome::Failed(reason) => Self::Failed { reason },
         }

@@ -282,9 +282,16 @@ export function describeProviderError(e) {
     return { cls: "bad", text: "This wallet does not support that call." };
   }
   if (code === -32603) {
-    // JSON-RPC internal error: the wallet ITSELF failed — not the user, not the site. Saying
-    // "you declined" here would be a lie about the user's own action.
-    return { cls: "bad", text: `The wallet hit an internal error while handling the request: ${message}` };
+    const insufficient = message.match(/InsufficientFunds.*?Required:\s*(\d+),\s*Available:\s*(\d+)/);
+    if (insufficient) {
+      const req = insufficient[1], avail = insufficient[2];
+      return { cls: "bad", text: `Insufficient revealed funds. The gate requires ${req} raw units but the wallet only has ${avail} available. Unshield more tTARI and try again.` };
+    }
+    const execFail = message.match(/ExecutionFailure.*?message":"([^"]+)"/);
+    if (execFail) {
+      return { cls: "bad", text: `Wallet transaction failed: ${execFail[1]}` };
+    }
+    return { cls: "bad", text: `The wallet hit an internal error: ${message.length > 200 ? message.slice(0, 200) + "…" : message}` };
   }
   if (/lock/i.test(message)) {
     return { cls: "warn", text: "The wallet appears to be locked. Unlock Sapient, then press Connect wallet again." };

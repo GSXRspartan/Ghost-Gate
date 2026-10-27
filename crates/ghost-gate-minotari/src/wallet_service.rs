@@ -40,29 +40,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use minotari_wallet::{
+    WalletConfig, WalletSqlite,
     output_manager_service::error::OutputManagerError,
-    storage::sqlite_utilities::{initialize_sqlite_database_backends, WalletDbConnection},
-    transaction_service::{
-        error::TransactionServiceError,
-        storage::models::WalletTransaction,
-    },
-    wallet::{
-        read_or_create_master_seed,
-        Wallet,
-    },
-    WalletConfig,
-    WalletSqlite,
+    storage::sqlite_utilities::{WalletDbConnection, initialize_sqlite_database_backends},
+    transaction_service::{error::TransactionServiceError, storage::models::WalletTransaction},
+    wallet::{Wallet, read_or_create_master_seed},
 };
 use tari_common::configuration::Network;
-use tari_common_types::{
-    seeds::cipher_seed::CipherSeed,
-    tari_address::TariAddress,
-};
+use tari_common_types::{seeds::cipher_seed::CipherSeed, tari_address::TariAddress};
 use tari_comms::{
-    NodeIdentity,
-    multiaddr::Multiaddr,
-    peer_manager::PeerFeatures,
-    types::CommsPublicKey,
+    NodeIdentity, multiaddr::Multiaddr, peer_manager::PeerFeatures, types::CommsPublicKey,
 };
 use tari_p2p::TransportType;
 use tari_shutdown::Shutdown;
@@ -71,19 +58,16 @@ use tari_transaction_components::{
     crypto_factories::CryptoFactories,
     key_manager::TransactionKeyManagerInterface,
     tari_amount::MicroMinotari,
-    transaction_components::{memo_field::TxType, MemoField, OutputFeatures},
+    transaction_components::{MemoField, OutputFeatures, memo_field::TxType},
 };
 use tari_transaction_key_manager::{
-    legacy_key_manager::{
-        LegacyTransactionKeyManagerWrapper,
-        wallet_types::LegacyWalletType,
-    },
+    legacy_key_manager::{LegacyTransactionKeyManagerWrapper, wallet_types::LegacyWalletType},
     storage::sqlite_db::TransactionKeyManagerSqliteDatabase,
 };
-use tari_utilities::{SafePassword, ByteArray};
+use tari_utilities::{ByteArray, SafePassword};
 
-use ghost_gate_bridge::XtmProofArtifact;
 use crate::service::{XtmProofOutcome, largest_affordable_output_value, spend_signature_message};
+use ghost_gate_bridge::XtmProofArtifact;
 
 /// How long a single attempt to reach the key manager may take.
 const SIGN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -149,13 +133,21 @@ impl ProofWalletService {
         let wallet_config = Self::wallet_config(&config);
         let db_path = wallet_config.db_file.clone();
         std::fs::create_dir_all(db_path.parent().unwrap_or(&config.base_path)).map_err(|e| {
-            crate::service::ServiceError::Wallet(format!("could not create the wallet directory: {e}"))
+            crate::service::ServiceError::Wallet(format!(
+                "could not create the wallet directory: {e}"
+            ))
         })?;
 
         let passphrase = SafePassword::from(password);
         let (wallet_backend, transaction_backend, output_manager_backend, key_manager_backend) =
-            initialize_sqlite_database_backends(&db_path, passphrase.clone(), wallet_config.db_connection_pool_size)
-                .map_err(|e| crate::service::ServiceError::Wallet(format!("wallet database init failed: {e}")))?;
+            initialize_sqlite_database_backends(
+                &db_path,
+                passphrase.clone(),
+                wallet_config.db_connection_pool_size,
+            )
+            .map_err(|e| {
+                crate::service::ServiceError::Wallet(format!("wallet database init failed: {e}"))
+            })?;
 
         let wallet_db = minotari_wallet::storage::database::WalletDatabase::new(wallet_backend);
         let output_db =
@@ -170,7 +162,9 @@ impl ProofWalletService {
 
         let node_addresses: Vec<Multiaddr> = wallet_db
             .get_node_address()
-            .map_err(|e| crate::service::ServiceError::Wallet(format!("node address read failed: {e}")))?
+            .map_err(|e| {
+                crate::service::ServiceError::Wallet(format!("node address read failed: {e}"))
+            })?
             .map(|addr| vec![addr])
             .unwrap_or_default();
 
@@ -236,7 +230,8 @@ impl ProofWalletService {
             .get_comms_identity_signature()
             .map_err(|e| format!("identity signature read: {e}"))?;
 
-        let comms_secret_key = derive_comms_secret_key(master_seed).map_err(|e| format!("comms key: {e}"))?;
+        let comms_secret_key =
+            derive_comms_secret_key(master_seed).map_err(|e| format!("comms key: {e}"))?;
 
         // The stored signature is valid only if it still validates against the derived key; the
         // `None` path re-signs below.
@@ -278,9 +273,10 @@ impl ProofWalletService {
         c.fee_per_gram = config.fee_per_gram;
         c.use_libtor = false;
         c.p2p.transport.transport_type = TransportType::Tcp;
-        c.p2p.transport.tcp.listener_address = format!("/ip4/127.0.0.1/tcp/{}", config.listener_port)
-            .parse()
-            .unwrap_or_else(|_| "/ip4/127.0.0.1/tcp/0".parse().unwrap());
+        c.p2p.transport.tcp.listener_address =
+            format!("/ip4/127.0.0.1/tcp/{}", config.listener_port)
+                .parse()
+                .unwrap_or_else(|_| "/ip4/127.0.0.1/tcp/0".parse().unwrap());
         c.p2p.public_addresses = vec![c.p2p.transport.tcp.listener_address.clone()].into();
         c.p2p.datastore_path = config.base_path.join("peer_db/proof-wallet");
         c.p2p.dht = tari_comms_dht::DhtConfig {
@@ -289,9 +285,11 @@ impl ProofWalletService {
             ),
             ..tari_comms_dht::DhtConfig::default_local_test()
         };
-        c.base_node_service_peers =
-            Vec::from([format!("{}::{}", config.base_node_identity_public_key, config.base_node_address)])
-                .into();
+        c.base_node_service_peers = Vec::from([format!(
+            "{}::{}",
+            config.base_node_identity_public_key, config.base_node_address
+        )])
+        .into();
         c.http_server_url = config.base_node_http_url.clone();
         c.fallback_http_server_url = config.base_node_http_url.clone();
         c.output_manager_service_config.num_confirmations_required = 0;
@@ -307,7 +305,13 @@ impl ProofWalletService {
     /// The wallet's public spend key, hex. This is a public key and safe to serve.
     pub fn spend_public_key_hex(&self) -> String {
         use tari_crypto::tari_utilities::ByteArray as _;
-        hex::encode(self.wallet.key_manager_service.get_spend_key().pub_key.as_bytes())
+        hex::encode(
+            self.wallet
+                .key_manager_service
+                .get_spend_key()
+                .pub_key
+                .as_bytes(),
+        )
     }
 
     /// The wallet's one-sided receive address, for funding the wallet by the miner.
@@ -368,8 +372,9 @@ impl ProofWalletService {
 
         // 4. Build. The output manager constructs the pay-to-self body; the promise is the whole
         //    output value, and nothing is broadcast yet.
-        let memo = MemoField::new_open_from_string("Ghost Gate threshold proof", TxType::PaymentToSelf)
-            .map_err(|e| crate::service::ServiceError::Wallet(format!("memo: {e}")))?;
+        let memo =
+            MemoField::new_open_from_string("Ghost Gate threshold proof", TxType::PaymentToSelf)
+                .map_err(|e| crate::service::ServiceError::Wallet(format!("memo: {e}")))?;
         // The output manager can still conclude NotEnoughFunds between the balance read above and
         // the build (an encumbrance landed in between). Same answer as the solver's: an outcome the
         // caller retries on, not an error.
@@ -388,7 +393,9 @@ impl ProofWalletService {
             .await;
         let (_fee_estimated, transaction, tx_id) = match built {
             Ok(v) => v,
-            Err(OutputManagerError::NotEnoughFunds { .. }) => return Ok(XtmProofOutcome::CannotAfford),
+            Err(OutputManagerError::NotEnoughFunds { .. }) => {
+                return Ok(XtmProofOutcome::CannotAfford);
+            }
             Err(other) => return Err(map_output_error(other)),
         };
 
@@ -400,7 +407,9 @@ impl ProofWalletService {
             .kernels()
             .iter()
             .next()
-            .ok_or_else(|| crate::service::ServiceError::Wallet("no kernel in transaction".to_string()))?
+            .ok_or_else(|| {
+                crate::service::ServiceError::Wallet("no kernel in transaction".to_string())
+            })?
             .clone();
         let real_fee = kernel.fee.as_u64();
         let floor = u128::from(output_value) + u128::from(real_fee);
@@ -416,7 +425,8 @@ impl ProofWalletService {
         }
 
         let mut kernel_excess_sig = [0u8; 64];
-        kernel_excess_sig[..32].copy_from_slice(kernel.excess_sig.get_compressed_public_nonce().as_bytes());
+        kernel_excess_sig[..32]
+            .copy_from_slice(kernel.excess_sig.get_compressed_public_nonce().as_bytes());
         kernel_excess_sig[32..].copy_from_slice(kernel.excess_sig.get_signature().as_bytes());
 
         let output = transaction
@@ -425,8 +435,14 @@ impl ProofWalletService {
             .iter()
             .find(|o| o.minimum_value_promise.as_u64() == output_value)
             .or_else(|| transaction.body.outputs().iter().next())
-            .ok_or_else(|| crate::service::ServiceError::Wallet("no output in transaction".to_string()))?;
-        let output_hash: [u8; 32] = output.hash().as_slice().try_into().expect("output hash is 32 bytes");
+            .ok_or_else(|| {
+                crate::service::ServiceError::Wallet("no output in transaction".to_string())
+            })?;
+        let output_hash: [u8; 32] = output
+            .hash()
+            .as_slice()
+            .try_into()
+            .expect("output hash is 32 bytes");
 
         // 6. The spend-key signature over the challenge. The script key the output was built
         //    with is the key the bridge will verify against, via the public key in the output's
@@ -444,12 +460,18 @@ impl ProofWalletService {
             .find(|o| o.hash.as_slice() == output.hash().as_slice())
             .or_else(|| outputs.first())
             .map(|o| o.wallet_output.script_key_id().clone())
-            .ok_or_else(|| crate::service::ServiceError::Wallet("the proving output is not in the wallet's records".to_string()))?;
+            .ok_or_else(|| {
+                crate::service::ServiceError::Wallet(
+                    "the proving output is not in the wallet's records".to_string(),
+                )
+            })?;
         let signature = self
             .wallet
             .key_manager_service
             .sign_script_message(&script_key_id, &spend_signature_message(&challenge_nonce))
-            .map_err(|e| crate::service::ServiceError::Wallet(format!("spend-key signature: {e}")))?;
+            .map_err(|e| {
+                crate::service::ServiceError::Wallet(format!("spend-key signature: {e}"))
+            })?;
         let mut spend_signature = [0u8; 64];
         spend_signature[..32].copy_from_slice(signature.get_compressed_public_nonce().as_bytes());
         spend_signature[32..].copy_from_slice(signature.get_signature().as_bytes());
@@ -461,8 +483,11 @@ impl ProofWalletService {
                 tx_id,
                 transaction.clone(),
                 MicroMinotari(output_value),
-                MemoField::new_open_from_string("Ghost Gate threshold proof", TxType::PaymentToSelf)
-                    .map_err(|e| crate::service::ServiceError::Wallet(format!("memo: {e}")))?,
+                MemoField::new_open_from_string(
+                    "Ghost Gate threshold proof",
+                    TxType::PaymentToSelf,
+                )
+                .map_err(|e| crate::service::ServiceError::Wallet(format!("memo: {e}")))?,
             )
             .await
             .map_err(map_transaction_error)?;
@@ -507,9 +532,7 @@ impl ProofWalletService {
 
 fn map_output_error(e: OutputManagerError) -> crate::service::ServiceError {
     match &e {
-        OutputManagerError::NotEnoughFunds { .. } => {
-            crate::service::ServiceError::CannotAfford
-        },
+        OutputManagerError::NotEnoughFunds { .. } => crate::service::ServiceError::CannotAfford,
         other => crate::service::ServiceError::Wallet(format!("output manager: {other}")),
     }
 }

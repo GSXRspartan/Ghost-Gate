@@ -63,6 +63,7 @@ body {
     top: 0;
     height: 100%;
     display: block;
+    filter: drop-shadow(0 0 6px rgba(41, 212, 124, 0.4));
 }
 #matrix-edges canvas.left { left: 0; }
 #matrix-edges canvas.right { right: 0; }
@@ -71,7 +72,7 @@ body {
 }
 
 /* ---------- shell ---------- */
-#lab-root { max-width: 1180px; margin: 0 auto; padding: 0 1.2rem 3.2rem; position: relative; z-index: 1; }
+#lab-root { max-width: 1020px; margin: 0 auto; padding: 0 1.2rem 3.2rem; position: relative; z-index: 1; }
 
 .masthead {
     display: flex;

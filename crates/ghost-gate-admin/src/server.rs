@@ -443,7 +443,27 @@ fn auth_challenge(state: &SharedState, req: &Request) -> Response {
         challenge.clone(),
         PendingChallenge { challenge: challenge.clone(), kind, created_unix: ghost_gate_registry::now_unix(), used: false },
     );
-    Response::ok_json(&serde_json::json!({ "challenge": challenge, "method": method }))
+    // For a passkey LOGIN, return the registered credential ids so the browser can target the
+    // specific credential through `allowCredentials`. A Windows Hello credential registered with
+    // `residentKey: "preferred"` may be non-discoverable; without the id the browser cannot find it
+    // on the platform authenticator and falls back to prompting for a roaming USB security key.
+    // A WebAuthn credential id is a public handle, not a secret, and this endpoint is loopback +
+    // same-origin + CSRF-checked; the server's assertion verification is entirely unchanged.
+    let allow_credentials: Vec<serde_json::Value> = if matches!(kind, AuthKind::Authentication) && method == "passkey" {
+        ghost_gate_registry::load_registry(&state.paths)
+            .map(|reg| {
+                reg.credentials
+                    .iter()
+                    .filter(|c| c.kind == ghost_gate_registry::CredentialKind::Passkey)
+                    .filter_map(|c| c.credential_id.strip_prefix("passkey:"))
+                    .map(|id| serde_json::json!({ "id": id, "type": "public-key" }))
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    Response::ok_json(&serde_json::json!({ "challenge": challenge, "method": method, "allowCredentials": allow_credentials }))
 }
 
 /// First registration: requires the bootstrap token when no credential exists. The first
@@ -948,7 +968,7 @@ fn create_application(state: &SharedState, req: &Request, authority: &Authority)
         Ok(n) => n,
         Err(e) => return Response::error(400, &e),
     };
-    let genesis_hash = match body.genesis_hash.clone().or_else(|| state.genesis_hash.clone()) {
+    let genesis_hash = match body.genesis_hash.clone().filter(|g| !g.is_empty()).or_else(|| state.genesis_hash.clone()) {
         Some(g) => g,
         None => {
             return Response::error(

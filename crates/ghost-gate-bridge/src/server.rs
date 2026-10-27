@@ -1070,9 +1070,8 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
     /// The challenge bookkeeping is the same book Mode A uses, so a credential proof and a
     /// consensus proof compete for the same single-use challenges rather than each having a
     /// private supply an attacker could pace.
-    /// The credential route, which is the one the Telegram membership flow uses. It refuses a gate
-    /// the administrator scoped to the website: a token policy is not a front door, and the scope is
-    /// the administrator's decision, recorded in the published policy.
+    /// The credential route: browser wallet proof-of-funds for website and Telegram flows.
+    /// A gate scoped to Telegram-only is refused here (those arrive through the join flow).
     async fn credential(&mut self, id: &str, request: &Request) -> Response {
         let Some(gate) = self.gates.get(id).cloned() else {
             return Response::error(404, "GG: no such gate");
@@ -1094,14 +1093,14 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                  Set GG_INDEXER_ENDPOINT to enable the credential mode.",
             );
         }
-        // The scope: a policy decision about the gate, which is not a function of the request body.
-        // It is checked AFTER the body parses (a malformed request is malformed whatever the gate)
-        // and AFTER the reader exists (a bridge with no reader has no credential mode at all).
+        // The scope check: credential proofs serve both website and Telegram flows.
+        // A gate scoped to "telegram" only is refused from the website credential route
+        // (those arrive through the Telegram join flow instead).
         let scope = self.gates.use_mode_of(id).unwrap_or_else(|| "website".into());
-        if !matches!(scope.as_str(), "telegram" | "both") {
+        if matches!(scope.as_str(), "telegram") {
             return Response::error(
                 403,
-                "GG: this gate authorizes the website only; it is not a Telegram membership gate",
+                "GG: this gate is scoped to Telegram membership only; use the Telegram join flow",
             );
         }
         // The same challenge validation Mode A passes: live, single-use, session-bound, and bound
@@ -3194,26 +3193,23 @@ mod tests {
     }
 
     /// A gate the administrator scoped to the website cannot be used as a Telegram membership
-    /// gate: the credential route refuses it before it touches a wallet or a chain.
+    /// gate: the credential route refuses telegram-only gates from the website flow.
     #[tokio::test]
-    async fn a_website_only_gate_cannot_authorize_telegram_membership() {
-        // This fixture HAS a chain reader, so the scope check is what the request actually meets.
+    async fn a_telegram_only_gate_is_refused_from_the_credential_route() {
         let mut b = credential_bridge(FakeWallet::new(), FakeChain::with("utxo_x".into(), 1000, [7u8; 32]));
-        // The admin dashboard's fixture gate is telegram-scoped; take it back to the default.
-        b.gates.set_use_mode("g1", "website");
+        b.gates.set_use_mode("g1", "telegram");
         let req = post("/gate/g1/credential", serde_json::json!({
             "gate_id": "g1", "challenge_nonce": "aa", "session_commitment": "bb",
             "substate_id": "utxo_x",
             "public_key": "00", "public_nonce": "00", "signature": "00",
         }));
         let r = b.handle(&req).await;
-        assert_eq!(r.status, 403, "a website-only gate is not a Telegram gate: {}", r.body);
-        assert!(r.body.contains("not a Telegram membership gate"), "{}", r.body);
-        // And with the scope restored, the request passes the scope check and reaches the real
-        // challenge validation (which refuses the invented nonce) — proof the gate was not at fault.
-        b.gates.set_use_mode("g1", "telegram");
+        assert_eq!(r.status, 403, "a telegram-only gate is refused: {}", r.body);
+        assert!(r.body.contains("Telegram membership only"), "{}", r.body);
+        // A website-scoped gate passes the scope check and reaches challenge validation.
+        b.gates.set_use_mode("g1", "website");
         let r2 = b.handle(&req).await;
-        assert_ne!(r2.status, 403, "a telegram-scoped gate passes the scope check");
+        assert_ne!(r2.status, 403, "a website gate passes the scope check");
     }
 
     /// A bridge shaped like the Esmeralda deployment that exposed the wrong-mode advertisement:

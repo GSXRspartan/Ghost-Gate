@@ -625,8 +625,8 @@ async function prove() {
     //    Sapient / Universe → the credential path: the wallet shields an output carrying the
     //    gate's threshold as its PUBLIC minimum-value promise, then signs this attempt's
     //    challenge over that one output; the bridge verifies both against chain state (Mode B).
-    //    The credential route is the Telegram membership flow, so it is offered only on gates
-    //    the administrator scoped to Telegram.
+    //    The credential route serves both website and Telegram flows; only telegram-only
+    //    gates are refused here (those arrive through the Telegram join flow).
     advance("authorize"); advance("submit");
     if (state.mode !== "walletd") {
         await proveCredential(gate, challenge_nonce, session_commitment);
@@ -687,11 +687,10 @@ async function prove() {
  * or a UTXO inventory: it relays four identifiers and a signature.
  */
 async function proveCredential(gate, challenge_nonce, session_commitment) {
-    const scoped = gate.useMode === "telegram" || gate.useMode === "both";
-    if (!scoped) {
+    if (gate.useMode === "telegram") {
         $("prove").disabled = false;
         showOutcome("denied", "WRONG GATE SCOPE",
-            `This gate authorizes the website only. The credential proof mode is the Telegram membership flow; pick a Telegram-scoped gate or use the wallet daemon path.`);
+            `This gate is scoped to Telegram membership only. Use the Telegram join flow instead.`);
         return;
     }
     const provider = state.mode === "universe" ? universeProvider() : sapientProvider();
@@ -712,7 +711,6 @@ async function proveCredential(gate, challenge_nonce, session_commitment) {
         const d = describeProviderError(e);
         showOutcome("denied", "WALLET REFUSED", d.text, {
             ...(e && e.code !== undefined ? { "provider error": `code ${e.code}` } : {}),
-            detail: String(e && e.message ? e.message : e),
         });
         return;
     }
@@ -1178,13 +1176,13 @@ function startMatrixEdges() {
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
     // Halfwidth katakana + latin hex-ish set: the classic rain look, Tari green.
     const glyphs = "01ｱｲｳｴｵｶｷｸｹｺｻｼｽｾﾀﾁﾂﾃﾄﾅﾆﾈﾊﾋﾎﾏﾐﾑﾒﾓﾗﾘﾙﾚﾛABCDEF0123456789";
-    const SLOT = 16;          // px per glyph column
+    const SLOT = 14;          // px per glyph column — tighter for denser rain
     const FONT = "600 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
     const BG = "rgb(11, 15, 13)";        // --ink, matched to the page
     const HEAD = "rgb(196, 255, 220)";   // brighter than the trail
     const BODY = "rgb(41, 212, 124)";    // --green
-    const PAD = 10;          // keep the rain clear of the dashboard's own padding
-    const MIN_STRIP = 64;    // below this (narrow laptops) the gutter is too thin to bother
+    const PAD = 0;           // let the rain reach the edge of the content
+    const MIN_STRIP = 32;    // show rain even on narrower screens
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
 
     // The dashboard is #lab-root: max-width 1180, centered. The gutter is whatever is left of

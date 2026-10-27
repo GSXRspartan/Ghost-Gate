@@ -63,11 +63,11 @@ pub fn parse_op(path: &str, body: &str) -> Option<ServeOp> {
         "/prove" => {
             let req: ProveRequestWire = serde_json::from_str(body).ok()?;
             Some(ServeOp::Prove(req))
-        },
+        }
         "/rebroadcast" => {
             let req: RebroadcastWire = serde_json::from_str(body).ok()?;
             Some(ServeOp::Rebroadcast(req.transaction_id))
-        },
+        }
         _ => None,
     }
 }
@@ -88,7 +88,11 @@ fn render(status: u16, body: &str) -> String {
 }
 
 /// Serves until the shutdown signal fires. One connection at a time.
-pub async fn serve<S>(addr: &str, mut service: S, shutdown: tari_shutdown::ShutdownSignal) -> Result<(), std::io::Error>
+pub async fn serve<S>(
+    addr: &str,
+    mut service: S,
+    shutdown: tari_shutdown::ShutdownSignal,
+) -> Result<(), std::io::Error>
 where
     S: FnMut(ServeOp) -> Result<String, ServiceError> + Send + 'static,
 {
@@ -159,7 +163,9 @@ impl HttpXtmChannel {
 }
 
 impl ghost_gate_bridge::xtm::XtmChannel for HttpXtmChannel {
-    async fn status(&mut self) -> Result<ghost_gate_bridge::xtm::XtmWalletStatus, ghost_gate_bridge::WalletError> {
+    async fn status(
+        &mut self,
+    ) -> Result<ghost_gate_bridge::xtm::XtmWalletStatus, ghost_gate_bridge::WalletError> {
         let response = self
             .client
             .post(format!("{}/status", self.endpoint))
@@ -207,15 +213,22 @@ impl ghost_gate_bridge::xtm::XtmChannel for HttpXtmChannel {
             .await
             .map_err(|e| ghost_gate_bridge::WalletError::Unreachable(e.to_string()))?;
         match answered {
-            ProveResponseWire::Broadcast { artifact } => {
-                artifact.to_artifact().map_err(ghost_gate_bridge::WalletError::Refused)
-            },
-            ProveResponseWire::CannotAfford => Err(ghost_gate_bridge::WalletError::CannotConstructProof),
-            ProveResponseWire::Failed { reason } => Err(ghost_gate_bridge::WalletError::Refused(reason)),
+            ProveResponseWire::Broadcast { artifact } => artifact
+                .to_artifact()
+                .map_err(ghost_gate_bridge::WalletError::Refused),
+            ProveResponseWire::CannotAfford => {
+                Err(ghost_gate_bridge::WalletError::CannotConstructProof)
+            }
+            ProveResponseWire::Failed { reason } => {
+                Err(ghost_gate_bridge::WalletError::Refused(reason))
+            }
         }
     }
 
-    async fn rebroadcast(&mut self, transaction_id: u64) -> Result<(), ghost_gate_bridge::WalletError> {
+    async fn rebroadcast(
+        &mut self,
+        transaction_id: u64,
+    ) -> Result<(), ghost_gate_bridge::WalletError> {
         let response = self
             .client
             .post(format!("{}/rebroadcast", self.endpoint))
