@@ -324,6 +324,15 @@ function renderApps(state) {
       mode.append(sel);
       editor.append(mode);
       updateComponentVisibility();
+      const challengeDomain = editorField(app, "challenge-domain", "Relying-site / challenge domain");
+      const challengeInput = challengeDomain.querySelector("input");
+      challengeInput.value = app.gates[0]?.challengeDomain || `${app.applicationId}.localhost`;
+      challengeInput.placeholder = "private-app.localhost or https://host.example";
+      const challengeNote = document.createElement("small");
+      challengeNote.className = "field-note";
+      challengeNote.textContent = "Published exactly: use *.localhost for private local use, or the exact lowercase HTTPS origin for hosted access.";
+      challengeDomain.append(challengeNote);
+      editor.append(challengeDomain);
       const ttlSel = document.createElement("label");
       ttlSel.textContent = "Session override";
       const ts = document.createElement("select");
@@ -484,7 +493,7 @@ async function addGate(app) {
     divisibility: div,
     thresholdRaw: String(conv.json.raw), // a STRING: exact, no float rounding
     proofMode: mode,
-    challengeDomain: `${app.applicationId}.localhost`,
+    challengeDomain: $(`challenge-domain-${app.applicationId}`).value.trim(),
     sessionTtlOverrideSecs: $(`ttl-${app.applicationId}`).value ? Number($(`ttl-${app.applicationId}`).value) : null,
     // Grants are wired by the tier editor below, not here: a gate that opens a tier which does not
     // exist yet is refused by the server (correctly), so adding gates one at a time must not have to

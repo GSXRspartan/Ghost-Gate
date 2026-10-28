@@ -777,6 +777,45 @@ fn tamper_9_lowering_a_threshold_below_an_outstanding_challenge_is_a_replacement
 }
 
 #[test]
+fn hosted_relying_site_is_validated_and_only_binds_after_publish() {
+    let (server, _c, _s, owner, _o) = tamper_fixture();
+    let (cookie, csrf) = fresh_stepped_up(&server, &owner);
+    let publish = || http(server.port, "POST", "/admin/api/policy/publish", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
+        r#"{"applicationId":"vault","gateId":"bronze","reason":"relying-site migration"}"#);
+    assert_eq!(publish().status, 200, "the existing localhost policy publishes first");
+
+    let gate = |challenge_domain: &str| serde_json::json!({
+        "gateId": "bronze", "name": "bronze", "resourceAddress": "resource_v", "symbol": "GHOST",
+        "divisibility": 6, "thresholdRaw": "1000000", "proofMode": "consensus",
+        "challengeDomain": challenge_domain, "grants": [], "enabled": true, "testLane": false,
+        "componentAddress": "component_bronze",
+    });
+    let set = |challenge_domain: &str| http(server.port, "POST", "/admin/api/gate/set", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
+        &serde_json::json!({ "applicationId": "vault", "gate": gate(challenge_domain) }).to_string());
+
+    for invalid in [
+        "http://ghost-gate-staging.gsxrspartan.workers.dev",
+        "https://ghost-gate-staging.gsxrspartan.workers.dev/proof",
+    ] {
+        let response = set(invalid);
+        assert_eq!(response.status, 400, "{invalid} must be rejected before it becomes a draft: {}", response.body);
+    }
+
+    let before = ghost_gate_registry::load_bindings(&server.state.paths).unwrap().unwrap();
+    assert_eq!(before.gates.iter().find(|g| g.gate_id == "bronze").unwrap().challenge_domain, "vault.localhost");
+    let hosted = "https://ghost-gate-staging.gsxrspartan.workers.dev";
+    assert_eq!(set(hosted).status, 200, "the exact Worker HTTPS origin is a valid draft");
+
+    let draft_bindings = ghost_gate_registry::load_bindings(&server.state.paths).unwrap().unwrap();
+    assert_eq!(draft_bindings.gates.iter().find(|g| g.gate_id == "bronze").unwrap().challenge_domain,
+        "vault.localhost", "a draft relying-site must not change the live binding");
+
+    assert_eq!(publish().status, 200, "the explicit publish activates the immutable hosted origin");
+    let after = ghost_gate_registry::load_bindings(&server.state.paths).unwrap().unwrap();
+    assert_eq!(after.gates.iter().find(|g| g.gate_id == "bronze").unwrap().challenge_domain, hosted);
+}
+
+#[test]
 fn tamper_10_a_lower_tier_session_cannot_reach_a_higher_tier() {
     // Covered exhaustively in the registry tests; repeated here as the product-level statement:
     // silver grants bronze, never the reverse.

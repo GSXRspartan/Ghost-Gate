@@ -758,9 +758,8 @@ fn validate_gate(g: &GatePolicy, app: &Application) -> Result<(), String> {
     if g.threshold_raw == 0 {
         return Err(format!("gate {:?}: threshold must be greater than zero", g.gate_id));
     }
-    if g.challenge_domain.trim().is_empty() || g.challenge_domain.len() > 128 {
-        return Err(format!("gate {:?}: challenge domain required", g.gate_id));
-    }
+    validate_challenge_domain(&g.challenge_domain)
+        .map_err(|reason| format!("gate {:?}: {reason}", g.gate_id))?;
     if let Some(secs) = g.session_ttl_override {
         let d = std::time::Duration::from_secs(secs);
         if d < MIN_SESSION_TTL || d > MAX_SESSION_TTL {
@@ -809,6 +808,59 @@ fn validate_gate(g: &GatePolicy, app: &Application) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Validate the immutable relying-site identity carried by a gate policy.
+///
+/// Existing private/local deployments use an opaque `*.localhost` value. Hosted gates instead
+/// need the complete, canonical HTTPS origin the browser will report. Keeping those forms
+/// explicit prevents an `http` URL, path, credential, or arbitrary hostname from being published
+/// as a challenge-binding identity.
+pub fn validate_challenge_domain(value: &str) -> Result<(), String> {
+    if value.trim().is_empty() || value.len() > 128 || value != value.trim() {
+        return Err("challenge domain required".into());
+    }
+    if !value.contains("://") {
+        let local = value.to_ascii_lowercase();
+        if (local == "localhost" || local.ends_with(".localhost"))
+            && valid_challenge_hostname(value)
+        {
+            return Ok(());
+        }
+        return Err("challenge domain must be a *.localhost local identity or an exact HTTPS origin".into());
+    }
+    let Some(authority) = value.strip_prefix("https://") else {
+        return Err("hosted relying-site must be an HTTPS origin".into());
+    };
+    if authority.is_empty()
+        || authority != authority.to_ascii_lowercase()
+        || authority.bytes().any(|byte| byte.is_ascii_whitespace())
+        || authority.contains(['/', '?', '#', '@'])
+    {
+        return Err("hosted relying-site must be an exact lowercase HTTPS origin without path, credentials, query, or fragment".into());
+    }
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (authority, None),
+    };
+    if !valid_challenge_hostname(host) {
+        return Err("hosted relying-site has an invalid hostname".into());
+    }
+    if let Some(port) = port {
+        if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit())
+            || (port.len() > 1 && port.starts_with('0'))
+            || port.parse::<u16>().ok().filter(|port| *port != 0 && *port != 443).is_none()
+        {
+            return Err("hosted relying-site has an invalid or non-canonical port".into());
+        }
+    }
+    Ok(())
+}
+
+fn valid_challenge_hostname(host: &str) -> bool {
+    !host.is_empty()
+        && host.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'-')
+        && host.split('.').all(|label| !label.is_empty() && !label.starts_with('-') && !label.ends_with('-'))
 }
 
 /// A frozen, hashed policy version. The hash is what a challenge binds to, so a proof can only be
@@ -1136,6 +1188,24 @@ mod tests {
         assert_eq!(GatePolicy::raw_units_for("abc", 6), None);
         // Round-trip.
         assert_eq!(GatePolicy::raw_units_for("10.5", 6).map(|r| GatePolicy::format_raw(r, 6)), Some("10.5".into()));
+    }
+
+    #[test]
+    fn challenge_domain_keeps_local_identities_and_requires_exact_https_for_hosted() {
+        assert!(validate_challenge_domain("Crypt.localhost").is_ok(), "the existing local identity remains valid");
+        assert!(validate_challenge_domain("https://ghost-gate-staging.gsxrspartan.workers.dev").is_ok());
+
+        for invalid in [
+            "http://ghost-gate-staging.gsxrspartan.workers.dev",
+            "https://ghost-gate-staging.gsxrspartan.workers.dev/verify",
+            "https://admin@ghost-gate-staging.gsxrspartan.workers.dev",
+            "https://ghost-gate-staging.gsxrspartan.workers.dev:443",
+            "https://ghost-gate-staging.gsxrspartan.workers.dev:0001",
+            "ghost-gate-staging.gsxrspartan.workers.dev",
+            "not a domain.localhost",
+        ] {
+            assert!(validate_challenge_domain(invalid).is_err(), "{invalid:?} must fail closed");
+        }
     }
 
     #[test]

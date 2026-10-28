@@ -1198,6 +1198,9 @@ fn set_gate(state: &SharedState, req: &Request, authority: &Authority) -> Respon
     let actor = authority.session.credential_id.clone();
     let app_id = body.application_id.clone();
     let gate = body.gate;
+    if let Err(reason) = ghost_gate_core::policy::validate_challenge_domain(&gate.challenge_domain) {
+        return Response::error(400, &format!("GG: {reason}"));
+    }
     // A test lane cannot be enabled inside a production application; the registry's validation
     // also enforces this, but the dashboard reports it precisely here.
     let was_test = gate.test_lane;
