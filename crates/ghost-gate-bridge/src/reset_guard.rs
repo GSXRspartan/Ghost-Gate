@@ -156,11 +156,22 @@ pub fn latch_halt(path: &Path, halt: &ResetHalt) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
+    // Rotate before latching; retain across clear/restart so unobserved halt/recovery retires sessions.
+    rotate_hosted_revision(path)?;
     let bytes =
         serde_json::to_vec_pretty(halt).map_err(|e| format!("cannot serialise the reset halt: {e}"))?;
     let tmp = path.with_extension(format!("tmp{}", std::process::id()));
     std::fs::write(&tmp, &bytes).map_err(|e| format!("cannot write the reset halt: {e}"))?;
     std::fs::rename(&tmp, path).map_err(|e| format!("cannot install the reset halt: {e}"))?;
+    Ok(())
+}
+
+fn rotate_hosted_revision(path: &Path) -> Result<(), String> {
+    let revision = path.with_file_name("hosted_halt_revision");
+    let tmp_revision = revision.with_extension("tmp");
+    std::fs::write(&tmp_revision, hex::encode(crate::session::random_nonce()))
+        .map_err(|e| format!("cannot persist hosted halt revision: {e}"))?;
+    std::fs::rename(&tmp_revision, &revision).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -171,6 +182,8 @@ pub fn clear_halt(path: &Path, operator_ack: &str) -> Result<(), String> {
     if operator_ack.trim().is_empty() {
         return Err("clearing a reset halt requires an explicit operator acknowledgment".into());
     }
+    // Also retire decisions overlapping latch_halt's revision write and halt installation.
+    if path.exists() { rotate_hosted_revision(path)?; }
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -250,7 +263,10 @@ mod tests {
         // A normal indexer report does not clear it; only an explicit ack does. An empty ack fails.
         assert!(clear_halt(&path, "   ").is_err());
         assert!(is_halted(&path));
+        let before = std::fs::read(path.with_file_name("hosted_halt_revision")).unwrap();
         clear_halt(&path, "operator reviewed and migrated to generation 2").unwrap();
+        let after = std::fs::read(path.with_file_name("hosted_halt_revision")).unwrap();
+        assert_ne!(before, after, "recovery retires decisions overlapping halt activation");
         assert!(!is_halted(&path));
         let _ = std::fs::remove_dir_all(&dir);
     }

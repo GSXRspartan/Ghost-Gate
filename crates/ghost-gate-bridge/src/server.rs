@@ -889,6 +889,41 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
     /// standalone hosted verifier speaks, but runs the real `CredentialVerifier::verify`
     /// instead of returning UNKNOWN. This lets the CF Worker call the bridge through the
     /// tunnel without any Worker-side code changes.
+    fn hosted_state(&self, req: &ghost_gate_verifier::hosted::HostedVerificationRequest) -> Result<serde_json::Value, String> {
+        if self.reset_halted() { return Err("reset halt active".into()); }
+        self.origins.permits(Some(&req.relying_site)).map_err(|e| e.to_string())?;
+        let access = self.access.as_ref().ok_or("hosted authorization requires registry bindings")?;
+        let info = access.info(&req.gate_id).ok_or("unknown registry gate")?;
+        if req.tenant != info.application_id { return Err("tenant mismatch".into()); }
+        // Always reload the durable generation ledger, even if registry mtime is unchanged.
+        let reg = ghost_gate_registry::load_registry(&access.plane.paths)?;
+        let version = reg.current_version(&info.application_id, &req.gate_id).ok_or("unpublished policy")?;
+        if req.policy_version != format!("v{}", version.version) || version.policy_hash != info.policy_hash {
+            return Err("policy mismatch".into());
+        }
+        let app = reg.application(&info.application_id).ok_or("unknown application")?;
+        if app.network != req.network || version.policy.resource_address != req.resource_address
+            || version.policy.threshold_raw.to_string() != req.threshold_raw {
+            return Err("registry scope mismatch".into());
+        }
+        let evidence = ghost_gate_registry::Evidence::IndexerAsserted { digest: "hosted-eligibility".into() };
+        // A non-persisted eligibility evaluation: exactly the same rules as real local issuance.
+        let session = ghost_gate_registry::issue_session_with_token(&reg, &info.application_id,
+            &req.gate_id, version.policy_hash.clone(), "hosted-eligibility", &"0".repeat(64), &evidence, &self.trust_policy)?;
+        let decision = ghost_gate_registry::check_access(&reg, &[session.clone()], &session.token,
+            &info.application_id, &req.gate_id, crate::session::now_unix());
+        if !decision.authorized { return Err(decision.reason); }
+        let revision_path = access.plane.paths.dir.join("hosted_halt_revision");
+        let revision = match std::fs::read_to_string(revision_path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(e.to_string()),
+        };
+        Ok(serde_json::json!({"generation": session.chain_generation.to_string(),
+            "policyHash": version.policy_hash, "haltRevision": revision,
+            "sessionTtlSecs": session.expires_unix - session.issued_unix}))
+    }
+
     async fn hosted_verify(&mut self, request: &Request) -> Response {
         use ghost_gate_verifier::hosted::{
             self, HostedVerdict, HostedVerificationRequest, HostedVerificationResult,
@@ -936,9 +971,22 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             return Response::error(409, r#"{"error":"GG: request scope does not match this gate"}"#);
         }
 
+        let state = match self.hosted_state(&hv_req) {
+            Ok(s) => s,
+            Err(_) => return Response::error(503, "GG: hosted backend authorization unavailable"),
+        };
+        if hv_req.proof == serde_json::json!({"hostedState": true}) {
+            let body = serde_json::json!({"request": hv_req, "state": state,
+                "issuedUnix": crate::session::now_unix()}).to_string();
+            let sig = hosted::hmac_sha256_hex(resp_key.as_bytes(), body.as_bytes());
+            return Response::json_with_header(200, &body, "X-GG-Verifier-Signature", &sig);
+        }
+        if hv_req.proof.get("backendState") != Some(&state) {
+            return Response::error(409, "GG: hosted backend binding changed");
+        }
         let vid = hosted::verification_id(&hv_req);
 
-        let proof_json = serde_json::to_string(&hv_req.proof).unwrap_or_default();
+        let proof_json = serde_json::to_string(&hv_req.proof["credential"]).unwrap_or_default();
         let parsed: crate::credential::CredentialProofRequest = match serde_json::from_str(&proof_json) {
             Ok(v) => v,
             Err(_) => {
@@ -968,7 +1016,8 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             challenge_string: &hv_req.nonce,
         };
         let verdict = match (parsed.gate_id == hv_req.gate_id && parsed.challenge_nonce == hv_req.nonce)
-            && verifier.verify(chain, &parsed).await.is_ok() {
+            && verifier.verify(chain, &parsed).await.is_ok()
+            && self.hosted_state(&hv_req).ok().as_ref() == Some(&state) {
             true => HostedVerdict::Verified,
             false => HostedVerdict::Rejected,
         };
@@ -3603,6 +3652,69 @@ mod tests {
         assert!(b.challenges.check_live(&nonce1_bytes, &session_bytes).is_err());
     }
 
+    fn hosted_fixture(b: &mut Bridge<FakeWallet, FakeChain>) -> ghost_gate_registry::StorePaths {
+        use ghost_gate_registry::*;
+        let paths = StorePaths { dir: std::env::temp_dir().join(format!("gg-hosted-{}", hex::encode(crate::session::random_nonce()))) };
+        let gate: GatePolicy = serde_json::from_value(serde_json::json!({
+            "gateId":"g1", "name":"g1", "resourceAddress": binding().resource().unwrap().to_string(),
+            "symbol":"tTARI", "divisibility":6, "thresholdRaw":"10000", "proofMode":"credential",
+            "challengeDomain":"https://gate.example", "sessionTtlOverride":null, "grants":[], "enabled":true, "testLane":false
+        })).unwrap();
+        let mut app: Application = serde_json::from_value(serde_json::json!({
+            "applicationId":"default", "displayName":"test", "ownerCredential":"admin", "topology":"independent",
+            "defaultSessionTtl":3600, "maxGates":10, "gates":[], "revision":1, "production":false,
+            "network": binding().network, "genesisHash":"00".repeat(32), "chainGeneration":1
+        })).unwrap();
+        app.gates.push(gate.clone());
+        let mut reg = Registry::default();
+        reg.credentials.push(serde_json::from_value(serde_json::json!({"credential_id":"admin", "kind":"WalletKey", "label":"test", "registered_unix":1, "ristretto_public_hex":"abc"})).unwrap());
+        reg.versions.push(PolicyVersion { application_id:"default".into(), gate_id:"g1".into(), version:1,
+            policy_hash: hash_policy(&Blake3Hasher, &app, &gate, 1), network:app.network,
+            genesis_hash:app.genesis_hash.clone(), policy:gate, app_revision:1, created_unix:1 });
+        reg.applications.push(app);
+        save_registry(&paths, &reg).unwrap();
+        b.access = Some(crate::access::AccessHandle::from_snapshot(&paths, &derive_bindings(&reg)).0);
+        b.origins = b.origins.clone().allow("https://gate.example");
+        b.trust_policy = TrustPolicy { operator_trusted_indexer:true, max_tier:TrustTier::OperatorTrustedTestnet };
+        paths
+    }
+
+    // Invoked by the Node integration test using the actual compiled Rust test executable.
+    #[tokio::test]
+    async fn hosted_protocol_fixture() {
+        let Ok(input_path) = std::env::var("GG_HOSTED_TEST_INPUT") else { return; };
+        let input: serde_json::Value = serde_json::from_slice(&std::fs::read(&input_path).unwrap()).unwrap();
+        let sk = RistrettoSecretKey::from_canonical_bytes(&[1u8;32]).unwrap();
+        let pk = RistrettoPublicKey::from_secret_key(&sk);
+        let res = *binding().resource().unwrap();
+        let substate = format!("utxo_{}_2c713522a4aaf79f2b219d869b5033d3d71d63c0537e5e0bbed2d717d8b2a67e", hex::encode(res.as_bytes()));
+        let mut key = [0u8;32]; key.copy_from_slice(pk.as_bytes());
+        let mut b = credential_bridge(FakeWallet::new(), FakeChain::with(substate.clone(), 50_000, key));
+        let paths = hosted_fixture(&mut b);
+        let mut reg = ghost_gate_registry::load_registry(&paths).unwrap();
+        reg.applications[0].chain_generation = input["generation"].as_u64().unwrap_or(1);
+        reg.versions[0].policy_hash = ghost_gate_registry::hash_policy(&ghost_gate_registry::Blake3Hasher, &reg.applications[0], &reg.versions[0].policy, 1);
+        ghost_gate_registry::save_registry(&paths, &reg).unwrap();
+        b.access = Some(crate::access::AccessHandle::from_snapshot(&paths, &ghost_gate_registry::derive_bindings(&reg)).0);
+        if input["halted"] == true { std::fs::write(paths.dir.join("reset_halt.json"), "halt").unwrap(); }
+        if let Some(revision) = input["revision"].as_str() { std::fs::write(paths.dir.join("hosted_halt_revision"), revision).unwrap(); }
+        b.trust_policy.operator_trusted_indexer = input["trusted"].as_bool().unwrap_or(true);
+        let output = if let Some(nonce) = input["buildProof"].as_str() {
+            let msg = crate::credential::ownership_proof_message(binding().network, &res, &substate, nonce);
+            let sig = SchnorrSignature::<RistrettoPublicKey, RistrettoSecretKey, SchnorrSigChallenge>::sign(&sk, &msg, &mut rng()).unwrap();
+            serde_json::json!({"gate_id":"g1", "challenge_nonce":nonce, "session_commitment":"", "substate_id":substate,
+                "public_key":hex::encode(pk.as_bytes()), "public_nonce":hex::encode(sig.get_public_nonce().as_bytes()), "signature":hex::encode(sig.get_signature().as_bytes())})
+        } else {
+            b.hosted_verifier_token = Some("token".into()); b.hosted_verifier_request_key = Some("req".into()); b.hosted_verifier_response_key = Some("resp".into());
+            let request = Request { method:"POST".into(), path:"/v1/hosted/verify".into(), origin:None, host:Some("127.0.0.1:7899".into()), query:Default::default(),
+                body:input["body"].to_string(), attempt:None, authorization:Some("Bearer token".into()), verifier_request_signature:Some(input["signature"].as_str().unwrap().into()) };
+            let response = b.handle(&request).await;
+            serde_json::json!({"status":response.status, "body":response.body, "headers":response.extra_headers})
+        };
+        std::fs::write(std::env::var("GG_HOSTED_TEST_OUTPUT").unwrap(), output.to_string()).unwrap();
+        std::fs::remove_dir_all(paths.dir).unwrap();
+    }
+
     #[tokio::test]
     async fn hosted_verify_adapter_accepts_a_valid_hmac_authenticated_proof() {
         use ghost_gate_verifier::hosted::{
@@ -3634,6 +3746,7 @@ mod tests {
         b.hosted_verifier_request_key = Some(req_key.into());
         b.hosted_verifier_response_key = Some(resp_key.into());
 
+        let paths = hosted_fixture(&mut b);
         let nonce = hex::encode(crate::session::random_nonce());
         let session = hex::encode(crate::session::random_nonce().into_iter().chain(crate::session::random_nonce()).collect::<Vec<_>>());
 
@@ -3651,13 +3764,13 @@ mod tests {
         .unwrap();
         let pk = RistrettoPublicKey::from_secret_key(&sk);
 
-        let hv_req = HostedVerificationRequest {
+        let mut hv_req = HostedVerificationRequest {
             nonce: nonce.clone(),
             tenant: "default".into(),
             gate_id: "g1".into(),
             relying_site: "https://gate.example".into(),
             network: ghost_gate_core::network::LOCALNET,
-            resource_address: hex::encode(res.as_bytes()),
+            resource_address: res.to_string(),
             threshold_raw: "10000".into(),
             policy_version: "v1".into(),
             proof_digest: "b".repeat(64),
@@ -3672,6 +3785,8 @@ mod tests {
             }),
         };
 
+        let state = b.hosted_state(&hv_req).unwrap();
+        hv_req.proof = serde_json::json!({"backendState":state, "credential":hv_req.proof});
         let canonical = hosted::canonical_request(&hv_req);
         let req_sig = hosted::hmac_sha256_hex(req_key.as_bytes(), canonical.as_bytes());
 
@@ -3719,6 +3834,16 @@ mod tests {
         assert_eq!(denied.status, 200);
         let denied: hosted::HostedVerificationResult = serde_json::from_str(&denied.body).unwrap();
         assert_eq!(denied.verdict, HostedVerdict::Rejected);
+        b.trust_policy.operator_trusted_indexer = false;
+        assert!(b.hosted_state(&hv_req).is_err(), "untrusted indexer cannot authorize");
+        b.trust_policy.operator_trusted_indexer = true;
+        let mut reg = ghost_gate_registry::load_registry(&paths).unwrap();
+        reg.applications[0].production = true;
+        reg.versions[0].policy_hash = ghost_gate_registry::hash_policy(&ghost_gate_registry::Blake3Hasher, &reg.applications[0], &reg.versions[0].policy, 1);
+        ghost_gate_registry::save_registry(&paths, &reg).unwrap();
+        b.access = Some(crate::access::AccessHandle::from_snapshot(&paths, &ghost_gate_registry::derive_bindings(&reg)).0);
+        assert!(b.hosted_state(&hv_req).unwrap_err().contains("requires"), "production requirement rejects indexer evidence");
+        std::fs::remove_dir_all(paths.dir).unwrap();
     }
 
     #[tokio::test]

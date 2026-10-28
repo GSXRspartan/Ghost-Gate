@@ -1,3 +1,4 @@
+import { backendState, canonical } from "./backend-state.js";
 import { json } from "./contracts.js";
 
 const encoder = new TextEncoder();
@@ -13,6 +14,7 @@ function validText(value, maximum = 512) {
 
 function publicRecord(row) {
   return {
+    backendState: row.backend_state ? JSON.parse(row.backend_state) : null,
     nonce: row.nonce, tenant: row.tenant, gateId: row.gate_id, relyingSite: row.relying_site,
     network: row.network, resourceAddress: row.resource_address, thresholdRaw: row.threshold_raw,
     policyVersion: row.policy_version, expiresUnix: row.expires_unix, state: row.state,
@@ -41,6 +43,9 @@ export class ReplayCoordinator {
       access_token_hash TEXT, session_expires_unix INTEGER, revoked INTEGER NOT NULL DEFAULT 0,
       created_unix INTEGER NOT NULL, updated_unix INTEGER NOT NULL
     )`);
+    if (![...this.state.storage.sql.exec("PRAGMA table_info(replay_records)")].some(c => c.name === "backend_state")) {
+      this.state.storage.sql.exec("ALTER TABLE replay_records ADD COLUMN backend_state TEXT");
+    }
   }
 
   authorized(request) {
@@ -67,9 +72,17 @@ export class ReplayCoordinator {
     const visitorHash = await sha256(body.visitorSession);
     // Complete all asynchronous work before reading the row and making a state transition.
     const tokenHash = validText(body?.sessionToken, 256) ? await sha256(body.sessionToken) : null;
-    const now = Math.floor(Date.now() / 1000);
     const action = new URL(request.url).pathname.split("/").filter(Boolean).pop();
+    let current;
+    try { current = await backendState(this.env, body); }
+    catch { return json(503, { authorized: false, error: "GG: fresh backend authorization required" }); }
+    const now = Math.floor(Date.now() / 1000);
     const row = this.row();
+    if (row && (!row.backend_state || canonical(current) !== row.backend_state)) {
+      // Permanent retirement, including a halt revision observed after manual recovery.
+      this.state.storage.sql.exec("UPDATE replay_records SET revoked=1, state='revoked' WHERE nonce=?", row.nonce);
+      return json(409, { authorized: false, error: "GG: backend authorization changed; fresh proof required" });
+    }
 
     if (action === "issue") {
       if (row) return json(409, { error: "GG: replay identity already exists" });
@@ -84,6 +97,7 @@ export class ReplayCoordinator {
         VALUES (?,?,?,?,?,?,?,?,?,?, 'issued', 0, ?, ?)`,
         body.nonce, body.tenant, body.gateId, body.relyingSite, visitorHash, body.network,
         body.resourceAddress, body.thresholdRaw, body.policyVersion, body.expiresUnix, now, now);
+      this.state.storage.sql.exec("UPDATE replay_records SET backend_state=? WHERE nonce=?", canonical(current), body.nonce);
       return json(201, { state: "issued", nonce: body.nonce, expiresUnix: body.expiresUnix });
     }
 
@@ -119,7 +133,7 @@ export class ReplayCoordinator {
     if (action === "authorize") {
       if (!validText(body?.verificationId, 256) || !validText(body?.proofDigest, 256)
         || !validText(body?.authorizationId, 256) || !validText(body?.sessionToken, 256)
-        || !Number.isInteger(body?.sessionExpiresUnix) || body.sessionExpiresUnix <= now) {
+        || !Number.isInteger(body?.sessionExpiresUnix) || body.sessionExpiresUnix <= now || body.sessionExpiresUnix > now + current.sessionTtlSecs) {
         return json(400, { error: "GG: incomplete verified authorization" });
       }
       if (row.state === "submitted" && row.proof_job_id === body.proofJobId && row.proof_digest === body.proofDigest) {

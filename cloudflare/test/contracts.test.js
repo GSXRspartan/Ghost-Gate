@@ -88,7 +88,7 @@ function coordinatorFixture() {
         assert.equal(init.headers.authorization, "Bearer coordinator-secret");
         const action = new URL(url).pathname.slice(1); const body = JSON.parse(init.body);
         const record = records.get(id);
-        if (action === "issue") { records.set(id, { ...body, state: "issued" }); return Response.json({ state: "issued" }, { status: 201 }); }
+        if (action === "issue") { records.set(id, { ...body, backendState: { generation:"1", policyHash:"a".repeat(64), haltRevision:"", sessionTtlSecs:3600 }, state: "issued" }); return Response.json({ state: "issued" }, { status: 201 }); }
         if (!record || !binding(record, body)) return Response.json({ error: "binding" }, { status: 409 });
         if (action === "reserve") {
           if (record.state === "issued") { record.state = "submitted"; record.proofJobId = body.proofJobId; record.proofDigest = body.proofDigest; }

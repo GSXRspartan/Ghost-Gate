@@ -182,7 +182,7 @@ export default {
       return json(201, { state: "issued", challenge: {
         nonce, tenant: gate.tenant, gateId: gate.gateId, network: gate.network,
         resourceAddress: gate.resourceAddress, thresholdRaw: gate.thresholdRaw, policyVersion: gate.policyVersion, expiresUnix,
-      } }, { "set-cookie": cookie(names.visitor, visitorSession, CHALLENGE_TTL_SECS, names.secure) });
+      } }, { "set-cookie": cookie(names.visitor, visitorSession, gate.sessionTtlSecs + CHALLENGE_TTL_SECS, names.secure) });
     }
 
     if (match.kind === "proof" && request.method === "POST") {
@@ -216,7 +216,7 @@ export default {
       const verifierInput = {
         nonce: c.nonce, tenant: c.tenant, gateId: c.gateId, relyingSite: c.relyingSite,
         network: c.network, resourceAddress: c.resourceAddress, thresholdRaw: c.thresholdRaw,
-        policyVersion: c.policyVersion, proofDigest, proof: payload.proof || null,
+        policyVersion: c.policyVersion, proofDigest, proof: { backendState: c.backendState, credential: payload.proof || null },
       };
       const result = await trustedVerify(env, verifierInput);
       if (!verifierMatches(result, verifierInput, proofDigest)) return json(202, { state: "pending", proofId: proofJobId, reason: "verification outcome is unavailable" });
@@ -228,7 +228,7 @@ export default {
         return json(403, { state: "rejected", authorized: false, reason: "proof was not eligible" });
       }
       const sessionToken = randomId();
-      const sessionExpiresUnix = Math.floor(Date.now() / 1000) + gate.sessionTtlSecs;
+      const sessionExpiresUnix = Math.floor(Date.now() / 1000) + Math.min(gate.sessionTtlSecs, c.backendState.sessionTtlSecs);
       const authorizationId = `gg-auth-${nonce}`;
       const authorized = await coordinatorCall(env, gate, nonce, "authorize", {
         ...binding(gate, nonce, visitorSession), proofJobId: reserved.proofJobId, verificationId: result.verificationId,
