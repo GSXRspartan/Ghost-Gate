@@ -1383,6 +1383,18 @@ mod tests {
             let mut draft = reg.clone();
             change(&mut draft);
             assert!(derive_bindings(&draft).is_err(), "unpublished {name} change must not reach the bridge");
+            let policy_hash = draft.current_version("meme", "gold").unwrap().policy_hash.clone();
+            let refusal = issue_session_with_token(
+                &draft,
+                "meme",
+                "gold",
+                policy_hash,
+                "draft-eligibility",
+                &"11".repeat(32),
+                &production_evidence(),
+                &trusted(),
+            );
+            assert!(refusal.is_err(), "unpublished {name} change must also block new session issuance");
         }
     }
 
