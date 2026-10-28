@@ -10,10 +10,10 @@ ingress:
   # Rules match paths, not methods; the bridge must still enforce its own authorization.
   - hostname: bridge.DOMAIN_HERE
     path: '^/v1/hosted/verify$'
-    service: http://127.0.0.1:7899
+    service: http://127.0.0.1:7799
   - hostname: bridge.DOMAIN_HERE
     path: '^/gate/[A-Za-z0-9_-]+(/challenge|/credential)?$'
-    service: http://127.0.0.1:7899
+    service: http://127.0.0.1:7799
     originRequest:
       noTLSVerify: false
       connectTimeout: 10s

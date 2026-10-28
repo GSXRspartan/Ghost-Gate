@@ -3,7 +3,7 @@
 # Use with monitoring (cron, uptime robot, etc).
 set -euo pipefail
 
-BRIDGE_URL="http://127.0.0.1:7899/health"
+BRIDGE_URL="http://127.0.0.1:7799/health"
 STATUS=0
 
 # Bridge health

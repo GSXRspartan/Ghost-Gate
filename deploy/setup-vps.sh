@@ -3,7 +3,7 @@
 # Run as root on a fresh VPS. Stops before starting services.
 #
 # What this script does:
-#   1. Creates a ghostgate system user
+#   1. Creates two no-login service accounts with separate secret files
 #   2. Creates the directory structure
 #   3. Installs cloudflared
 #   4. Places systemd units
@@ -11,7 +11,7 @@
 #
 # What this script does NOT do:
 #   - Upload binaries (you scp them)
-#   - Set secrets (you edit ghost-gate.env)
+#   - Set secrets (you edit the two service-specific environment files)
 #   - Create the Cloudflare tunnel (you run cloudflared tunnel login)
 #   - Start any services (you do that after verification)
 
@@ -20,32 +20,35 @@ set -euo pipefail
 echo "=== Ghost Gate VPS Setup ==="
 echo ""
 
-# ── 1. System user ──────────────────────────────────────────────────────────
-if ! id -u ghostgate >/dev/null 2>&1; then
-    useradd --system --shell /usr/sbin/nologin --home-dir /opt/ghost-gate ghostgate
-    echo "[ok] Created system user: ghostgate"
-else
-    echo "[ok] User ghostgate already exists"
-fi
+# ── 1. Service accounts ─────────────────────────────────────────────────────
+for account in ghostgate-bridge ghostgate-telegram; do
+    if ! id -u "$account" >/dev/null 2>&1; then
+        useradd --system --user-group --shell /usr/sbin/nologin --home-dir /nonexistent "$account"
+        echo "[ok] Created no-login service account: $account"
+    else
+        echo "[ok] Service account already exists: $account"
+    fi
+done
 
 # ── 2. Directory structure ──────────────────────────────────────────────────
-mkdir -p /opt/ghost-gate/{bin,etc,data/{registry,replays,backups}}
+mkdir -p /opt/ghost-gate/{bin,etc,source,data/{registry,replays,backups}}
 
 # Binaries: owned by root, executable
 chown root:root /opt/ghost-gate/bin
 chmod 755 /opt/ghost-gate/bin
 
-# Config: readable by ghostgate, writable only by root
-chown root:ghostgate /opt/ghost-gate/etc
+# Config: root-writable only. Each service receives a distinct secret file.
+chown root:root /opt/ghost-gate/etc
 chmod 750 /opt/ghost-gate/etc
 
-# Data: writable by ghostgate (sessions, replays, registry state)
-chown -R ghostgate:ghostgate /opt/ghost-gate/data
-chmod -R 750 /opt/ghost-gate/data
+# Data: writable by the bridge only. The Telegram bot communicates with the
+# bridge over loopback and has no registry or replay-store write permission.
+chown -R ghostgate-bridge:ghostgate-bridge /opt/ghost-gate/data
+chmod -R u=rwX,g=,o= /opt/ghost-gate/data
 
 echo "[ok] Directory structure created at /opt/ghost-gate/"
 echo "     bin/       — ghost-gate-bridge, ghost-gate-telegram"
-echo "     etc/       — ghost-gate.env, cloudflared config"
+echo "     etc/       — service-specific environment files, cloudflared config"
 echo "     data/      — registry, replays, backups"
 
 # ── 3. Install cloudflared ──────────────────────────────────────────────────
@@ -72,15 +75,19 @@ systemctl daemon-reload
 echo "[ok] systemd units installed"
 
 # ── 5. Place config templates ───────────────────────────────────────────────
-if [ ! -f /opt/ghost-gate/etc/ghost-gate.env ]; then
-    cp "$SCRIPT_DIR/ghost-gate.env.template" /opt/ghost-gate/etc/ghost-gate.env
-    chown root:ghostgate /opt/ghost-gate/etc/ghost-gate.env
-    chmod 640 /opt/ghost-gate/etc/ghost-gate.env
-    echo "[ok] Environment template placed at /opt/ghost-gate/etc/ghost-gate.env"
-    echo "     EDIT THIS FILE — replace all placeholder values"
-else
-    echo "[ok] /opt/ghost-gate/etc/ghost-gate.env already exists (not overwritten)"
-fi
+for service in bridge telegram; do
+    target="/opt/ghost-gate/etc/ghost-gate-$service.env"
+    source="$SCRIPT_DIR/ghost-gate-$service.env.template"
+    owner="ghostgate-$service"
+    if [ ! -f "$target" ]; then
+        cp "$source" "$target"
+        chown "root:$owner" "$target"
+        chmod 640 "$target"
+        echo "[ok] Environment template placed at $target"
+    else
+        echo "[ok] $target already exists (not overwritten)"
+    fi
+done
 
 if [ ! -f /opt/ghost-gate/etc/cloudflared-config.yml ]; then
     cp "$SCRIPT_DIR/cloudflared-config.yml.template" /opt/ghost-gate/etc/cloudflared-config.yml
@@ -101,23 +108,21 @@ echo "[ok] Helper scripts placed"
 echo ""
 echo "=== Setup complete. Next steps: ==="
 echo ""
-echo "1. Cross-compile the binaries on your dev machine:"
-echo "   CARGO_TARGET_DIR=_cargo-target-native cargo build --release --target x86_64-unknown-linux-gnu -p ghost-gate-walletd -p ghost-gate-telegram"
+echo "1. Transfer the reviewed source archive, then build on this VPS with at most two jobs:"
+echo "   cd /opt/ghost-gate/source/ghost-gate-staging-source-<commit>/ghost-gate-laptop && CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR=/var/tmp/ghost-gate-target cargo build --locked --release -j 2 -p ghost-gate-walletd -p ghost-gate-telegram"
 echo "   (binary names: ghost-gate-bridge, ghost-gate-telegram)"
 echo ""
-echo "2. Upload binaries to the VPS:"
-echo "   scp _cargo-target-native/x86_64-unknown-linux-gnu/release/ghost-gate-bridge root@VPS:/opt/ghost-gate/bin/"
-echo "   scp _cargo-target-native/x86_64-unknown-linux-gnu/release/ghost-gate-telegram root@VPS:/opt/ghost-gate/bin/"
-echo "   chmod 755 /opt/ghost-gate/bin/ghost-gate-{bridge,telegram}"
+echo "2. Install the locally built Linux binaries (root-owned, mode 0755):"
+echo "   install -o root -g root -m 0755 /var/tmp/ghost-gate-target/release/ghost-gate-bridge /opt/ghost-gate/bin/ghost-gate-bridge"
+echo "   install -o root -g root -m 0755 /var/tmp/ghost-gate-target/release/ghost-gate-telegram /opt/ghost-gate/bin/ghost-gate-telegram"
 echo ""
-echo "3. Copy the registry data from your laptop:"
-echo "   scp -r C:\\Users\\pdark\\ghost-gate-admin\\* root@VPS:/opt/ghost-gate/data/registry/"
-echo "   chown -R ghostgate:ghostgate /opt/ghost-gate/data/registry"
+echo "3. Install only a staging-specific, reviewed policy snapshot; never copy laptop admin sessions, user sessions, wallets, or replay data."
+echo "   chown -R ghostgate-bridge:ghostgate-bridge /opt/ghost-gate/data"
 echo ""
-echo "4. Edit /opt/ghost-gate/etc/ghost-gate.env:"
-echo "   - Set GG_TG_BOT_TOKEN (from your secure storage)"
-echo "   - Set GG_BRIDGE_ORIGINS to your actual CF Worker + tunnel domains"
-echo "   - Set GG_JOIN_BASE_URL to your CF Worker's public URL"
+echo "4. Edit /opt/ghost-gate/etc/ghost-gate-bridge.env and ghost-gate-telegram.env:"
+echo "   - Keep staging secrets in their owning service file only"
+echo "   - Set GG_BRIDGE_ORIGINS to the exact staging Worker origin"
+echo "   - Set GG_JOIN_BASE_URL to the exact staging Worker origin"
 echo ""
 echo "5. Set up the Cloudflare tunnel:"
 echo "   cloudflared tunnel login"
@@ -130,20 +135,20 @@ echo ""
 echo "6. Install cloudflared as a service:"
 echo "   cloudflared service install --config /opt/ghost-gate/etc/cloudflared-config.yml"
 echo ""
-echo "7. Deploy the CF Worker:"
-echo "   cd cloudflare && wrangler deploy"
-echo "   wrangler secret put GG_COORDINATOR_TOKEN"
-echo "   wrangler secret put GG_VERIFIER_TOKEN"
-echo "   wrangler secret put GG_VERIFIER_REQUEST_KEY"
-echo "   wrangler secret put GG_VERIFIER_RESPONSE_KEY"
-echo "   # Set GG_VERIFIER_ORIGIN to https://bridge.YOUR_DOMAIN"
-echo "   # Set GG_GATE_CATALOG in wrangler.toml [vars]"
+echo "7. With Cloudflare approval, deploy only the separate staging Worker configuration:"
+echo "   cd cloudflare; cp wrangler.staging.toml.template wrangler.staging.toml"
+echo "   wrangler deploy --config wrangler.staging.toml"
+echo "   wrangler secret put --config wrangler.staging.toml GG_COORDINATOR_TOKEN"
+echo "   wrangler secret put --config wrangler.staging.toml GG_VERIFIER_TOKEN"
+echo "   wrangler secret put --config wrangler.staging.toml GG_VERIFIER_REQUEST_KEY"
+echo "   wrangler secret put --config wrangler.staging.toml GG_VERIFIER_RESPONSE_KEY"
+echo "   # Set exact staging GG_VERIFIER_ORIGIN and GG_GATE_CATALOG in the staging config"
 echo ""
 echo "8. Start services:"
 echo "   systemctl enable --now ghost-gate-bridge"
 echo "   systemctl enable --now ghost-gate-telegram"
 echo ""
 echo "9. Verify:"
-echo "   curl -s http://127.0.0.1:7899/health"
+echo "   curl -s http://127.0.0.1:7799/health"
 echo "   journalctl -u ghost-gate-bridge -f"
 echo "   journalctl -u ghost-gate-telegram -f"

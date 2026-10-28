@@ -27,8 +27,8 @@ cookies.
   It uses Durable Object SQLite storage and owns `issued -> submitted -> authorized/revoked`, the
   original proof job, session expiry, and revocation. It stores hashes of the visitor and access
   bearer values, not their plaintext values.
-- A separately hosted Rust verifier validates ownership and chain/finality evidence. It has no
-  authority to create a browser session. It receives the server-created tenant, gate, relying
+- The Rust bridge's authenticated `/v1/hosted/verify` adapter validates ownership and chain
+  evidence. It has no authority to create a browser session. It receives the server-created tenant, gate, relying
   site, network, asset, threshold, policy version, nonce, proof digest, and proof material.
 - The Worker checks a verifier-response HMAC before it asks the Durable Object to authorize.
   Browser-provided balance, account names, threshold metadata, and verdicts are never accepted.
@@ -75,9 +75,9 @@ deployment. Secure `__Host-` cookies require HTTPS, including for browser sessio
 ## Current boundary
 
 The Worker and Durable Object are locally tested, including a real local Workerd SQLite issue
-transition. `cargo run -p ghost-gate-verifier --bin ghost-gate-hosted-verifier` implements the
-authenticated signed endpoint, but its current adapter returns only `UNKNOWN` because no hosted
-chain/finality reader has been configured. It is safe to exercise connectivity with synthetic
-secrets, but live hosted proofs remain fail closed. This is not a claim of cross-region production
-validation; Cloudflare's Durable Object single-object execution is the production consistency
-assumption that still needs staging validation.
+transition. Restricted staging must set `GG_VERIFIER_ORIGIN` to the bridge tunnel's
+`/v1/hosted/verify` endpoint; that adapter invokes the real credential verifier and does not use
+the standalone hosted-verifier binary, which returns only `UNKNOWN`. This is not a claim of
+cross-region Cloudflare runtime validation: Durable Object single-object execution, tunnel
+connectivity, authenticated backend freshness, and real-wallet behavior still require the staging
+checks in `docs/VPS_PROVISIONING_RUNBOOK.md`.

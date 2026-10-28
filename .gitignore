@@ -27,6 +27,9 @@ npm-debug.log*
 node_modules/
 .wrangler/
 .pnpm-store/
+# Generated staging assets and source packages are deployment artifacts, not source.
+/staging-web/
+/artifacts/
 # Machine-local Cargo config (absolute target-dir path; see the file for why)
 /.cargo/
 .tari-v047-reference/

@@ -9,12 +9,12 @@ Target: OVHcloud VPS-1 (2 vCores / 4 GB RAM, Ubuntu 24.04 LTS)
   ──────────────────    ──────────────────────    ──────────────────────
   hosted.html (CF)  ──> CF Worker + Durable Obj
                             │ proof route           cloudflared tunnel
-                            │ trustedVerify()  ───> 127.0.0.1:7899 (bridge)
+                            │ trustedVerify()  ───> 127.0.0.1:7799 (bridge)
                             │                         ├── credential verifier
                             │                         ├── challenge book
                             │                         └── access plane
   join.html (CF)    ──> challenge + credential
-                        via bridge tunnel      ───> 127.0.0.1:7899 (bridge)
+                        via bridge tunnel      ───> 127.0.0.1:7799 (bridge)
                         claim POST             ───> 127.0.0.1:7808 (telegram)
                                                       └── long-polls Telegram API
 ```
@@ -35,7 +35,8 @@ The bridge's own credential verification path (proven with Sapient on Esmeralda)
 
 - `ghost-gate-bridge.service` — systemd unit for the bridge
 - `ghost-gate-telegram.service` — systemd unit for the Telegram bot
-- `ghost-gate.env.template` — environment variables (secrets replaced with placeholders)
+- `ghost-gate-bridge.env.template` — bridge-only environment variables and verifier placeholders
+- `ghost-gate-telegram.env.template` — Telegram-only environment variables and bot-token placeholder
 - `setup-vps.sh` — deployment script for a fresh Ubuntu 24.04 VPS
 - `backup.sh` — backup script for persistent state
 - `healthcheck.sh` — basic health monitoring

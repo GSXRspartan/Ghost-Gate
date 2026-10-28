@@ -9,7 +9,7 @@ test("tunnel template routes only explicitly named bridge and claim paths", () =
   assert.equal(entries.length, 3);
   const route = (host, path) => entries.find(e => e.host === host && e.path.test(path))?.service || "http_status:404";
   for (const path of ["/v1/hosted/verify", "/gate/crypt", "/gate/crypt/challenge", "/gate/crypt/credential"]) {
-    assert.equal(route("bridge.DOMAIN_HERE", path), "http://127.0.0.1:7899");
+    assert.equal(route("bridge.DOMAIN_HERE", path), "http://127.0.0.1:7799");
   }
   for (const path of ["/admin", "/admin/api", "/health", "/walletd", "/gate/crypt/prove", "/v1/hosted/verify/extra"]) {
     assert.equal(route("bridge.DOMAIN_HERE", path), "http_status:404");
