@@ -14,7 +14,7 @@
 //!   a control plane, not a free port.
 
 use ghost_gate_registry::{
-    admin_session_for, append_audit, derive_bindings, expire_admin_sessions, load_registry,
+    admin_session_for, append_audit, derive_bindings, expire_admin_sessions, load_bindings, load_registry,
     load_sessions, new_token, save_bindings, save_registry, AdminCredential, AdminSession,
     AuditEntry, AuditOutcome, CredentialKind, Registry, StoreLock, StorePaths,
 };
@@ -45,6 +45,16 @@ pub struct AdminState {
     /// The deployment's starting Ootle chain generation (GG_CHAIN_GENERATION): applied to a new
     /// application that does not name its own. `None` falls back to generation `1` at create time.
     pub chain_generation: Option<u64>,
+}
+
+/// Draft mutations are intentionally absent from the bridge binding file.  The only exceptions
+/// are an explicit policy publication, and the revocation list (which must stay available even
+/// while an operator has an unfinished draft open).
+#[derive(Clone, Copy)]
+enum BindingUpdate {
+    None,
+    RebuildPublished,
+    RevocationsOnly,
 }
 
 pub type SharedState = Arc<AdminState>;
@@ -120,9 +130,9 @@ impl AdminState {
         load_registry(&self.paths)
     }
 
-    /// The single write path: lock, load, mutate, validate, save, publish bindings, audit.
-    /// Every mutation goes through this, so the audit entry and the bindings refresh cannot be
-    /// forgotten by a caller.
+    /// The single draft-write path: lock, load, mutate, validate, save and audit.  It does not
+    /// publish bridge bindings; callers must explicitly select one of the narrowly scoped
+    /// publication paths below.
     pub fn commit<F>(&self, actor: &str, action: &str, mutate: F) -> Result<Registry, String>
     where
         F: FnOnce(&mut Registry) -> Result<(), String>,
@@ -143,6 +153,46 @@ impl AdminState {
     where
         F: FnOnce(&mut Registry) -> Result<(), String>,
     {
+        self.commit_ctx_with_bindings(actor, action, ctx, BindingUpdate::None, mutate)
+    }
+
+    fn commit_ctx_published<F>(
+        &self,
+        actor: &str,
+        action: &str,
+        ctx: Option<(String, Option<String>, Option<u64>, Option<u64>)>,
+        mutate: F,
+    ) -> Result<Registry, String>
+    where
+        F: FnOnce(&mut Registry) -> Result<(), String>,
+    {
+        self.commit_ctx_with_bindings(actor, action, ctx, BindingUpdate::RebuildPublished, mutate)
+    }
+
+    fn commit_ctx_revocation<F>(
+        &self,
+        actor: &str,
+        action: &str,
+        ctx: Option<(String, Option<String>, Option<u64>, Option<u64>)>,
+        mutate: F,
+    ) -> Result<Registry, String>
+    where
+        F: FnOnce(&mut Registry) -> Result<(), String>,
+    {
+        self.commit_ctx_with_bindings(actor, action, ctx, BindingUpdate::RevocationsOnly, mutate)
+    }
+
+    fn commit_ctx_with_bindings<F>(
+        &self,
+        actor: &str,
+        action: &str,
+        ctx: Option<(String, Option<String>, Option<u64>, Option<u64>)>,
+        binding_update: BindingUpdate,
+        mutate: F,
+    ) -> Result<Registry, String>
+    where
+        F: FnOnce(&mut Registry) -> Result<(), String>,
+    {
         let (app_ctx, gate_ctx, old_v, new_v_provided) = match ctx {
             None => (None, None, None, None),
             Some((a, g, o, n)) => (Some(a), g, o, n),
@@ -153,8 +203,10 @@ impl AdminState {
         match mutate(&mut reg) {
             Ok(()) => {
                 // Validate the WHOLE registry after every mutation: nothing half-formed ships.
-                reg.validate_all().map_err(|e| {
-                    // Record the refusal: an attempted invalid change is an audit event too.
+                if let Err(e) = reg.validate_all() {
+                    // Preserve the last valid registry, but record the refused attempt in its
+                    // durable audit tail and ndjson log.  Saving `reg` here would persist the
+                    // invalid draft that validation just rejected.
                     let entry = AuditEntry {
                         unix: ghost_gate_registry::now_unix(),
                         actor: actor.to_string(),
@@ -166,9 +218,12 @@ impl AdminState {
                         outcome: AuditOutcome::Refused,
                         detail: format!("validation refused the change: {e}"),
                     };
-                    let _ = append_audit(&self.paths, &entry);
-                    e
-                })?;
+                    let mut refused_reg = load_registry(&self.paths)?;
+                    refused_reg.audit(entry.clone());
+                    save_registry(&self.paths, &refused_reg)?;
+                    append_audit(&self.paths, &entry)?;
+                    return Err(e);
+                }
                 reg.store_revision = before_rev + 1;
                 // Expire dead admin sessions while we hold the lock.
                 expire_admin_sessions(&mut reg, ghost_gate_registry::now_unix());
@@ -187,8 +242,30 @@ impl AdminState {
                     detail: format!("registry revision {}", reg.store_revision),
                 };
                 reg.audit(entry.clone());
+                // Compute the next published snapshot before installing either file.  A bad or
+                // incomplete draft therefore leaves both the registry's live bindings and the
+                // bridge untouched.  The two atomic renames are intentionally fail-closed: if a
+                // process crashes between them, the bridge has either the previous snapshot or a
+                // new snapshot whose registry checks cannot yet succeed; it never obtains a
+                // mixed authorizing policy.
+                let bindings = match binding_update {
+                    BindingUpdate::None => None,
+                    BindingUpdate::RebuildPublished => Some(derive_bindings(&reg)?),
+                    BindingUpdate::RevocationsOnly => {
+                        let mut prior = load_bindings(&self.paths)?.unwrap_or_default();
+                        prior.generated_unix = ghost_gate_registry::now_unix();
+                        prior.revoked_session_prefixes = reg
+                            .revocations
+                            .iter()
+                            .map(|r| r.token_prefix.clone())
+                            .collect();
+                        Some(prior)
+                    }
+                };
                 save_registry(&self.paths, &reg)?;
-                save_bindings(&self.paths, &derive_bindings(&reg))?;
+                if let Some(bindings) = bindings {
+                    save_bindings(&self.paths, &bindings)?;
+                }
                 append_audit(&self.paths, &entry)?;
                 Ok(reg)
             }
@@ -1098,7 +1175,7 @@ fn delete_application(state: &SharedState, req: &Request, authority: &Authority)
     if let Err(resp) = gatekeep(state, req, authority, &body.application_id, "app.delete") { return resp; }
     let actor = authority.session.credential_id.clone();
     let app_id = body.application_id.clone();
-    match state.commit_ctx(&actor, "app.delete", Some((app_id.clone(), None, None, None)), |r| {
+    match state.commit_ctx_published(&actor, "app.delete", Some((app_id.clone(), None, None, None)), |r| {
         r.applications.retain(|a| a.application_id != app_id);
         r.versions.retain(|v| v.application_id != app_id);
         Ok(())
@@ -1134,7 +1211,6 @@ fn set_gate(state: &SharedState, req: &Request, authority: &Authority) -> Respon
         "gate.set",
         Some((app_id.clone(), Some(gate_id_for_lookup.clone()), published_before, None)),
         |r| {
-        let published_already = r.current_version(&app_id, &gate_id_for_lookup).is_some();
         let Some(app) = r.applications.iter_mut().find(|a| a.application_id == app_id) else {
             return Err(format!("application {app_id} vanished"));
         };
@@ -1150,15 +1226,9 @@ fn set_gate(state: &SharedState, req: &Request, authority: &Authority) -> Respon
         if existing.test_lane != was_test {
             return Err("the test-lane flag cannot be flipped after creation; remove and re-add the gate".into());
         }
-        let identity_changed = existing.proof_mode != gate.proof_mode
-            || existing.resource_address != gate.resource_address
-            || existing.threshold_raw != gate.threshold_raw
-            || existing.component_address != gate.component_address;
-        if identity_changed && published_already {
-            // Identity-bearing fields changed on a PUBLISHED gate: that is a replacement, not an
-            // edit. The dashboard drives that through /policy/publish explicitly.
-            return Err("this gate is published; changing its threshold, resource, component or proof mode requires publishing a replacement".into());
-        }
+        // This is always a draft replacement, even for a currently published gate.  The bridge
+        // consumes only the immutable bindings snapshot, so none of these fields become live
+        // until the separate Publish action atomically cuts new versions.
             app.revision += 1;
             *app.gate_mut(&gate_id_for_lookup).unwrap() = gate;
             Ok(())
@@ -1177,7 +1247,7 @@ fn remove_gate(state: &SharedState, req: &Request, authority: &Authority) -> Res
     if let Err(resp) = gatekeep(state, req, authority, &body.application_id, "gate.remove") { return resp; }
     let actor = authority.session.credential_id.clone();
     let (app_id, gate_id) = (body.application_id.clone(), body.gate_id.clone());
-    match state.commit_ctx(&actor, "gate.remove", Some((app_id.clone(), Some(gate_id.clone()), None, None)), |r| {
+    match state.commit_ctx_published(&actor, "gate.remove", Some((app_id.clone(), Some(gate_id.clone()), None, None)), |r| {
         let Some(app) = r.applications.iter_mut().find(|a| a.application_id == app_id) else {
             return Err("application vanished".into());
         };
@@ -1242,7 +1312,7 @@ fn publish_policy(state: &SharedState, req: &Request, authority: &Authority) -> 
         .registry()
         .ok()
         .and_then(|r| r.current_version(&app_id, &gate_id).map(|v| v.version));
-    let result = state.commit_ctx(
+    let result = state.commit_ctx_published(
         &actor,
         "policy.publish",
         Some((app_id.clone(), Some(gate_id.clone()), old_version, None)),
@@ -1251,59 +1321,85 @@ fn publish_policy(state: &SharedState, req: &Request, authority: &Authority) -> 
             Some(a) => a.clone(),
             None => return Err("application vanished".into()),
         };
-        let Some(gate) = app.gate(&gate_id).cloned() else {
+        let Some(_gate) = app.gate(&gate_id).cloned() else {
             return Err(format!("gate {gate_id} not found"));
         };
-        if !gate.enabled { return Err("enable the gate before publishing it".into()); }
-        if !gate.proof_mode.is_activatable() {
-            return Err(gate.proof_mode.blocked_reason().unwrap_or("this proof mode cannot be activated").to_string());
-        }
         app.validate().map_err(|e| format!("the application does not validate: {e}"))?;
-        // Freeze the version.
+        // Publish the complete application draft as one versioned snapshot.  Application-wide
+        // settings (topology/default TTL/production tier) affect more than one gate, so freezing
+        // only the clicked gate would create a mixed authorization policy.  Unchanged v2 gates
+        // retain their versions; every legacy v1 gate is deliberately re-published into v2.
         let hasher = ghost_gate_registry::Blake3Hasher;
-        let previous = r.current_version(&app_id, &gate_id).cloned();
-        let version = match &previous {
-            Some(v) => v.next(&hasher, &app, &gate)?,
-            None => ghost_gate_registry::PolicyVersion {
-                application_id: app_id.clone(),
-                gate_id: gate_id.clone(),
-                version: 1,
-                policy_hash: ghost_gate_core::policy::hash_policy(&hasher, &app, &gate, 1),
-                network: app.network,
-                genesis_hash: app.genesis_hash.clone(),
-                policy: gate.clone(),
-                app_revision: app.revision,
-                created_unix: ghost_gate_registry::now_unix(),
-            },
-        };
-        // Account for the consequences, explicitly.
-        let (sessions_carried, sessions_revoked) = match &previous {
-            Some(prev) if prev.policy_hash != version.policy_hash => {
-                // Sessions proven under the old hash are invalidated by a NEW policy: fresh
-                // evidence is required. The bridge enforces this at access time via the hash
-                // comparison; we record the decision here for the audit trail.
-                (Vec::new(), Vec::new())
+        let mut published = Vec::new();
+        for gate in &app.gates {
+            let previous = r.current_version(&app_id, &gate.gate_id).cloned();
+            let already_current = previous.as_ref().is_some_and(|v| {
+                v.policy_hash_version == ghost_gate_registry::POLICY_HASH_V2
+                    && v.policy == *gate
+                    && ghost_gate_registry::hash_policy_versioned(
+                        &hasher,
+                        &app,
+                        &v.policy,
+                        v.version,
+                        v.policy_hash_version,
+                    ).map(|hash| hash == v.policy_hash).unwrap_or(false)
+            });
+            if already_current {
+                continue;
             }
-            _ => (Vec::new(), Vec::new()),
-        };
-        let replacement = ghost_gate_registry::ReplacementRecord {
-            gate_id: gate_id.clone(),
-            from_version: previous.as_ref().map(|v| v.version).unwrap_or(0),
-            to_version: version.version,
-            reason: reason.clone(),
-            outstanding_challenges_invalidated: vec![], // the bridge's challenge book handles these
-            sessions_carried,
-            sessions_revoked,
-            authorized_by: actor.clone(),
-            created_unix: ghost_gate_registry::now_unix(),
-        };
-            r.replacements.push(replacement);
+            let version = match &previous {
+                Some(v) => v.next(&hasher, &app, gate)?,
+                None => ghost_gate_registry::PolicyVersion {
+                    application_id: app_id.clone(),
+                    gate_id: gate.gate_id.clone(),
+                    version: 1,
+                    policy_hash: ghost_gate_registry::hash_policy_versioned(
+                        &hasher,
+                        &app,
+                        gate,
+                        1,
+                        ghost_gate_registry::POLICY_HASH_V2,
+                    )?,
+                    policy_hash_version: ghost_gate_registry::POLICY_HASH_V2,
+                    policy_context: Some(ghost_gate_core::policy::PublishedApplicationContext::from_application(&app)),
+                    network: app.network,
+                    genesis_hash: app.genesis_hash.clone(),
+                    policy: gate.clone(),
+                    app_revision: app.revision,
+                    created_unix: ghost_gate_registry::now_unix(),
+                },
+            };
+            r.replacements.push(ghost_gate_registry::ReplacementRecord {
+                gate_id: gate.gate_id.clone(),
+                from_version: previous.as_ref().map(|v| v.version).unwrap_or(0),
+                to_version: version.version,
+                reason: reason.clone(),
+                outstanding_challenges_invalidated: vec![],
+                sessions_carried: Vec::new(),
+                sessions_revoked: Vec::new(),
+                authorized_by: actor.clone(),
+                created_unix: ghost_gate_registry::now_unix(),
+            });
             r.versions.push(version);
+            published.push(gate.gate_id.clone());
+        }
+        if published.is_empty() {
+            return Err("application policy is already published at hash format v2".into());
+        }
             Ok(())
         },
     );
     match result {
-        Ok(_) => Response::ok_json(&serde_json::json!({ "published": gate_id })),
+        Ok(reg) => {
+            let published: Vec<String> = reg
+                .replacements
+                .iter()
+                .rev()
+                .take_while(|r| r.reason == reason)
+                .map(|r| r.gate_id.clone())
+                .collect();
+            Response::ok_json(&serde_json::json!({ "published": gate_id, "publishedGates": published }))
+        }
         Err(e) => Response::error(400, &format!("GG: {e}")),
     }
 }
@@ -1320,7 +1416,7 @@ fn revoke_session(state: &SharedState, req: &Request, authority: &Authority) -> 
     let prefix = body.token_prefix.clone();
     let reason = if body.reason.is_empty() { "revoked from the dashboard".into() } else { body.reason };
     // Revocations are shared with the bridge through the registry file.
-    let result = state.commit_ctx(&actor, "session.revoke", Some(("sessions".into(), None, None, None)), |r| {
+    let result = state.commit_ctx_revocation(&actor, "session.revoke", Some(("sessions".into(), None, None, None)), |r| {
         let _lock_free_zone = ();
         r.revocations.push(ghost_gate_registry::Revocation {
             token_prefix: prefix.clone(),
@@ -1346,7 +1442,7 @@ fn revoke_all_sessions(state: &SharedState, req: &Request, authority: &Authority
     let app_id = body.application_id.clone();
     // Full revocation is expressed as a policy-version bump-free "kill switch": every live
     // session for this application is recorded as revoked by prefix. The bridge honours it.
-    let result = state.commit_ctx(&actor, "session.revoke-all", Some((app_id.clone(), None, None, None)), |r| {
+    let result = state.commit_ctx_revocation(&actor, "session.revoke-all", Some((app_id.clone(), None, None, None)), |r| {
         let now = ghost_gate_registry::now_unix();
         let _ = now;
         r.revocations.push(ghost_gate_registry::Revocation {

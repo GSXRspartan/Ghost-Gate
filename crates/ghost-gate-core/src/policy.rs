@@ -821,6 +821,18 @@ pub struct PolicyVersion {
     pub version: u64,
     /// Canonical digest over every field above plus the network/genesis identifier.
     pub policy_hash: String,
+    /// The canonical policy-hash format used for `policy_hash`.  Registries written before
+    /// policy-hash v2 used v1, which deliberately remains verifiable so an upgrade cannot
+    /// reinterpret an already-published policy.  A subsequent explicit Publish migrates it to
+    /// v2.
+    #[serde(default = "default_policy_hash_version")]
+    pub policy_hash_version: u8,
+    /// The application-level authorization context frozen with a v2 policy.  Gate policies alone
+    /// cannot reproduce topology, default TTL, or production trust requirements after an
+    /// administrator starts a new draft.  Legacy v1 records intentionally have no context and
+    /// require an explicit re-publish before those application fields may be edited.
+    #[serde(default)]
+    pub policy_context: Option<PublishedApplicationContext>,
     /// The ledger this version was frozen for: the cohort byte plus the genesis identity. Frozen
     /// with the policy so a later re-point of the application cannot silently reinterpret it.
     pub network: u8,
@@ -832,17 +844,70 @@ pub struct PolicyVersion {
     pub created_unix: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishedApplicationContext {
+    pub owner_credential: String,
+    pub topology: GateTopology,
+    pub default_session_ttl: u64,
+    pub production: bool,
+    pub network: u8,
+    pub genesis_hash: String,
+}
+
+impl PublishedApplicationContext {
+    pub fn from_application(app: &Application) -> Self {
+        Self {
+            owner_credential: app.owner_credential.clone(),
+            topology: app.topology,
+            default_session_ttl: app.default_session_ttl,
+            production: app.production,
+            network: app.network,
+            genesis_hash: app.genesis_hash.clone(),
+        }
+    }
+
+    /// Reconstruct just the application fields consumed by policy canonicalization.  Gates and
+    /// bookkeeping remain from `current` because they are deliberately outside that digest.
+    pub fn apply_to(&self, current: &Application) -> Application {
+        let mut frozen = current.clone();
+        frozen.owner_credential = self.owner_credential.clone();
+        frozen.topology = self.topology;
+        frozen.default_session_ttl = self.default_session_ttl;
+        frozen.production = self.production;
+        frozen.network = self.network;
+        frozen.genesis_hash = self.genesis_hash.clone();
+        frozen
+    }
+}
+
+pub const POLICY_HASH_V1: u8 = 1;
+pub const POLICY_HASH_V2: u8 = 2;
+
+fn default_policy_hash_version() -> u8 {
+    POLICY_HASH_V1
+}
+
 impl PolicyVersion {
     pub fn next<H: PolicyHasher>(&self, hasher: &H, app: &Application, gate: &GatePolicy) -> Result<Self, String> {
         if gate.gate_id != self.gate_id {
             return Err("a policy version cannot change its gate id".into());
         }
-        if gate.gate_id == self.policy.gate_id
-            && gate.threshold_raw == self.policy.threshold_raw
-            && gate.resource_address == self.policy.resource_address
+        let next_hash = hash_policy_versioned(
+            hasher,
+            app,
+            gate,
+            self.version + 1,
+            POLICY_HASH_V2,
+        )?;
+        // A deliberate re-publish of a legacy v1 policy is a migration, even if its visible
+        // resource and threshold did not change.  v2 binds the missing authority fields.
+        if self.policy_hash_version == POLICY_HASH_V2
+            && self.policy == *gate
+            && self.policy_context.as_ref() == Some(&PublishedApplicationContext::from_application(app))
         {
             return Err(
-                "threshold and resource are unchanged; publish a change or leave the version alone"
+                "policy is unchanged; publish a change or leave the version alone"
                     .into(),
             );
         }
@@ -850,7 +915,9 @@ impl PolicyVersion {
             application_id: app.application_id.clone(),
             gate_id: gate.gate_id.clone(),
             version: self.version + 1,
-            policy_hash: hash_policy(hasher, app, gate, self.version + 1),
+            policy_hash: next_hash,
+            policy_hash_version: POLICY_HASH_V2,
+            policy_context: Some(PublishedApplicationContext::from_application(app)),
             network: self.network,
             genesis_hash: self.genesis_hash.clone(),
             policy: gate.clone(),
@@ -895,6 +962,40 @@ pub fn canonical_form(app: &Application, gate: &GatePolicy, version: u64) -> Vec
     canonical.into_bytes()
 }
 
+/// Canonical policy-hash v2.  This deliberately does not change [`canonical_form`]: existing
+/// v1 policy hashes must continue to mean exactly what they meant when they were signed and
+/// published.  New publications bind every runtime authorization setting omitted by v1,
+/// including the surface (`use_mode`) and application production/trust requirement.
+pub fn canonical_form_v2(app: &Application, gate: &GatePolicy, version: u64) -> Vec<u8> {
+    let mut canonical = String::new();
+    canonical.push_str(&format!("v2|{}|{}|{}", app.application_id, gate.gate_id, version));
+    canonical.push_str(&format!(
+        "|{}|{}|{}|{}|{}|{}",
+        app.owner_credential,
+        app.topology.topology_code(),
+        app.network,
+        app.genesis_hash,
+        app.production,
+        app.default_session_ttl,
+    ));
+    canonical.push_str(&format!(
+        "|{}|{}|{}|{}|{}",
+        gate.resource_address, gate.threshold_raw, gate.divisibility, gate.symbol, gate.name
+    ));
+    canonical.push_str(&format!(
+        "|{:?}|{}|{}|{}|{}|{}|{}|{}",
+        gate.proof_mode,
+        gate.challenge_domain,
+        gate.session_ttl_override.unwrap_or(app.default_session_ttl),
+        gate.enabled,
+        gate.test_lane,
+        gate.grants.join(","),
+        gate.component_address.as_deref().unwrap_or(""),
+        gate.use_mode.as_str(),
+    ));
+    canonical.into_bytes()
+}
+
 /// Anything that can digest the canonical form. blake3 in production; a stub in tests.
 pub trait PolicyHasher {
     fn hex_digest(&self, bytes: &[u8]) -> String;
@@ -903,6 +1004,22 @@ pub trait PolicyHasher {
 /// Convenience: hash a policy version with the supplied hasher.
 pub fn hash_policy<H: PolicyHasher>(hasher: &H, app: &Application, gate: &GatePolicy, version: u64) -> String {
     hasher.hex_digest(&canonical_form(app, gate, version))
+}
+
+/// Hash a policy using its recorded canonicalization version. Unknown versions are never
+/// best-effort decoded: callers must fail closed rather than silently weaken a future format.
+pub fn hash_policy_versioned<H: PolicyHasher>(
+    hasher: &H,
+    app: &Application,
+    gate: &GatePolicy,
+    version: u64,
+    policy_hash_version: u8,
+) -> Result<String, String> {
+    match policy_hash_version {
+        POLICY_HASH_V1 => Ok(hash_policy(hasher, app, gate, version)),
+        POLICY_HASH_V2 => Ok(hasher.hex_digest(&canonical_form_v2(app, gate, version))),
+        other => Err(format!("unsupported policy hash version {other}")),
+    }
 }
 
 impl GateTopology {
@@ -1144,6 +1261,14 @@ mod tests {
 
         // Version is part of the identity too.
         assert_ne!(hash_policy(&h, &a, &g, 2), base, "version must change the hash");
+
+        let v2 = hash_policy_versioned(&h, &a, &g, 1, POLICY_HASH_V2).unwrap();
+        let mut other_scope = g.clone();
+        other_scope.use_mode = GateUseMode::Both;
+        assert_ne!(v2, hash_policy_versioned(&h, &a, &other_scope, 1, POLICY_HASH_V2).unwrap(), "v2 must bind the allowed surface");
+        let mut production = a.clone();
+        production.production = !production.production;
+        assert_ne!(v2, hash_policy_versioned(&h, &production, &g, 1, POLICY_HASH_V2).unwrap(), "v2 must bind the required trust tier");
     }
 
     #[test]
@@ -1156,14 +1281,19 @@ mod tests {
             gate_id: g.gate_id.clone(),
             version: 1,
             policy_hash: hash_policy(&h, &a, &g, 1),
+            policy_hash_version: POLICY_HASH_V1,
+            policy_context: None,
             network: crate::network::LOCALNET,
             genesis_hash: a.genesis_hash.clone(),
             policy: g.clone(),
             app_revision: a.revision,
             created_unix: 1,
         };
-        // No change: refused.
-        assert!(v1.next(&h, &a, &g).is_err());
+        // Re-publishing a v1 policy deliberately migrates it to v2, even without a visible
+        // policy change.  The stored v1 hash remains verifiable; it is never reinterpreted.
+        let migrated = v1.next(&h, &a, &g).unwrap();
+        assert_eq!(migrated.policy_hash_version, POLICY_HASH_V2);
+        assert!(migrated.next(&h, &a, &g).is_err(), "an unchanged v2 policy is not re-cut");
         // Changed threshold: version 2 with a new hash.
         let mut g2 = g.clone();
         g2.threshold_raw = 200_000_000;

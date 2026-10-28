@@ -466,6 +466,8 @@ fn one_week_session_issue_use_expiry_and_revocation() {
         gate_id: "members".into(),
         version: 1,
         policy_hash: hash_policy(&ghost_gate_registry::Blake3Hasher, app_ref, gate_ref, 1),
+        policy_hash_version: ghost_gate_registry::POLICY_HASH_V1,
+        policy_context: None,
         network: ghost_gate_core::network::LOCALNET,
         genesis_hash: GENESIS.into(),
         policy: gate_ref.clone(),
@@ -668,11 +670,9 @@ fn tamper_6_a_ticker_clone_is_not_the_same_resource() {
     let set = http(server.port, "POST", "/admin/api/gate/set", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
         &serde_json::json!({ "applicationId": "vault", "gate": twin }).to_string());
     assert_eq!(set.status, 200, "{}", set.body);
-    for gate in ["bronze", "bronze-clone"] {
-        let pubr = http(server.port, "POST", "/admin/api/policy/publish", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
-            &serde_json::json!({ "applicationId": "vault", "gateId": gate }).to_string());
-        assert_eq!(pubr.status, 200, "publish {gate}: {}", pubr.body);
-    }
+    let pubr = http(server.port, "POST", "/admin/api/policy/publish", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
+        r#"{"applicationId":"vault","gateId":"bronze-clone"}"#);
+    assert_eq!(pubr.status, 200, "publishing the complete application draft succeeds: {}", pubr.body);
     let state = http(server.port, "GET", "/admin/api/state", &hdrs(&auth_headers(server.port, &cookie, &csrf)), "");
     let apps = state.body.get("applications").unwrap().as_array().unwrap();
     let app = apps.iter().find(|a| as_str(a, "applicationId") == "vault").unwrap();
@@ -730,7 +730,7 @@ fn tamper_8_a_proof_against_another_gate_or_policy_cannot_verify() {
     for (id, hash, policy) in hashes {
         reg.versions.push(ghost_gate_registry::PolicyVersion {
             application_id: "app".into(), gate_id: id, version: 1,
-            policy_hash: hash, network: ghost_gate_core::network::LOCALNET, genesis_hash: GENESIS.into(), policy, app_revision: 1, created_unix: 1,
+            policy_hash: hash, policy_hash_version: ghost_gate_registry::POLICY_HASH_V1, policy_context: None, network: ghost_gate_core::network::LOCALNET, genesis_hash: GENESIS.into(), policy, app_revision: 1, created_unix: 1,
         });
     }
     let app_ref = reg.application("app").unwrap();
@@ -753,8 +753,9 @@ fn tamper_9_lowering_a_threshold_below_an_outstanding_challenge_is_a_replacement
     let pubr = http(server.port, "POST", "/admin/api/policy/publish", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
         &serde_json::json!({ "applicationId": "vault", "gateId": "bronze" }).to_string());
     assert_eq!(pubr.status, 200, "{}", pubr.body);
-    // Now try to EDIT the published gate's threshold directly: refused — it must be a published
-    // replacement, so an outstanding challenge can never be silently reinterpreted.
+    // Edit a published gate's DRAFT.  The live bindings must remain at v1 until Publish, so an
+    // outstanding challenge can never be silently reinterpreted.
+    let before = ghost_gate_registry::load_bindings(&server.state.paths).unwrap().unwrap();
     let lowered = serde_json::json!({
         "gateId": "bronze", "name": "bronze", "resourceAddress": "resource_v", "symbol": "GHOST",
         "divisibility": 6, "thresholdRaw": "1", "proofMode": "consensus",
@@ -763,19 +764,16 @@ fn tamper_9_lowering_a_threshold_below_an_outstanding_challenge_is_a_replacement
     });
     let set = http(server.port, "POST", "/admin/api/gate/set", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
         &serde_json::json!({ "applicationId": "vault", "gate": lowered }).to_string());
-    assert_ne!(set.status, 200, "an edit of a published gate's threshold is refused: {}", set.body);
-    assert!(set.body.to_string().contains("replacement"), "{}", set.body);
-    // The correct path: change the draft to the new threshold and PUBLISH the replacement, which
-    // is recorded as a replacement event.
-    let replacement = serde_json::json!({
-        "gateId": "bronze", "name": "bronze", "resourceAddress": "resource_v", "symbol": "GHOST",
-        "divisibility": 6, "thresholdRaw": "500000", "proofMode": "consensus",
-        "challengeDomain": "vault.localhost", "grants": [], "enabled": true, "testLane": false,
-        "componentAddress": "component_bronze",
-    });
-    let set2 = http(server.port, "POST", "/admin/api/gate/set", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
-        &serde_json::json!({ "applicationId": "vault", "gate": replacement }).to_string());
-    assert_ne!(set2.status, 200, "even via gate/set the identity change on a published gate is refused");
+    assert_eq!(set.status, 200, "the replacement draft saves: {}", set.body);
+    let draft_bindings = ghost_gate_registry::load_bindings(&server.state.paths).unwrap().unwrap();
+    let old = before.gates.iter().find(|g| g.gate_id == "bronze").unwrap();
+    let still_old = draft_bindings.gates.iter().find(|g| g.gate_id == "bronze").unwrap();
+    assert_eq!(still_old.threshold_raw, old.threshold_raw, "a draft cannot replace a live binding");
+    let replacement = http(server.port, "POST", "/admin/api/policy/publish", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
+        r#"{"applicationId":"vault","gateId":"bronze","reason":"threshold replacement"}"#);
+    assert_eq!(replacement.status, 200, "publishing the replacement succeeds: {}", replacement.body);
+    let after = ghost_gate_registry::load_bindings(&server.state.paths).unwrap().unwrap();
+    assert_eq!(after.gates.iter().find(|g| g.gate_id == "bronze").unwrap().threshold_raw, 1);
 }
 
 #[test]
@@ -819,7 +817,7 @@ fn tamper_10_a_lower_tier_session_cannot_reach_a_higher_tier() {
     for (id, hash, policy) in hashes {
         reg.versions.push(ghost_gate_registry::PolicyVersion {
             application_id: "t".into(), gate_id: id, version: 1,
-            policy_hash: hash, network: ghost_gate_core::network::LOCALNET, genesis_hash: GENESIS.into(), policy, app_revision: 1, created_unix: 1,
+            policy_hash: hash, policy_hash_version: ghost_gate_registry::POLICY_HASH_V1, policy_context: None, network: ghost_gate_core::network::LOCALNET, genesis_hash: GENESIS.into(), policy, app_revision: 1, created_unix: 1,
         });
     }
     let app_ref = reg.application("t").unwrap();
@@ -862,6 +860,8 @@ fn tamper_11_client_side_expiry_extension_is_meaningless() {
     reg.versions.push(ghost_gate_registry::PolicyVersion {
         application_id: "e".into(), gate_id: "g".into(), version: 1,
         policy_hash: hash_policy(&ghost_gate_registry::Blake3Hasher, app_ref, g, 1),
+        policy_hash_version: ghost_gate_registry::POLICY_HASH_V1,
+        policy_context: None,
         network: ghost_gate_core::network::LOCALNET, genesis_hash: GENESIS.into(), policy: g.clone(), app_revision: 1, created_unix: 1,
     });
     let app_ref = reg.application("e").unwrap();
@@ -974,11 +974,12 @@ fn every_privileged_change_is_audited_with_actor_versions_and_outcome() {
     let (cookie, csrf) = fresh_stepped_up(&server, &owner);
     let _ = http(server.port, "POST", "/admin/api/policy/publish", &hdrs(&auth_headers(server.port, &cookie, &csrf)),
         &serde_json::json!({ "applicationId": "vault", "gateId": "bronze", "reason": "launch" }).to_string());
-    // A REFUSED privileged action is audited too: attempt to edit a PUBLISHED gate's threshold,
-    // which the rules refuse (it must be a published replacement).
+    // A REFUSED privileged action is audited too: an enabled XTM draft fails complete policy
+    // validation. Ordinary credential/consensus edits are valid drafts and remain non-live until
+    // Publish, so they are not the correct refusal case.
     let refused_edit = serde_json::json!({
         "gateId": "bronze", "name": "bronze", "resourceAddress": "resource_v", "symbol": "GHOST",
-        "divisibility": 6, "thresholdRaw": "1", "proofMode": "consensus",
+        "divisibility": 6, "thresholdRaw": "1", "proofMode": "xtm",
         "challengeDomain": "vault.localhost", "grants": [], "enabled": true, "testLane": false,
         "componentAddress": "component_bronze",
     });
@@ -1049,18 +1050,18 @@ fn a_draft_gate_never_reaches_the_bridge() {
     // The fixture's three gates are DRAFT (never published). Nothing may bind yet.
     let paths = &server.state.paths;
     let reg: Registry = load_registry(paths).unwrap();
-    assert_eq!(derive_bindings(&reg).gates.len(), 0, "an unpublished gate must not be served");
-    // Publish one: exactly one gate binds, with the identity the administrator configured.
+    assert!(derive_bindings(&reg).is_err(), "an unpublished gate must block a bindings refresh");
+    // Publish the complete application draft: application-level topology and defaults are
+    // atomic, so every gate gets a frozen v2 version together.
     let pub_gate = |csrf: &str| {
         http(server.port, "POST", "/admin/api/policy/publish", &hdrs(&auth_headers(server.port, &cookie, csrf)),
             r#"{"applicationId":"vault","gateId":"bronze","reason":"first publish"}"#)
     };
     assert_eq!(pub_gate(&csrf).status, 200);
     let reg = load_registry(paths).unwrap();
-    let bindings = derive_bindings(&reg);
-    assert_eq!(bindings.gates.len(), 1, "only the published gate binds");
-    let bound = &bindings.gates[0];
-    assert_eq!(bound.gate_id, "bronze");
+    let bindings = derive_bindings(&reg).unwrap();
+    assert_eq!(bindings.gates.len(), 3, "the completed application snapshot binds");
+    let bound = bindings.gates.iter().find(|g| g.gate_id == "bronze").unwrap();
     assert_eq!(bound.network, ghost_gate_core::network::LOCALNET, "the cohort travels with the binding");
     assert_eq!(bound.genesis_hash, GENESIS, "the ledger identity travels with the binding");
     assert!(!bound.test_lane);
@@ -1145,6 +1146,8 @@ fn a_credential_gate_on_a_production_app_refuses_production_tier() {
     reg.versions.push(ghost_gate_registry::PolicyVersion {
         application_id: "prod-cred".into(), gate_id: "cred".into(), version: 1,
         policy_hash: policy_hash.clone(),
+        policy_hash_version: ghost_gate_registry::POLICY_HASH_V1,
+        policy_context: None,
         network: ghost_gate_core::network::LOCALNET, genesis_hash: GENESIS.into(),
         policy: policy_clone, app_revision: 1, created_unix: 1,
     });
@@ -1238,6 +1241,8 @@ fn measured_scalability_at_1_3_10_25_and_50_gates() {
                 gate_id: gid,
                 version: 1,
                 policy_hash: hash,
+            policy_hash_version: ghost_gate_registry::POLICY_HASH_V1,
+            policy_context: None,
                 network: ghost_gate_core::network::LOCALNET,
                 genesis_hash: GENESIS.into(),
                 policy,
@@ -1251,7 +1256,7 @@ fn measured_scalability_at_1_3_10_25_and_50_gates() {
         let validate = t0.elapsed();
 
         let t0 = Instant::now();
-        let _bindings = derive_bindings(&reg);
+        let _bindings = derive_bindings(&reg).unwrap();
         let bindings_time = t0.elapsed();
 
         let lock = StoreLock::acquire(&paths);

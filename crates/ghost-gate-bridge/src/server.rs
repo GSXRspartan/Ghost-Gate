@@ -3673,11 +3673,11 @@ mod tests {
         let mut reg = Registry::default();
         reg.credentials.push(serde_json::from_value(serde_json::json!({"credential_id":"admin", "kind":"WalletKey", "label":"test", "registered_unix":1, "ristretto_public_hex":"abc"})).unwrap());
         reg.versions.push(PolicyVersion { application_id:"default".into(), gate_id:"g1".into(), version:1,
-            policy_hash: hash_policy(&Blake3Hasher, &app, &gate, 1), network:app.network,
+            policy_hash: hash_policy(&Blake3Hasher, &app, &gate, 1), policy_hash_version: ghost_gate_registry::POLICY_HASH_V1, policy_context: None, network:app.network,
             genesis_hash:app.genesis_hash.clone(), policy:gate, app_revision:1, created_unix:1 });
         reg.applications.push(app);
         save_registry(&paths, &reg).unwrap();
-        b.access = Some(crate::access::AccessHandle::from_snapshot(&paths, &derive_bindings(&reg)).0);
+        b.access = Some(crate::access::AccessHandle::from_snapshot(&paths, &derive_bindings(&reg).unwrap()).0);
         b.origins = b.origins.clone().allow("https://gate.example");
         b.trust_policy = TrustPolicy { operator_trusted_indexer:true, max_tier:TrustTier::OperatorTrustedTestnet };
         paths
@@ -3699,7 +3699,7 @@ mod tests {
         reg.applications[0].chain_generation = input["generation"].as_u64().unwrap_or(1);
         reg.versions[0].policy_hash = ghost_gate_registry::hash_policy(&ghost_gate_registry::Blake3Hasher, &reg.applications[0], &reg.versions[0].policy, 1);
         ghost_gate_registry::save_registry(&paths, &reg).unwrap();
-        b.access = Some(crate::access::AccessHandle::from_snapshot(&paths, &ghost_gate_registry::derive_bindings(&reg)).0);
+        b.access = Some(crate::access::AccessHandle::from_snapshot(&paths, &ghost_gate_registry::derive_bindings(&reg).unwrap()).0);
         if input["halted"] == true { std::fs::write(paths.dir.join("reset_halt.json"), "halt").unwrap(); }
         if let Some(revision) = input["revision"].as_str() { std::fs::write(paths.dir.join("hosted_halt_revision"), revision).unwrap(); }
         b.trust_policy.operator_trusted_indexer = input["trusted"].as_bool().unwrap_or(true);
@@ -3845,7 +3845,7 @@ mod tests {
         reg.applications[0].production = true;
         reg.versions[0].policy_hash = ghost_gate_registry::hash_policy(&ghost_gate_registry::Blake3Hasher, &reg.applications[0], &reg.versions[0].policy, 1);
         ghost_gate_registry::save_registry(&paths, &reg).unwrap();
-        b.access = Some(crate::access::AccessHandle::from_snapshot(&paths, &ghost_gate_registry::derive_bindings(&reg)).0);
+        b.access = Some(crate::access::AccessHandle::from_snapshot(&paths, &ghost_gate_registry::derive_bindings(&reg).unwrap()).0);
         assert!(b.hosted_state(&hv_req).unwrap_err().contains("requires"), "production requirement rejects indexer evidence");
         std::fs::remove_dir_all(paths.dir).unwrap();
     }

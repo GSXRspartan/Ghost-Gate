@@ -21,9 +21,9 @@
 //!   nothing about version N+1: re-verification needs fresh evidence.
 
 pub use ghost_gate_core::policy::{
-    achieved_tier, effective_generation, hash_policy, now_unix, required_tier, Application, Evidence,
+    achieved_tier, effective_generation, hash_policy, hash_policy_versioned, now_unix, required_tier, Application, Evidence,
     EvidenceKind, GatePolicy, PolicyHasher, PolicyVersion, ProofMode, ReplacementRecord, TrustPolicy,
-    TrustTier, CHALLENGE_TTL, DEFAULT_SESSION_TTL, MAX_SESSION_TTL, MIN_SESSION_TTL,
+    TrustTier, POLICY_HASH_V1, POLICY_HASH_V2, CHALLENGE_TTL, DEFAULT_SESSION_TTL, MAX_SESSION_TTL, MIN_SESSION_TTL,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -282,7 +282,39 @@ impl Registry {
                 .application(&v.application_id)
                 .ok_or_else(|| format!("version names unknown application {}", v.application_id))?;
             // The hash must match the frozen content: a tampered version file is refused.
-            let expect = hash_policy(&hasher, app, &v.policy, v.version);
+            // v2 carries the application fields that were frozen with the version.  This lets
+            // an administrator save a new default/topology/production draft without rewriting
+            // the old policy hash.  Legacy v1 has no such context: it remains valid only while
+            // the current application still reproduces its historic canonical form, forcing an
+            // explicit v2 re-publish before those global settings can change.
+            let hash_app = match (&v.policy_context, v.policy_hash_version) {
+                (Some(context), POLICY_HASH_V2) => {
+                    if context.network != v.network || context.genesis_hash != v.genesis_hash {
+                        return Err(format!(
+                            "policy context mismatch for {}/{} v{}",
+                            v.application_id, v.gate_id, v.version
+                        ));
+                    }
+                    context.apply_to(app)
+                }
+                (None, POLICY_HASH_V1) => app.clone(),
+                (None, POLICY_HASH_V2) => return Err(format!(
+                    "policy {}/{} v{} uses v2 but has no frozen application context; explicitly re-publish it",
+                    v.application_id, v.gate_id, v.version
+                )),
+                (Some(_), POLICY_HASH_V1) => return Err(format!(
+                    "policy {}/{} v{} has an invalid v1 application context",
+                    v.application_id, v.gate_id, v.version
+                )),
+                (_, other) => return Err(format!("unsupported policy hash version {other}")),
+            };
+            let expect = hash_policy_versioned(
+                &hasher,
+                &hash_app,
+                &v.policy,
+                v.version,
+                v.policy_hash_version,
+            )?;
             if expect != v.policy_hash {
                 return Err(format!(
                     "policy hash mismatch for {}/{} v{}: the stored policy does not match its digest",
@@ -680,17 +712,60 @@ fn default_trust_tier() -> String {
     "development".to_string()
 }
 
-/// Derive the snapshot from a validated registry: enabled, activatable gates appear. Consensus
-/// gates require a deployed component; credential gates are component-free (empty string in the
-/// snapshot, which the bridge maps to `None`). Test lanes appear too — the bridge tags their
-/// sessions — but a test-lane session can never authorise a production gate (checked at access time).
-pub fn derive_bindings(reg: &Registry) -> Bindings {
+/// Proves that the mutable administrator workspace still describes exactly the complete published
+/// policy.  This is intentionally stricter than `validate_all`: structural validity is not
+/// publication.  New authorization is unavailable while there is a draft, rather than using a
+/// mix of draft application fields and published gate versions.
+pub fn require_published_policy_snapshot(reg: &Registry) -> Result<(), String> {
+    for app in &reg.applications {
+        for g in &app.gates {
+            // Bindings are the live authorization plane.  They may only be regenerated when
+            // every live gate exactly matches the immutable version that was explicitly
+            // published.  This turns the mutable `applications` record into a draft-only
+            // workspace: any un-published edit (including grants, scope, TTL, enablement,
+            // defaults/topology through the version hash) blocks publication instead of leaking
+            // into a bridge reload.
+            let version = reg.current_version(&app.application_id, &g.gate_id).ok_or_else(|| {
+                format!(
+                    "application {}/{} has an unpublished draft; publish before refreshing live bindings",
+                    app.application_id, g.gate_id
+                )
+            })?;
+            if version.policy != *g {
+                return Err(format!(
+                    "application {}/{} differs from its published policy; refusing to refresh live bindings",
+                    app.application_id, g.gate_id
+                ));
+            }
+            let hasher = Blake3Hasher;
+            let expected = hash_policy_versioned(
+                &hasher,
+                app,
+                &version.policy,
+                version.version,
+                version.policy_hash_version,
+            )?;
+            if expected != version.policy_hash {
+                return Err(format!(
+                    "application {}/{} no longer matches its published policy context; refusing to refresh live bindings",
+                    app.application_id, g.gate_id
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn derive_bindings(reg: &Registry) -> Result<Bindings, String> {
+    require_published_policy_snapshot(reg)?;
     let mut gates = Vec::new();
     for app in &reg.applications {
         for g in &app.gates {
             if !g.enabled || !g.proof_mode.is_activatable() {
                 continue;
             }
+            let version = reg.current_version(&app.application_id, &g.gate_id)
+                .expect("published snapshot check established a version for every gate");
             // Consensus gates require a real component; credential gates are component-free.
             let component = match g.proof_mode {
                 ProofMode::Consensus => {
@@ -704,8 +779,6 @@ pub fn derive_bindings(reg: &Registry) -> Bindings {
             // publishes it: the publish step is where the version is frozen, the reason is recorded
             // and the audit entry is written, so a draft must never reach the bridge behind the
             // operator's back with a self-computed hash.
-            let version = reg.current_version(&app.application_id, &g.gate_id);
-            let Some(version) = version else { continue };
             gates.push(GateBindingSnapshot {
                 application_id: app.application_id.clone(),
                 gate_id: g.gate_id.clone(),
@@ -730,14 +803,15 @@ pub fn derive_bindings(reg: &Registry) -> Bindings {
             });
         }
     }
-    Bindings {
+    Ok(Bindings {
         generated_unix: now_unix(),
         gates,
         revoked_session_prefixes: reg.revocations.iter().map(|r| r.token_prefix.clone()).collect(),
-    }
+    })
 }
 
-/// Persist the derived snapshot. Called by the admin plane after every accepted policy change.
+/// Persist the derived snapshot.  Only an explicit policy publication (or a revocation-only
+/// update preserving the existing gates) may call this; drafts are deliberately not live.
 pub fn save_bindings(paths: &StorePaths, bindings: &Bindings) -> Result<(), String> {
     let _ = fs::create_dir_all(&paths.dir);
     let tmp = paths.dir.join(format!("bindings.json.tmp{}", std::process::id()));
@@ -826,6 +900,7 @@ pub fn issue_session_with_token(
     if authorization_id.is_empty() || token.len() != 64 || !token.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err("invalid server-side authorization identity or session token".into());
     }
+    require_published_policy_snapshot(reg)?;
     let app = reg
         .application(application_id)
         .ok_or_else(|| format!("unknown application {application_id}"))?;
@@ -1122,6 +1197,8 @@ mod tests {
                 gate_id: g.gate_id.clone(),
                 version: 1,
                 policy_hash: hash_policy(&hasher(), reg.applications.first().unwrap(), g, 1),
+                policy_hash_version: POLICY_HASH_V1,
+                policy_context: None,
                 network: ghost_gate_core::network::LOCALNET,
                 genesis_hash: GENESIS.to_string(),
                 policy: g.clone(),
@@ -1225,6 +1302,8 @@ mod tests {
                 gate_id: gid.into(),
                 version: 1,
                 policy_hash: hash_policy(&hasher(), app, g, 1),
+                policy_hash_version: POLICY_HASH_V1,
+                policy_context: None,
                 network: ghost_gate_core::network::LOCALNET,
                 genesis_hash: GENESIS.to_string(),
                 policy: g.clone(),
@@ -1281,9 +1360,30 @@ mod tests {
         assert!(app.validate().is_err(), "an enabled consensus gate without a component must be refused");
         app.gates.pop();
         app.validate().unwrap();
-        let b = derive_bindings(&reg);
-        assert_eq!(b.gates.len(), 3, "only enabled, activatable, published gates bind");
-        assert!(b.gates.iter().all(|g| g.policy_version == 1));
+        assert!(derive_bindings(&reg).is_err(), "even an inert unpublished draft blocks a live refresh");
+    }
+
+    #[test]
+    fn draft_authorization_edits_refuse_a_live_bindings_refresh() {
+        // `applications` is the administrator's mutable draft workspace.  Until Publish cuts
+        // new immutable versions, every authorization-relevant draft must prevent a fresh
+        // binding snapshot from replacing the already-served one.
+        let reg = registry_with_tiers();
+        assert!(derive_bindings(&reg).is_ok());
+
+        let mut cases: Vec<(&str, Box<dyn Fn(&mut Registry)>)> = Vec::new();
+        cases.push(("grants", Box::new(|r| r.applications[0].gates[0].grants.clear())));
+        cases.push(("ttl", Box::new(|r| r.applications[0].gates[0].session_ttl_override = Some(7_200))));
+        cases.push(("scope", Box::new(|r| r.applications[0].gates[0].use_mode = ghost_gate_core::policy::GateUseMode::Both)));
+        cases.push(("enablement", Box::new(|r| r.applications[0].gates[0].enabled = false)));
+        cases.push(("default ttl", Box::new(|r| r.applications[0].default_session_ttl = 7_200)));
+        cases.push(("topology", Box::new(|r| r.applications[0].topology = GateTopology::Independent)));
+
+        for (name, change) in cases {
+            let mut draft = reg.clone();
+            change(&mut draft);
+            assert!(derive_bindings(&draft).is_err(), "unpublished {name} change must not reach the bridge");
+        }
     }
 
     #[test]
@@ -1316,13 +1416,15 @@ mod tests {
             gate_id: "crypt".into(),
             version: 1,
             policy_hash: hash_policy(&hasher(), &a, &cred_gate, 1),
+            policy_hash_version: POLICY_HASH_V1,
+            policy_context: None,
             network: ghost_gate_core::network::LOCALNET,
             genesis_hash: GENESIS.to_string(),
             policy: cred_gate.clone(),
             app_revision: 1,
             created_unix: 1,
         });
-        let b = derive_bindings(&reg);
+        let b = derive_bindings(&reg).unwrap();
         assert_eq!(b.gates.len(), 1, "the credential gate must appear in bindings");
         let snap = &b.gates[0];
         assert_eq!(snap.gate_id, "crypt");
@@ -1422,6 +1524,8 @@ mod tests {
             gate_id: "cred".into(),
             version: 1,
             policy_hash: hash_policy(&hasher(), &a, g, 1),
+            policy_hash_version: POLICY_HASH_V1,
+            policy_context: None,
             network: ghost_gate_core::network::LOCALNET,
             genesis_hash: GENESIS.to_string(),
             policy: g.clone(),
@@ -1459,7 +1563,7 @@ mod tests {
         let hash = hash_policy(&hasher(), &a, g, 1);
         reg.versions.push(PolicyVersion {
             application_id: a.application_id.clone(), gate_id: "cred".into(), version: 1,
-            policy_hash: hash.clone(), network: ghost_gate_core::network::LOCALNET,
+            policy_hash: hash.clone(), policy_hash_version: POLICY_HASH_V1, policy_context: None, network: ghost_gate_core::network::LOCALNET,
             genesis_hash: GENESIS.to_string(), policy: g.clone(), app_revision: 1, created_unix: 1,
         });
         let indexer = Evidence::IndexerAsserted { digest: "idx".into() };
