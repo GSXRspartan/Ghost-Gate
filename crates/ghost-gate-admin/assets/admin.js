@@ -396,11 +396,30 @@ function renderApps(state) {
         tiers.append(row);
       }
       editor.append(tiers);
+      // Pre-populate the editor from the first existing gate so edits work without re-typing.
+      if (app.gates.length > 0) {
+        const g = app.gates[0];
+        const s = (id, v) => { const el = $(id); if (el && v != null) el.value = String(v); };
+        s(`gate-id-${app.applicationId}`, g.gateId);
+        s(`gate-name-${app.applicationId}`, g.name);
+        s(`gate-resource-${app.applicationId}`, g.resourceAddress);
+        s(`gate-symbol-${app.applicationId}`, g.symbol);
+        s(`gate-div-${app.applicationId}`, g.divisibility);
+        s(`gate-amount-${app.applicationId}`, rawToHuman(g.thresholdRaw, g.divisibility));
+        s(`gate-component-${app.applicationId}`, g.componentAddress || "");
+        s(`mode-${app.applicationId}`, g.proofMode);
+        s(`ttl-${app.applicationId}`, g.sessionTtlOverrideSecs || "");
+        s(`grants-${app.applicationId}`, (g.grants || []).join(", "));
+        s(`scope-${app.applicationId}`, g.useMode || "website");
+        const tlc2 = $(`testlane-${app.applicationId}`);
+        if (tlc2) tlc2.checked = !!g.testLane;
+        updateComponentVisibility();
+      }
       const buttons = document.createElement("div");
       buttons.className = "gate-actions";
       const add = document.createElement("button");
       add.className = "btn primary";
-      add.textContent = "Add gate";
+      add.textContent = app.gates.length > 0 ? "Save gate" : "Add gate";
       add.onclick = () => addGate(app);
       const publish = document.createElement("button");
       publish.className = "btn";
