@@ -1,0 +1,38 @@
+[Unit]
+Description=Ghost Gate private administrator dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ghostgate-admin
+Group=ghostgate-admin
+SupplementaryGroups=ghostgate-registry
+WorkingDirectory=/opt/ghost-gate
+ExecStart=/opt/ghost-gate/bin/ghost-gate-admin
+EnvironmentFile=/opt/ghost-gate/etc/ghost-gate-admin.env
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+# The dashboard is a private control plane.  It intentionally listens only on loopback; access
+# is through SSH local-port forwarding, never Cloudflare Tunnel or public DNS.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+LockPersonality=yes
+UMask=0007
+ReadWritePaths=/opt/ghost-gate/data/registry
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ghost-gate-admin
+
+[Install]
+WantedBy=multi-user.target

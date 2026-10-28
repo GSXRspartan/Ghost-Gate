@@ -7,6 +7,8 @@ credentials-file: /opt/ghost-gate/etc/cloudflared-tunnel.json
 
 ingress:
   # Only the hosted verifier and the Telegram credential routes are public.
+  # The private administrator dashboard on 127.0.0.1:7811 is reached only over SSH forwarding;
+  # never add /admin or its port to this Tunnel configuration.
   # Rules match paths, not methods; the bridge must still enforce its own authorization.
   - hostname: bridge.DOMAIN_HERE
     path: '^/v1/hosted/verify$'
