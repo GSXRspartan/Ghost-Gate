@@ -40,3 +40,9 @@ The previous tunnel template forwarded every bridge path, including administrati
 - `git diff --check`: clean for this patch. Existing unrelated admin modifications were preserved.
 
 Ready for independent security review of these authorization changes. Public authorization remains gated on that review and actual Cloudflare/runtime verification. Keep registry, generation ledger and halt revision durable and protected; restoring/deleting authoritative state outside the supported administrative process can defeat filesystem-based rollback protection. Clocks must satisfy the five-second bound or hosted access fails closed.
+
+## Independent review follow-up (2026-10-27)
+
+- Operator halt commands: `GG_BINDINGS_PATH=<registry dir> ghost-gate-bridge halt "<reason>"` and `... clear-halt "<ack>"`. Before this, nothing outside tests called `latch_halt`/`clear_halt`, so the only available halt was hand-creating/deleting `reset_halt.json`, which skips the revision rotation and lets pre-halt hosted sessions and pending challenges revive after recovery. Never edit the halt file or `hosted_halt_revision` by hand.
+- `hosted_state` now refuses gates scoped `telegram`, matching the local credential route.
+- Hosted sessions have no per-session administrative revocation (the registry's session revocation does not reach Durable Object records). Mass revocation is available through halt + clear-halt, generation migration, or republishing the gate policy; per-visitor revocation is the visitor's own `/revoke`.

@@ -891,6 +891,10 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
     /// tunnel without any Worker-side code changes.
     fn hosted_state(&self, req: &ghost_gate_verifier::hosted::HostedVerificationRequest) -> Result<serde_json::Value, String> {
         if self.reset_halted() { return Err("reset halt active".into()); }
+        // Same scope rule as the local credential route: a Telegram-only gate never authorizes a website.
+        if self.gates.use_mode_of(&req.gate_id).as_deref() == Some("telegram") {
+            return Err("gate is scoped to Telegram membership only".into());
+        }
         self.origins.permits(Some(&req.relying_site)).map_err(|e| e.to_string())?;
         let access = self.access.as_ref().ok_or("hosted authorization requires registry bindings")?;
         let info = access.info(&req.gate_id).ok_or("unknown registry gate")?;
@@ -3902,6 +3906,25 @@ mod tests {
         let r = b.handle(&request).await;
         assert_eq!(r.status, 401, "tampered HMAC is refused: {}", r.body);
         assert!(r.body.contains("signature is invalid"), "{}", r.body);
+    }
+
+    #[tokio::test]
+    async fn hosted_state_refuses_a_telegram_only_gate() {
+        let mut b = credential_bridge(FakeWallet::new(), FakeChain::with("unused".into(), 0, [0u8; 32]));
+        let paths = hosted_fixture(&mut b);
+        let req = ghost_gate_verifier::hosted::HostedVerificationRequest {
+            nonce: "a".repeat(64), tenant: "default".into(), gate_id: "g1".into(),
+            relying_site: "https://gate.example".into(), network: binding().network,
+            resource_address: binding().resource().unwrap().to_string(), threshold_raw: "10000".into(),
+            policy_version: "v1".into(), proof_digest: "b".repeat(64),
+            proof: serde_json::json!({"hostedState": true}),
+        };
+        assert!(b.hosted_state(&req).is_ok(), "website-scoped gate is eligible");
+        b.gates.set_use_mode("g1", "telegram");
+        assert!(b.hosted_state(&req).unwrap_err().contains("Telegram"), "Telegram-only gate is refused");
+        b.gates.set_use_mode("g1", "both");
+        assert!(b.hosted_state(&req).is_ok(), "a gate scoped to both remains eligible");
+        std::fs::remove_dir_all(paths.dir).unwrap();
     }
 
     #[tokio::test]

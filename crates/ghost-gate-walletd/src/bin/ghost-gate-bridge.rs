@@ -30,6 +30,14 @@ use ghost_gate_walletd::{IndexerChainReader, JsonChainReader};
 use tari_template_lib_types::stealth::StealthTransferStatement;
 
 fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let registry_dir = std::env::var("GG_BINDINGS_PATH").ok();
+    if let Some(result) = ghost_gate_bridge::reset_guard::cli(&args, registry_dir.as_deref()) {
+        return match result {
+            Ok(message) => { println!("ghost-gate-bridge: {message}"); ExitCode::SUCCESS }
+            Err(e) => { eprintln!("ghost-gate-bridge: {e}"); ExitCode::FAILURE }
+        };
+    }
     let config = match Config::from_env() {
         Ok(c) => c,
         Err(e) => {

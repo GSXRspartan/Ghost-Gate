@@ -191,9 +191,66 @@ pub fn clear_halt(path: &Path, operator_ack: &str) -> Result<(), String> {
     }
 }
 
+/// Operator entry point (`ghost-gate-bridge halt <reason>` / `clear-halt <ack>`). Hand-creating or
+/// deleting `reset_halt.json` skips the hosted revision rotation, so hosted sessions would survive.
+pub fn operator_command(registry_dir: &Path, command: &str, text: &str) -> Result<String, String> {
+    let path = registry_dir.join("reset_halt.json");
+    match command {
+        "halt" if text.trim().is_empty() => Err("halt requires a reason".into()),
+        "halt" => latch_halt(&path, &ResetHalt {
+            reason: text.trim().to_string(),
+            first_seen_unix: crate::session::now_unix(),
+            observed_network: None,
+            observed_epoch: None,
+        })
+        .map(|()| format!("reset halt latched at {}", path.display())),
+        "clear-halt" => clear_halt(&path, text).map(|()| format!("reset halt cleared at {}", path.display())),
+        other => Err(format!("unknown operator command {other}")),
+    }
+}
+
+/// argv dispatch for the bridge binary. `None` means "not an operator command": start the server.
+pub fn cli(args: &[String], registry_dir: Option<&str>) -> Option<Result<String, String>> {
+    let command = args.first().filter(|c| matches!(c.as_str(), "halt" | "clear-halt"))?;
+    let Some(dir) = registry_dir.filter(|d| !d.trim().is_empty()) else {
+        return Some(Err(format!("{command} requires GG_BINDINGS_PATH (the registry data directory)")));
+    };
+    Some(operator_command(Path::new(dir), command, &args[1..].join(" ")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn operator_commands_rotate_the_hosted_revision_on_halt_and_recovery() {
+        let dir = std::env::temp_dir().join(format!("gg-halt-cmd-{}", hex::encode(crate::session::random_nonce())));
+        std::fs::create_dir_all(&dir).unwrap();
+        let revision = || std::fs::read(dir.join("hosted_halt_revision")).ok();
+        assert!(operator_command(&dir, "halt", "  ").is_err(), "a halt needs a reason");
+        assert!(revision().is_none() && !is_halted(&dir.join("reset_halt.json")));
+        operator_command(&dir, "halt", "suspected Esmeralda reset").unwrap();
+        assert!(is_halted(&dir.join("reset_halt.json")));
+        let latched = revision().expect("halting rotates the hosted revision");
+        assert!(operator_command(&dir, "clear-halt", " ").is_err(), "recovery needs an acknowledgment");
+        operator_command(&dir, "clear-halt", "operator reviewed").unwrap();
+        assert!(!is_halted(&dir.join("reset_halt.json")));
+        assert_ne!(revision().unwrap(), latched, "recovery rotates the hosted revision again");
+        assert!(operator_command(&dir, "status", "").is_err());
+
+        let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let d = dir.to_str().unwrap();
+        assert!(cli(&[], Some(d)).is_none(), "no arguments starts the server");
+        assert!(cli(&argv(&["--version"]), Some(d)).is_none(), "other arguments keep the old behaviour");
+        assert!(cli(&argv(&["halt", "x"]), None).unwrap().is_err(), "halt needs the registry directory");
+        assert!(cli(&argv(&["halt", "x"]), Some(" ")).unwrap().is_err());
+        cli(&argv(&["halt", "indexer", "epoch", "regressed"]), Some(d)).unwrap().unwrap();
+        assert!(is_halted(&dir.join("reset_halt.json")));
+        assert_eq!(load_halt(&dir.join("reset_halt.json")).unwrap().reason, "indexer epoch regressed");
+        cli(&argv(&["clear-halt", "reviewed"]), Some(d)).unwrap().unwrap();
+        assert!(!is_halted(&dir.join("reset_halt.json")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn expected() -> ExpectedIdentity {
         ExpectedIdentity {
