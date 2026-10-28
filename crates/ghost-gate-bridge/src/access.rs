@@ -17,6 +17,10 @@ use ghost_gate_registry::{AccessDecision, AccessGrant, AccessPlane, Bindings, Ev
 #[derive(Debug, Clone)]
 pub struct GateAccessInfo {
     pub application_id: String,
+    /// The immutable relying-site identity frozen with the published policy. Hosted requests
+    /// must match this value as well as the deployment origin allowlist; an environment change
+    /// must not silently retarget a published gate to a different website.
+    pub challenge_domain: String,
     pub policy_hash: String,
     pub policy_version: u64,
     pub session_ttl_secs: u64,
@@ -49,6 +53,7 @@ impl AccessHandle {
                 g.gate_id.clone(),
                 GateAccessInfo {
                     application_id: g.application_id.clone(),
+                    challenge_domain: g.challenge_domain.clone(),
                     policy_hash: g.policy_hash.clone(),
                     policy_version: g.policy_version,
                     session_ttl_secs: g.session_ttl_secs,

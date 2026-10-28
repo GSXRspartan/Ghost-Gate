@@ -899,6 +899,13 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
         let access = self.access.as_ref().ok_or("hosted authorization requires registry bindings")?;
         let info = access.info(&req.gate_id).ok_or("unknown registry gate")?;
         if req.tenant != info.application_id { return Err("tenant mismatch".into()); }
+        // `GG_BRIDGE_ORIGINS` is a deployment allowlist, not policy authority.  The exact
+        // relying-site that the Worker sends must also be the one frozen in the published
+        // binding.  Otherwise a later environment-only change could move a live policy to a
+        // different site without an authenticated Publish operation.
+        if req.relying_site != info.challenge_domain {
+            return Err("published relying-site mismatch".into());
+        }
         // Always reload the durable generation ledger, even if registry mtime is unchanged.
         let reg = ghost_gate_registry::load_registry(&access.plane.paths)?;
         let version = reg.current_version(&info.application_id, &req.gate_id).ok_or("unpublished policy")?;
@@ -3924,6 +3931,24 @@ mod tests {
         assert!(b.hosted_state(&req).unwrap_err().contains("Telegram"), "Telegram-only gate is refused");
         b.gates.set_use_mode("g1", "both");
         assert!(b.hosted_state(&req).is_ok(), "a gate scoped to both remains eligible");
+        std::fs::remove_dir_all(paths.dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn hosted_state_refuses_an_allowlisted_origin_that_differs_from_the_published_binding() {
+        let mut b = credential_bridge(FakeWallet::new(), FakeChain::with("unused".into(), 0, [0u8; 32]));
+        let paths = hosted_fixture(&mut b);
+        // This origin passes the operational allowlist, proving the rejection comes from the
+        // immutable published binding rather than a browser-origin configuration accident.
+        b.origins = b.origins.clone().allow("https://other.example");
+        let req = ghost_gate_verifier::hosted::HostedVerificationRequest {
+            nonce: "a".repeat(64), tenant: "default".into(), gate_id: "g1".into(),
+            relying_site: "https://other.example".into(), network: binding().network,
+            resource_address: binding().resource().unwrap().to_string(), threshold_raw: "10000".into(),
+            policy_version: "v1".into(), proof_digest: "b".repeat(64),
+            proof: serde_json::json!({"hostedState": true}),
+        };
+        assert!(b.hosted_state(&req).unwrap_err().contains("published relying-site"));
         std::fs::remove_dir_all(paths.dir).unwrap();
     }
 

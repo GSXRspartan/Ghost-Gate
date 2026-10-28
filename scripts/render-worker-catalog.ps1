@@ -33,6 +33,12 @@ foreach ($gate in $bindings.gates) {
     if ($uri.Scheme -ne 'https' -or $uri.AbsoluteUri.TrimEnd('/') -ne $uri.GetLeftPart([System.UriPartial]::Authority)) {
         throw "relying-site origin for $key must be an exact HTTPS origin without a path"
     }
+    # The Worker-origin map is deployment input, never policy authority. A hosted gate may only
+    # be exposed at the exact relying-site identity frozen in its immutable published binding.
+    # This also prevents an environment-only catalog change from retargeting wallet proofs.
+    if ($gate.challenge_domain -cne $uri.GetLeftPart([System.UriPartial]::Authority)) {
+        throw "relying-site origin for published gate $key must exactly match its published challenge_domain"
+    }
     if ($gate.use_mode -eq 'telegram') { continue }
     if ($gate.proof_mode -ne 'credential') { throw "published gate $key uses unsupported hosted proof mode $($gate.proof_mode)" }
     if ([string]::IsNullOrWhiteSpace($gate.policy_hash) -or [int64]$gate.policy_version -lt 1) {
