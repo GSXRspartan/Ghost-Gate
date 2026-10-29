@@ -1350,8 +1350,10 @@ if (tgStart) {
         }
         const note = $("tg-note");
         if (note) note.textContent = "Opening the verification page — the flow continues in the bot's window.";
-        // The real flow lives at /telegram/join; the button that proves it is there.
-        window.location.href = `/telegram/join?gate=${encodeURIComponent(gate.gateId)}`;
+        // A user must start at the bot: only it mints the account-bound, single-use join token.
+        // /bot redirects to the configured official bot, or explains why Telegram is not yet
+        // configured.  The public /claim route is intentionally not enough on its own.
+        window.location.href = `/bot?gate=${encodeURIComponent(gate.gateId)}`;
     };
 }
 

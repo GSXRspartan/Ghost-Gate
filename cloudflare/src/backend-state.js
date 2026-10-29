@@ -23,5 +23,9 @@ export async function backendState(env, gate) {
     || !await crypto.subtle.verify("HMAC", await key(env.GG_VERIFIER_RESPONSE_KEY), Uint8Array.from(signature.match(/../g), s => parseInt(s,16)), encoder.encode(canonical(body)))
     || !/^[1-9][0-9]*$/.test(body.state?.generation || "") || !/^[0-9a-f]{64}$/.test(body.state?.policyHash || "")
     || typeof body.state?.haltRevision !== "string" || !Number.isSafeInteger(body.state?.sessionTtlSecs) || body.state.sessionTtlSecs < 1) throw Error("backend state unavailable or invalid");
+  // A deployment catalog rendered from bindings.json may pin the published policy hash.  The
+  // bridge signs this state after resolving the same tenant/gate/version, so a stale or manually
+  // mistyped Worker catalog fails closed instead of accepting a different published policy.
+  if (gate.policyHash && body.state.policyHash !== gate.policyHash) throw Error("backend policy hash does not match the published catalog");
   return body.state;
 }

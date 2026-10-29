@@ -72,7 +72,7 @@ function binding(gate, nonce, visitorSession) {
   return {
     nonce, tenant: gate.tenant, gateId: gate.gateId, relyingSite: gate.relyingSite,
     network: gate.network, resourceAddress: gate.resourceAddress, thresholdRaw: gate.thresholdRaw,
-    policyVersion: gate.policyVersion, visitorSession,
+    policyVersion: gate.policyVersion, policyHash: gate.policyHash, visitorSession,
   };
 }
 
@@ -154,6 +154,19 @@ function bridgeRoute(method, pathname) {
   if (method === "GET" && /^\/gate\/[^/]+$/.test(pathname)) return true;
   if (method === "GET" && /^\/proof\/[^/]+\/status$/.test(pathname)) return true;
   return false;
+}
+
+function telegramBotUrl(env) {
+  if (!env.GG_TELEGRAM_BOT_URL) return null;
+  try {
+    const url = new URL(env.GG_TELEGRAM_BOT_URL);
+    // The bot destination is deployment configuration, never a browser parameter.  Accept only
+    // Telegram's canonical HTTPS public link shape; a query, fragment, port, or redirector is
+    // not an official bot destination.
+    if (url.protocol !== "https:" || url.hostname !== "t.me" || url.port || url.username || url.password
+      || !/^\/[A-Za-z0-9_]{5,}$/.test(url.pathname) || url.search || url.hash) return null;
+    return url.toString();
+  } catch { return null; }
 }
 
 async function labGates(env) {
@@ -238,9 +251,24 @@ export default {
     if (request.method === "GET" && parsed.pathname === "/health") return labHealth(env);
     if (request.method === "GET" && parsed.pathname === "/lab/gates") return labGates(env);
     if (request.method === "GET" && parsed.pathname === "/wallet/status") return json(200, { configured: false, reachable: false, note: "wallet daemon is bridge-local; use a browser wallet for credential proofs" });
+    // The administrator stays loopback-only until a separately reviewed WebAuthn enrollment and
+    // Cloudflare Access design exists.  Do not let an asset fallback or future bridge route make
+    // it accidentally public at the Privacy Lab origin.
+    if (parsed.pathname === "/admin" || parsed.pathname.startsWith("/admin/")) return json(404, { error: "GG: administrator is not served from this origin" });
     if (bridgeRoute(request.method, parsed.pathname)) return bridgeProxy(env, request);
+    if (request.method === "GET" && (parsed.pathname === "/bot" || parsed.pathname === "/bot/")) {
+      const bot = telegramBotUrl(env);
+      if (bot) return Response.redirect(bot, 302);
+      if (!env.ASSETS) return json(503, { error: "GG: Telegram bot destination is not configured" });
+      return env.ASSETS.fetch(new Request(new URL("/bot/index.html", request.url), request));
+    }
     if (request.method === "GET" && !parsed.pathname.startsWith("/api/") && env.ASSETS) {
       if (parsed.pathname === "/") return env.ASSETS.fetch(new Request(new URL("/lab/index.html", request.url), request));
+      // Telegram's bot historically minted /telegram/join links.  /claim is the concise public
+      // alias.  Both serve the same static page and still require a bot-minted single-use token.
+      if (parsed.pathname === "/claim" || parsed.pathname === "/claim/" || parsed.pathname === "/telegram/join") {
+        return env.ASSETS.fetch(new Request(new URL("/telegram/join.html", request.url), request));
+      }
       return env.ASSETS.fetch(request);
     }
     const gates = catalog(env);

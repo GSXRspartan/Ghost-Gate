@@ -34,6 +34,31 @@ test("hosted Worker sends root to the Privacy Lab entrypoint", async () => {
   assert.deepEqual(seen, ["/lab/index.html"]);
 });
 
+test("public aliases serve only the intended Telegram assets and never the private administrator", async () => {
+  const seen = [];
+  const env = { ASSETS: { fetch(request) { seen.push(new URL(request.url).pathname); return new Response("site"); } } };
+  for (const path of ["/claim", "/claim/", "/telegram/join"]) {
+    const response = await worker.fetch(new Request(`https://ghostgate.boo${path}`), env);
+    assert.equal(response.status, 200);
+  }
+  const admin = await worker.fetch(new Request("https://ghostgate.boo/admin"), env);
+  assert.equal(admin.status, 404);
+  assert.deepEqual(seen, ["/telegram/join.html", "/telegram/join.html", "/telegram/join.html"]);
+});
+
+test("bot redirect accepts only an exact Telegram bot URL", async () => {
+  const valid = await worker.fetch(new Request("https://ghostgate.boo/bot"), { GG_TELEGRAM_BOT_URL: "https://t.me/GhostGateBot" });
+  assert.equal(valid.status, 302);
+  assert.equal(valid.headers.get("location"), "https://t.me/GhostGateBot");
+  const seen = [];
+  const invalid = await worker.fetch(new Request("https://ghostgate.boo/bot"), {
+    GG_TELEGRAM_BOT_URL: "https://t.me/GhostGateBot?start=redirect",
+    ASSETS: { fetch(request) { seen.push(new URL(request.url).pathname); return new Response("instructions"); } },
+  });
+  assert.equal(invalid.status, 200);
+  assert.deepEqual(seen, ["/bot/index.html"]);
+});
+
 test("hosted proof endpoints fail closed without an authenticated verifier", async () => {
   const request = new Request("https://edge.example/api/tenants/tenant-a/gates/esm10/proof", { method: "POST", headers: { origin: "https://gate.example" } });
   const response = await worker.fetch(request, { GG_GATE_CATALOG: catalog });
@@ -319,11 +344,18 @@ test("ghostgate.boo relying site is a valid HTTPS origin", () => {
   const ghostgateCatalog = JSON.stringify([{
     tenant: "Crypt", gateId: "Crypt", relyingSite: "https://ghostgate.boo",
     network: 38, resourceAddress: "resource_0101010101010101010101010101010101010101010101010101010101010101",
-    thresholdRaw: "100000000", divisibility: 6, proofMode: "credential",
+    thresholdRaw: "100000000", divisibility: 6, proofMode: "credential", policyHash: "a".repeat(64),
   }]);
   const gates = parseGateCatalog(ghostgateCatalog);
   assert.equal(gates[0].relyingSite, "https://ghostgate.boo");
   assert.equal(gates[0].gateId, "Crypt");
+  assert.equal(gates[0].policyHash, "a".repeat(64));
+});
+
+test("published catalog rejects malformed policy hashes", () => {
+  const invalid = JSON.stringify([{ tenant: "Crypt", gateId: "Crypt", relyingSite: "https://ghostgate.boo", network: 38,
+    resourceAddress: "resource_test", thresholdRaw: "100000000", policyHash: "not-a-policy-hash" }]);
+  assert.throws(() => parseGateCatalog(invalid), /policy hash/);
 });
 
 test("relying-site origin mismatch is rejected for ghostgate.boo gate", () => {

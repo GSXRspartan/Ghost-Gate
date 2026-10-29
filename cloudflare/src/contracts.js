@@ -43,6 +43,12 @@ export function parseGateCatalog(raw, { allowLocalHttp = false } = {}) {
       // Version and TTL are server configuration, never request fields. A changed version means
       // an old challenge cannot be interpreted as evidence for its replacement policy.
       policyVersion: String(gate.policyVersion || "v1"),
+      // The hash is public integrity metadata from bindings.json, not browser input.  Older
+      // staging catalogs did not carry it; once present it must agree with the Rust bridge's
+      // freshly authenticated state before a hosted challenge or session is usable.
+      policyHash: gate.policyHash == null ? null
+        : (/^[0-9a-f]{64}$/i.test(String(gate.policyHash)) ? String(gate.policyHash).toLowerCase()
+          : (() => { throw new Error("GG_GATE_CATALOG contains an invalid policy hash"); })()),
       sessionTtlSecs: Number.isSafeInteger(gate.sessionTtlSecs) && gate.sessionTtlSecs > 0
         ? gate.sessionTtlSecs : 3600,
     };

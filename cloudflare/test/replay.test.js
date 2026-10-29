@@ -51,6 +51,9 @@ test("concurrent redemptions produce at most one usable session and preserve the
   assert.equal((await call("access", {...binding, sessionToken:"token-one"})).status, 409);
   generation = "1";
   assert.equal((await call("access", {...binding, sessionToken:"token-one"})).status, 401, "rollback cannot revive a retired session");
+  assert.equal((await call("issue", {
+    ...binding, nonce: "c".repeat(64), policyHash: "b".repeat(64), expiresUnix: now + 180,
+  })).status, 503, "a catalog hash that does not match signed bridge state must fail closed");
   globalThis.fetch = previousFetch;
   db.close();
 });
