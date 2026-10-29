@@ -1479,6 +1479,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_join_token_stays_valid_for_the_full_server_configured_window() {
+        let bridge = FakeBridge { answers: HashMap::from([("proof-window".to_string(),
+            FakeBridge::accepted("crypt"))]), access: None };
+        let (mut bot, _tg) = bot_owned(bridge);
+        let (token, reply) = mint_join(&mut bot, 91).await;
+        assert_eq!(bot.join_ttl, JOIN_TTL, "the documented ten-minute server TTL is in force");
+        assert!(!reply.contains("expires="), "a browser parameter cannot control expiry: {reply}");
+        let remaining = bot.tokens.get(&token).expect("new token is held server-side")
+            .expires.duration_since(Instant::now());
+        assert!(remaining <= JOIN_TTL && remaining > Duration::from_secs(9 * 60),
+            "a normal wallet proof has the full ten-minute window");
+        bot.claim(&token, "proof-window").await.expect("unexpired token grants");
+    }
+
+    #[tokio::test]
+    async fn a_browser_expiry_parameter_cannot_extend_a_server_expired_token() {
+        let bridge = FakeBridge { answers: HashMap::new(), access: None };
+        let (mut bot, _tg) = bot_owned(bridge);
+        bot.join_ttl = Duration::from_millis(1);
+        let (token, _) = mint_join(&mut bot, 92).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let body = serde_json::json!({ "token": token, "proof_id": "proof-expired" }).to_string();
+        let request = format!(
+            "POST /claim?expires=4102444800 HTTP/1.1\r\nHost: 127.0.0.1:7808\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let response = handle_claim_http(&mut bot, &request).await;
+        assert!(response.contains("403 Forbidden"), "{response}");
+        assert!(response.contains("join link expired"), "{response}");
+    }
+
+    #[tokio::test]
     async fn grants_expire_and_are_revoked_by_the_ticker() {
         let bridge = FakeBridge { answers: HashMap::from([("proof5".to_string(), FakeBridge::accepted("crypt"))]), access: None };
         let (mut bot, tg) = bot_owned(bridge);

@@ -42,12 +42,24 @@ function fail(message, technical = "") {
   const detail = $("tg-error-detail");
   detail.hidden = !technical;
   $("tg-error-technical").textContent = technical;
+  const action = $("tg-error-action");
+  if (action) action.hidden = true;
   $("tg-line").textContent = "The verification did not complete.";
 }
 
 function showRejection(heading, explanation) {
   fail(explanation, heading);
   $("tg-error-heading").textContent = heading;
+}
+
+function showExpiredJoinLink() {
+  fail(
+    "This single-use verification link has expired. Return to the Ghost Gate bot and send /join again to create a new one.",
+    "The bot refused the final claim because this join token is past its server-side expiry.",
+  );
+  $("tg-error-heading").textContent = "Verification link expired";
+  const action = $("tg-error-action");
+  if (action) action.hidden = false;
 }
 
 async function post(path, body) {
@@ -180,6 +192,9 @@ async function main() {
     });
     const claim = await claimRes.json();
     if (claim.state !== "granted") {
+      if (String(claim.error || "").toLowerCase().includes("join link expired")) {
+        return showExpiredJoinLink();
+      }
       throw new Error(claim.error || "the bot refused the claim");
     }
     step("claim", "done");

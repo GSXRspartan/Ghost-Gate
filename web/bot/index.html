@@ -7,6 +7,21 @@
   <title>Ghost Gate — Telegram</title>
   <link rel="stylesheet" href="/lab/lab.css">
   <link rel="icon" href="data:,">
+  <style>
+    /* This page is not the Privacy Lab step rail: its explicit number spans
+       must be the first grid column, not an implicit third column. */
+    .telegram-steps { list-style: none; margin: 1.25rem 0; padding: 0; }
+    .telegram-steps li {
+      display: grid; grid-template-columns: 2rem minmax(0, 1fr); gap: 0.85rem;
+      align-items: start; padding: 0.8rem 0; border-top: 1px solid var(--line);
+      color: var(--dim); line-height: 1.55;
+    }
+    .telegram-steps .step-num { font: 0.75rem var(--mono); color: var(--green); padding-top: 0.1rem; }
+    .telegram-steps .step-copy { min-width: 0; }
+    @media (max-width: 480px) {
+      .telegram-steps li { grid-template-columns: 1.8rem minmax(0, 1fr); gap: 0.65rem; padding: 0.65rem 0; }
+    }
+  </style>
 </head>
 <body>
   <div id="matrix-edges" aria-hidden="true"></div>
@@ -14,10 +29,11 @@
     <section class="card">
       <h1><span class="gg">GHOST GATE</span> · TELEGRAM</h1>
       <p class="sub">Telegram access starts with an account-bound, single-use link from the official bot.</p>
-      <ol class="steps">
-        <li><span class="step-num">01</span><span>Open the official Ghost Gate bot in Telegram and send <code>/join</code>.</span></li>
-        <li><span class="step-num">02</span><span>Open the link it sends in the browser where your Tari wallet is available.</span></li>
-        <li><span class="step-num">03</span><span>Approve the wallet proof and fresh challenge. The bot rechecks the bridge receipt before admission.</span></li>
+      <ol class="telegram-steps">
+        <li><span class="step-num">01</span><span class="step-copy">Open the official Ghost Gate bot in Telegram and send <code>/join</code>.</span></li>
+        <li><span class="step-num">02</span><span class="step-copy">Open the single-use verification link in a browser where Sapient is available.</span></li>
+        <li><span class="step-num">03</span><span class="step-copy">Connect Sapient and complete the Crypt proof.</span></li>
+        <li><span class="step-num">04</span><span class="step-copy">Ghost Gate verifies the result and the bot approves the pending join request.</span></li>
       </ol>
       <p class="sub">A link without the bot-minted token cannot authorize membership. Do not share join links.</p>
       <p class="sub"><a href="/">← Return to Privacy Lab</a></p>

@@ -70,6 +70,27 @@ test("canonical and legacy Telegram join assets both expose a structured error p
     const html = readFileSync(new URL(file, import.meta.url), "utf8");
     assert.match(html, /id="tg-error-heading"/);
     assert.match(html, /id="tg-error-technical"/);
+    assert.match(html, /id="tg-error-action" href="\/bot"/);
     assert.doesNotMatch(html, /<p class="error" id="tg-error"/);
   }
+});
+
+test("Telegram expiry tells the user to mint a new link without weakening token checks", () => {
+  const source = readFileSync(new URL("../../web/telegram/claim.js", import.meta.url), "utf8");
+  assert.match(source, /Verification link expired/);
+  assert.match(source, /This single-use verification link has expired\. Return to the Ghost Gate bot and send \/join again/);
+  assert.match(source, /if \(!token\) return fail\("This page needs a join link from the bot/);
+  assert.match(source, /includes\("join link expired"\)/);
+});
+
+test("public Telegram onboarding has a dedicated two-column layout and Privacy Lab opens it", () => {
+  const bot = readFileSync(new URL("../../web/bot/index.html", import.meta.url), "utf8");
+  const lab = readFileSync(new URL("../../web/lab/lab.js", import.meta.url), "utf8");
+  assert.match(bot, /class="telegram-steps"/);
+  assert.match(bot, /grid-template-columns: 2rem minmax\(0, 1fr\)/);
+  assert.match(bot, /\.step-copy \{ min-width: 0; \}/);
+  assert.match(bot, /@media \(max-width: 480px\)/);
+  assert.equal((bot.match(/class="step-num"/g) || []).length, 4);
+  assert.match(lab, /window\.location\.href = "\/bot"/);
+  assert.doesNotMatch(lab, /window\.location\.href = `\/telegram\/join/);
 });
