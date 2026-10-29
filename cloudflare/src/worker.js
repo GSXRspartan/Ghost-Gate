@@ -260,7 +260,10 @@ export default {
       const bot = telegramBotUrl(env);
       if (bot) return Response.redirect(bot, 302);
       if (!env.ASSETS) return json(503, { error: "GG: Telegram bot destination is not configured" });
-      return env.ASSETS.fetch(new Request(new URL("/bot/index.html", request.url), request));
+      // Cloudflare Assets canonicalizes an HTML file to its directory URL. Fetch the
+      // canonical directory directly so /bot and /bot/ return the page instead of a
+      // redirect loop through this worker.
+      return env.ASSETS.fetch(new Request(new URL("/bot/", request.url), request));
     }
     if (request.method === "GET" && !parsed.pathname.startsWith("/api/") && env.ASSETS) {
       // Cloudflare Assets canonicalizes a directory's `index.html` as a redirect to the
@@ -270,7 +273,9 @@ export default {
       // Telegram's bot historically minted /telegram/join links.  /claim is the concise public
       // alias.  Both serve the same static page and still require a bot-minted single-use token.
       if (parsed.pathname === "/claim" || parsed.pathname === "/claim/" || parsed.pathname === "/telegram/join") {
-        return env.ASSETS.fetch(new Request(new URL("/telegram/join.html", request.url), request));
+        // The join page has a canonical directory asset for the same reason as /bot/;
+        // direct file fetches are normalized to a redirect by Cloudflare Assets.
+        return env.ASSETS.fetch(new Request(new URL("/telegram/join/", request.url), request));
       }
       return env.ASSETS.fetch(request);
     }

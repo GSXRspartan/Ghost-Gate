@@ -15,7 +15,9 @@
 
 import { sapientProvider, universeProvider } from "/js/ghost/provider.js";
 import { formatAmount } from "/js/ghost/capabilities.js";
-import { trustedBase } from "./trusted-url.js";
+// Use an absolute asset path so the canonical /telegram/join/ page resolves the same
+// trust helper as the legacy /telegram/join.html asset.
+import { trustedBase } from "/telegram/trusted-url.js";
 
 const $ = (id) => document.getElementById(id);
 const step = (name, state) => {

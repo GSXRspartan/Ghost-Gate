@@ -58,13 +58,13 @@ test("Privacy Lab presents hosted browser credentials clearly and constrains the
 test("public aliases serve only the intended Telegram assets and never the private administrator", async () => {
   const seen = [];
   const env = { ASSETS: { fetch(request) { seen.push(new URL(request.url).pathname); return new Response("site"); } } };
-  for (const path of ["/claim", "/claim/", "/telegram/join"]) {
+  for (const path of ["/claim", "/claim/", "/telegram/join", "/telegram/join/"]) {
     const response = await worker.fetch(new Request(`https://ghostgate.boo${path}`), env);
     assert.equal(response.status, 200);
   }
   const admin = await worker.fetch(new Request("https://ghostgate.boo/admin"), env);
   assert.equal(admin.status, 404);
-  assert.deepEqual(seen, ["/telegram/join.html", "/telegram/join.html", "/telegram/join.html"]);
+  assert.deepEqual(seen, ["/telegram/join/", "/telegram/join/", "/telegram/join/", "/telegram/join/"]);
 });
 
 test("bot redirect accepts only an exact Telegram bot URL", async () => {
@@ -77,7 +77,16 @@ test("bot redirect accepts only an exact Telegram bot URL", async () => {
     ASSETS: { fetch(request) { seen.push(new URL(request.url).pathname); return new Response("instructions"); } },
   });
   assert.equal(invalid.status, 200);
-  assert.deepEqual(seen, ["/bot/index.html"]);
+  assert.deepEqual(seen, ["/bot/"]);
+});
+
+test("bot setup page is served directly when no redirect destination is configured", async () => {
+  const seen = [];
+  const response = await worker.fetch(new Request("https://ghostgate.boo/bot/"), {
+    ASSETS: { fetch(request) { seen.push(new URL(request.url).pathname); return new Response("bot setup"); } },
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(seen, ["/bot/"]);
 });
 
 test("hosted proof endpoints fail closed without an authenticated verifier", async () => {
