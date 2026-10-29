@@ -16,6 +16,7 @@
 
 import { walletdProvider, sapientProvider, universeProvider, windowTariProvider } from "/js/ghost/provider.js";
 import { supportedProofModes, walletUsability, parseAmount, formatAmount, networkVerdict, describeProviderError } from "/js/ghost/capabilities.js";
+import { advanceTechnicalLifecycle, newTechnicalLifecycle, switchTechnicalView, technicalSummaryRows } from "/lab/technical-state.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -35,6 +36,8 @@ const state = {
     gateListSig: null,   // signature of the last-rendered gate list (avoid rebuilding an open dropdown)
     walletFailures: 0,   // consecutive polls where the wallet was absent or unreachable
     walletConnecting: false, // one user gesture may create at most one pending wallet request
+    technical: newTechnicalLifecycle(),
+    bridgeStatus: "unavailable / not reported",
 };
 
 // Local browser instrumentation only. These marks never leave the page and contain no wallet
@@ -162,10 +165,30 @@ function selectGate(gateId) {
     state.gate = state.gates.find((g) => g.gateId === gateId) || null;
     if (gateId) $("gate-select").value = gateId;
     state.step = -1;
+    state.technical = newTechnicalLifecycle();
     renderGateFacts(state.gate);
+    renderTechnicalFacts();
     renderWallets();
     renderSteps();
     $("outcome").hidden = true;
+}
+
+function updateTechnical(update) {
+    state.technical = advanceTechnicalLifecycle(state.technical, update);
+    renderTechnicalFacts();
+}
+
+function renderTechnicalFacts() {
+    const facts = $("technical-facts");
+    if (!facts) return;
+    const threshold = state.gate ? `${formatAmount(state.gate.thresholdRaw, state.gate.divisibility)} ${state.gate.symbol || "asset"}` : "unavailable / not reported";
+    facts.replaceChildren(...technicalSummaryRows(state.gate, state.technical, state.bridgeStatus, threshold).flatMap(([key, value]) => {
+        const term = document.createElement("dt");
+        term.textContent = key;
+        const detail = document.createElement("dd");
+        detail.textContent = value;
+        return [term, detail];
+    }));
 }
 
 /** Facts are read from the registry response — never from a value typed here.
@@ -645,15 +668,19 @@ async function prove() {
     // attempt's trace. The bridge shape-checks it and stores nothing else about it.
     state.attemptId = Array.from(crypto.getRandomValues(new Uint8Array(16)))
         .map((b) => b.toString(16).padStart(2, "0")).join("");
+    state.technical = newTechnicalLifecycle();
+    updateTechnical({ challenge: "requesting fresh single-use challenge", replay: "pending issuance" });
     $("attempt-label").textContent = `attempt ${state.attemptId.slice(0, 8)}… · live`;
     advance("challenge");
     const ch = await api(`/gate/${gate.gateId}/challenge`, { method: "POST", body: "{}" });
     if (!ch.ok) {
+        updateTechnical({ challenge: `not issued · HTTP ${ch.status}`, verification: "not started", failure: "challenge refused" });
         $("prove").disabled = false;
         showOutcome("denied", "NO CHALLENGE", ch.body.error || "the bridge would not issue a challenge for this gate.");
         return;
     }
     const { challenge_nonce, session_commitment } = ch.body;
+    updateTechnical({ challenge: "issued · fresh single-use", replay: "fresh / unconsumed" });
 
     // 2. Two proof paths, dispatched on the wallet the visitor chose — never on a guess.
     //    walletd  → the consensus path: the bridge drives the local daemon (Mode A).
@@ -723,6 +750,8 @@ async function prove() {
  */
 async function proveCredential(gate, challenge_nonce, session_commitment) {
     if (gate.useMode === "telegram") {
+        updateTechnical({ credential: "not submitted", verification: "not started", failure: "gate is scoped to Telegram" });
+        await refreshTrace();
         $("prove").disabled = false;
         showOutcome("denied", "WRONG GATE SCOPE",
             `This gate is scoped to Telegram membership only. Use the Telegram join flow instead.`);
@@ -734,6 +763,7 @@ async function proveCredential(gate, challenge_nonce, session_commitment) {
     const threshold = String(gate.thresholdRaw);
     let built;
     try {
+        updateTechnical({ credential: "wallet approval requested" });
         built = await provider.approveAndBuildProof("credential", {
             gateId: gate.gateId,
             resourceAddress: gate.resourceAddress,
@@ -742,6 +772,8 @@ async function proveCredential(gate, challenge_nonce, session_commitment) {
             maxFee: "50000",
         });
     } catch (e) {
+        updateTechnical({ credential: "wallet did not provide a proof", verification: "not started", failure: "wallet authorization refused" });
+        await refreshTrace();
         $("prove").disabled = false;
         const d = describeProviderError(e);
         showOutcome("denied", "WALLET REFUSED", d.text, {
@@ -750,6 +782,8 @@ async function proveCredential(gate, challenge_nonce, session_commitment) {
         return;
     }
     if (!built || !built.substateId) {
+        updateTechnical({ credential: "wallet returned no proof artifact", verification: "not started", failure: "no proof artifact" });
+        await refreshTrace();
         $("prove").disabled = false;
         showOutcome("denied", "NO PROOF ARTIFACT", "The wallet produced no output to verify; there is nothing to check against chain state.");
         return;
@@ -811,14 +845,18 @@ async function resumeProof() {
         // single-use, bound to this attempt and to the gate's live policy.
         state.attemptId = Array.from(crypto.getRandomValues(new Uint8Array(16)))
             .map((b) => b.toString(16).padStart(2, "0")).join("");
+        state.technical = newTechnicalLifecycle();
+        updateTechnical({ challenge: "requesting fresh single-use challenge", replay: "pending issuance" });
         $("attempt-label").textContent = `attempt ${state.attemptId.slice(0, 8)}… · live`;
         advance("challenge");
         const ch = await api(`/gate/${gate.gateId}/challenge`, { method: "POST", body: "{}" });
         if (!ch.ok) {
+            updateTechnical({ challenge: `not issued · HTTP ${ch.status}`, verification: "not started", failure: "challenge refused" });
             showOutcome("denied", "NO CHALLENGE", ch.body.error || "the bridge would not issue a challenge for this gate.");
             return;
         }
         const { challenge_nonce, session_commitment } = ch.body;
+        updateTechnical({ challenge: "issued · fresh single-use", replay: "fresh / unconsumed" });
         advance("authorize"); advance("submit");
         const provider = state.mode === "universe" ? universeProvider() : sapientProvider();
         await finishCredential(gate, challenge_nonce, session_commitment, substateId, provider);
@@ -850,8 +888,11 @@ async function finishCredential(gate, challenge_nonce, session_commitment, subst
     // not depend on a shield having run; the bridge re-checks everything against chain state.
     let signed;
     try {
+        updateTechnical({ credential: "ownership signature requested" });
         signed = await provider.signChallenge(substateId, challenge_nonce, gate.resourceAddress);
     } catch (e) {
+        updateTechnical({ credential: "signature not provided", verification: "not started", failure: "wallet signature refused" });
+        await refreshTrace();
         $("prove").disabled = false;
         $("resume-proof").disabled = false;
         const d = describeProviderError(e);
@@ -864,6 +905,8 @@ async function finishCredential(gate, challenge_nonce, session_commitment, subst
     // An unusable signature is refused HERE, not forwarded: the bridge would only refuse it
     // again, and the visitor should be told the wallet's answer was incomplete.
     if (!signed || !signed.publicNonce || !signed.signature) {
+        updateTechnical({ credential: "incomplete signature", verification: "not started", failure: "incomplete wallet signature" });
+        await refreshTrace();
         $("prove").disabled = false;
         $("resume-proof").disabled = false;
         showOutcome("denied", "INCOMPLETE SIGNATURE",
@@ -874,6 +917,7 @@ async function finishCredential(gate, challenge_nonce, session_commitment, subst
     advance("consensus"); advance("verify");
     let asked = null;
     try {
+        updateTechnical({ credential: "submitted", verification: "awaiting bridge verdict" });
         asked = await api(`/gate/${gate.gateId}/credential`, {
             method: "POST",
             body: JSON.stringify({
@@ -888,6 +932,8 @@ async function finishCredential(gate, challenge_nonce, session_commitment, subst
             }),
         });
     } catch (e) {
+        updateTechnical({ verification: "bridge unavailable", failure: "credential submission could not be verified" });
+        await refreshTrace();
         showOutcome("denied", "BRIDGE UNREACHABLE",
             `The proof was signed but the bridge could not be reached to verify it. The challenge stays single-use and expires on its own; the signed output is untouched. ${e && e.message ? e.message : e}`);
         return;
@@ -902,6 +948,12 @@ async function finishCredential(gate, challenge_nonce, session_commitment, subst
         // GRANTED; its absence is reported as exactly that — a verified proof on a bridge
         // that issues no session. The two states must never be conflated.
         const hasSession = !!asked.body.access;
+        updateTechnical({
+            verification: "accepted · verified against chain evidence",
+            session: hasSession ? "issued" : "not issued · bridge did not report an access session",
+            replay: "single-use challenge consumed on verification",
+            failure: null,
+        });
         const title = hasSession ? "ACCESS GRANTED" : "PROOF VERIFIED — SESSION NOT ISSUED";
         const sessionInfo = hasSession
             ? ` A verified session was issued for ${Math.round((asked.body.access.expiresUnix - Date.now() / 1000) / 86400)} day(s); afterwards, a fresh proof is required.`
@@ -934,6 +986,7 @@ async function finishCredential(gate, challenge_nonce, session_commitment, subst
     const body = asked.status === 409
         ? "The required threshold was not proven. Your exact balance remains private."
         : "The proof was not accepted.";
+    updateTechnical({ verification: `not accepted · HTTP ${asked.status}`, session: "not issued", failure: title.toLowerCase() });
     showOutcome("denied", title, body, { reason, status: asked.status });
     await refreshTrace();
 }
@@ -948,6 +1001,12 @@ async function poll(proofId, attempt = 0) {
 }
 
 function showOutcome(kind, title, body, detail = {}) {
+    // Failures that occur before a bridge response (for example an unsupported mode or a wallet
+    // refusal) still deserve a Technical-view explanation.  Use our fixed UI title only; raw
+    // error text remains in the Simple outcome and never becomes protocol-inspector data.
+    if (["denied", "error", "declined"].includes(kind)) {
+        updateTechnical({ failure: title.toLowerCase() });
+    }
     const panel = $("outcome");
     panel.hidden = false;
     panel.className = `outcome ${kind}`;
@@ -995,7 +1054,9 @@ async function simulate() {
 // ---------------------------------------------------------------- the terminal
 async function refreshTrace() {
     if (!state.attemptId) return;
-    const { ok, body } = await api(`/lab/trace?attempt=${state.attemptId}`);
+    let response;
+    try { response = await api(`/lab/trace?attempt=${state.attemptId}`); } catch { return; }
+    const { ok, body } = response;
     if (!ok) return;
     const events = body.events || [];
     if (events.length !== state.events.length) {
@@ -1105,11 +1166,15 @@ function setModeBadge(sim) {
 
 // ---------------------------------------------------------------- view switch
 function setView(v) {
-    state.view = v;
+    const switched = switchTechnicalView(state.technical, v);
+    state.view = switched.view;
+    state.technical = switched.lifecycle;
     $("simple-view").hidden = v !== "simple";
     $("technical-view").hidden = v !== "technical";
     $("view-simple").setAttribute("aria-selected", String(v === "simple"));
     $("view-technical").setAttribute("aria-selected", String(v === "technical"));
+    renderTechnicalFacts();
+    renderTerminal();
     updateWalletPill();
 }
 
@@ -1155,13 +1220,16 @@ async function refreshStatus() {
         // `version` may be a semantic version or a deployment label such as `edge-proxy`.
         // A separator is truthful for both and avoids the malformed `vedge-proxy` display.
         setPill("pill-bridge", "ok", bridgeVersion ? `healthy · ${bridgeVersion}` : "healthy");
+        state.bridgeStatus = bridgeVersion ? `healthy · ${bridgeVersion}` : "healthy";
         setPill("pill-indexer", health.body.credential_configured ? "ok" : "", health.body.credential_configured ? "configured" : "not configured");
         // Chain sync is not asserted here: "configured" says what this process was wired with,
         // nothing more. The verifier refuses proofs it cannot verify against real chain state.
     } else {
         setPill("pill-bridge", "bad", "unreachable");
+        state.bridgeStatus = "unreachable";
         setPill("pill-indexer", "", "unknown");
     }
+    renderTechnicalFacts();
 
     // Walletd reachability: probed for real, and the network name comes from the WALLET when it
     // answers (the operator's configured cohort), falling back to the gates' registry byte.

@@ -153,6 +153,10 @@ function bridgeRoute(method, pathname) {
   if (method === "POST" && /^\/gate\/[^/]+\/(challenge|credential|prove)$/.test(pathname)) return true;
   if (method === "GET" && /^\/gate\/[^/]+$/.test(pathname)) return true;
   if (method === "GET" && /^\/proof\/[^/]+\/status$/.test(pathname)) return true;
+  // The Privacy Lab inspector's trace is read-only and scoped to the unguessable attempt id
+  // supplied both in its query and header.  It must take the same restricted bridge proxy path as
+  // the challenge/proof requests; serving it as a static-asset fallback leaves Technical blank.
+  if (method === "GET" && pathname === "/lab/trace") return true;
   return false;
 }
 
@@ -184,6 +188,7 @@ async function labGates(env) {
     enriched.push({
       gateId: g.gateId, symbol, resourceAddress: g.resourceAddress, thresholdRaw: g.thresholdRaw,
       divisibility: g.divisibility, network: g.network, proofMode: g.proofMode || "credential",
+      policyVersion: g.policyVersion, policyHash: g.policyHash, relyingSite: g.relyingSite,
       activatable: (g.proofMode || "credential") !== "xtm",
       sessionsAvailable: Boolean(env.REPLAY_COORDINATOR && env.GG_COORDINATOR_TOKEN),
       useMode: "both",
