@@ -10,7 +10,7 @@
  *   1. the wallet selector offers the Sapient option
  *   2. the Connect wallet button is visible and enabled
  *   3. clicking it with a mock extension that reports Esmeralda shows the connected state,
- *      the real address, the network-mismatch verdict (gate 0x10 vs wallet 0x26), the
+ *      the real address, the network verdict for the published gate, the
  *      capability list, and the read-only ownership signature result
  *   4. rejection (4001) surfaces as "you declined", not an error
  *   5. no console errors
@@ -52,8 +52,8 @@ async function evaluate(expression, awaitPromise = false) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** A mock window.tari faithful to the pinned tari-dapp.d.ts contract. Reports Esmeralda so the
- *  network-mismatch path (gate 0x10) is exercised for real. */
+/** A mock window.tari faithful to the pinned tari-dapp.d.ts contract. Reports Esmeralda, the
+ *  network of the published Crypt staging gate. */
 const MOCK_TARI = `
   window.tari = {
     isTariWallet: true,
@@ -195,8 +195,8 @@ async function main() {
   check("real Esmeralda address shown (truncated, not hidden)",
     d.rows["wd-address"].includes("otl_esm") && d.rows["wd-address"].includes("…"),
     d.rows["wd-address"]);
-  check("network mismatch surfaced honestly",
-    /mismatch/i.test(d.rows["wd-network"] || "") && /blocked by the gate/i.test(d.rows["wd-network"] || ""),
+  check("published Esmeralda network verdict surfaced honestly",
+    /esmeralda/i.test(d.rows["wd-network"] || "") && /gate's own network/i.test(d.rows["wd-network"] || ""),
     d.rows["wd-network"]);
   const noteAfter = await evaluate(`document.getElementById("wallet-note").textContent`);
   check("stale 'press Connect' note replaced after real connection",
@@ -242,8 +242,8 @@ async function main() {
     /connected/i.test(strict["wd-status"] || ""), strict["wd-status"]);
   check("strict wallet's Esmeralda address shown",
     (strict["wd-address"] || "").includes("otl_esm"), strict["wd-address"]);
-  check("strict wallet's mismatch verdict shown",
-    /mismatch/i.test(strict["wd-network"] || ""), strict["wd-network"]);
+  check("strict wallet's published-network verdict shown",
+    /esmeralda/i.test(strict["wd-network"] || "") && /gate's own network/i.test(strict["wd-network"] || ""), strict["wd-network"]);
 
   console.log("\n== 5. pending approval gets immediate feedback and never double-prompts ==");
   await evaluate(`(() => {
