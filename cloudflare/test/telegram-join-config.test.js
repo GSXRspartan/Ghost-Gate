@@ -1,8 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { configuredJoinEndpoints } from "../../web/telegram/join-endpoints.js";
-import { publishedGateFromCatalog, resolvePublishedGate } from "../../web/telegram/published-gate.js";
+import { configuredJoinEndpoints, publishedGateFromCatalog, resolvePublishedGate } from "../../web/telegram/join-endpoints.js";
 
 const cryptV3 = {
   tenant: "Crypt", gateId: "Crypt", symbol: "tTARI",

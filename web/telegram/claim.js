@@ -16,8 +16,7 @@
 
 import { sapientProvider, universeProvider } from "/js/ghost/provider.js";
 import { formatAmount } from "/js/ghost/capabilities.js";
-import { configuredJoinEndpoints } from "/telegram/join-endpoints.js";
-import { resolvePublishedGate } from "/telegram/published-gate.js";
+import { configuredJoinEndpoints, resolvePublishedGate } from "/telegram/join-endpoints.js";
 
 const $ = (id) => document.getElementById(id);
 const step = (name, state) => {
