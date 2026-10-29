@@ -487,7 +487,7 @@ details.explain p { color: var(--dim); font-size: 0.8rem; line-height: 1.5; marg
 .mode-badge.live { color: var(--green); border-color: var(--green-dim); }
 
 /* ---------- footer ---------- */
-.lab-footer { margin-top: 1.8rem; padding-top: 1rem; border-top: 1px solid var(--line); color: var(--dim); font-size: 0.76rem; line-height: 1.65; }
+.lab-footer { margin-top: 1.8rem; padding: 1.2rem 0 1.35rem; border-top: 1px solid var(--line); color: var(--dim); font-size: 0.76rem; line-height: 1.75; }
 .lab-footer a { color: var(--green-dim); }
 
 /* ---------- responsive ---------- */
