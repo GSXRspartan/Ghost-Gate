@@ -265,9 +265,10 @@ export function networkVerdict(reportedName, expectedByte) {
  * 4100 is an actionable authorization state — never evidence that the wallet lacks capabilities.
  *
  * @param {{ code?: number, message?: string }|string} e
+ * @param {{ thresholdRaw?: string|number|bigint, divisibility?: string|number|bigint, symbol?: string }|null} [gate]
  * @returns {{ cls: "warn"|"bad", text: string }}
  */
-export function describeProviderError(e) {
+export function describeProviderError(e, gate = null) {
   const code = e && typeof e === "object" ? e.code : undefined;
   const message = e && typeof e === "object" ? String(e.message || e) : String(e || "unknown error");
   if (code === 4001) {
@@ -285,7 +286,13 @@ export function describeProviderError(e) {
     const insufficient = message.match(/InsufficientFunds.*?Required:\s*(\d+),\s*Available:\s*(\d+)/);
     if (insufficient) {
       const req = insufficient[1], avail = insufficient[2];
-      return { cls: "bad", text: `Insufficient revealed funds. The gate requires ${req} raw units but the wallet only has ${avail} available. Unshield more tTARI and try again.` };
+      const configured = gate && gate.thresholdRaw != null
+        ? formatAmount(gate.thresholdRaw, gate.divisibility)
+        : null;
+      const label = configured
+        ? `${configured} ${gate.symbol || "tokens"}`.trim()
+        : `${req} raw units`;
+      return { cls: "bad", text: `Insufficient revealed funds. Reveal at least ${label} in a qualifying output and try again. The wallet reported ${avail} available.` };
     }
     const execFail = message.match(/ExecutionFailure.*?message":"([^"]+)"/);
     if (execFail) {

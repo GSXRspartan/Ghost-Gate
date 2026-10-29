@@ -184,6 +184,15 @@ test("describeProviderError treats JSON-RPC internal and method-not-found errors
   assert.match(noMethod.text, /does not support/i);
 });
 
+test("insufficient funds guidance derives the human threshold from gate metadata", () => {
+  const detail = describeProviderError(
+    { code: -32603, message: "InsufficientFunds: Required: 100000000, Available: 50000000" },
+    { thresholdRaw: "100000000", divisibility: 6, symbol: "tTARI" },
+  );
+  assert.match(detail.text, /Reveal at least 100 tTARI in a qualifying output and try again/);
+  assert.doesNotMatch(detail.text, /Unshield more/);
+});
+
 test("amounts parse as strings or bigints and never as floats", () => {
   assert.equal(parseAmount("400000").toString(), "400000");
   assert.equal(parseAmount(400000n)?.toString(), "400000");

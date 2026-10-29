@@ -2,9 +2,9 @@
  * Sanitised state for Privacy Lab's Technical view.
  *
  * This module deliberately accepts only published gate metadata and coarse lifecycle labels.
- * It has no place for a wallet address, challenge nonce, output id, signature, session token, or
- * verifier credential.  Keeping that boundary here makes the browser inspector useful without
- * turning it into a second credential transport.
+ * It has no place for a wallet address, challenge nonce, signature, session token, or verifier
+ * credential. The public output identifier already shown by a successful proof may be retained
+ * as diagnostic metadata; it is not a credential transport.
  */
 
 export const NOT_REPORTED = "not reported";
@@ -16,6 +16,8 @@ export function newTechnicalLifecycle() {
         verification: "not started",
         session: "not issued",
         replay: NOT_REPORTED,
+        output: null,
+        providerError: null,
         failure: null,
     };
 }
@@ -47,7 +49,9 @@ export function technicalSummaryRows(gate, lifecycle, bridgeStatus, thresholdTex
         ["verification", value(lifecycle && lifecycle.verification)],
         ["session / access", value(lifecycle && lifecycle.session)],
         ["replay / freshness", value(lifecycle && lifecycle.replay)],
+        ["verified output", value(lifecycle && lifecycle.output)],
         ["bridge", value(bridgeStatus)],
+        ...(lifecycle && lifecycle.providerError ? [["provider error", lifecycle.providerError]] : []),
         ...(lifecycle && lifecycle.failure ? [["failure", lifecycle.failure]] : []),
     ];
 }

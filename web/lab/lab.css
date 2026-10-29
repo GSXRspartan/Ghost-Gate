@@ -368,6 +368,9 @@ details.explain p { color: var(--dim); font-size: 0.8rem; line-height: 1.5; marg
 .outcome.verified { border-color: var(--green-dim); background: rgba(41, 212, 124, 0.06); }
 .outcome.verified .verdict { color: var(--green); }
 .outcome .why { color: var(--dim); margin-top: 0.4rem; font-size: 0.85rem; line-height: 1.5; }
+.proof-output { display: flex; align-items: center; gap: 0.55rem; min-width: 0; margin-top: 0.65rem; color: var(--dim); font: 0.72rem/1.45 var(--mono); }
+.proof-output .k { color: var(--green-dim); letter-spacing: 0.06em; flex: none; }
+.proof-output code { min-width: 0; overflow-wrap: anywhere; color: var(--text); }
 
 /* ---------- the terminal (Technical view) ---------- */
 .technical-facts {

@@ -70,6 +70,50 @@ function api(path, options = {}) {
     });
 }
 
+function middleEllipsis(value, maxChars = 32) {
+    const text = String(value || "");
+    if (text.length <= maxChars) return text;
+    const available = Math.max(2, maxChars - 1);
+    const prefix = Math.ceil(available / 2);
+    const suffix = Math.floor(available / 2);
+    return `${text.slice(0, prefix)}…${text.slice(-suffix)}`;
+}
+
+function clearOutputPresentation() {
+    const row = $("outcome-output");
+    if (row) row.hidden = true;
+    const value = $("outcome-output-value");
+    if (value) value.textContent = "";
+    const copy = $("copy-output");
+    if (copy) {
+        copy.disabled = false;
+        copy.textContent = "COPY";
+        copy.onclick = null;
+    }
+}
+
+function setOutputPresentation(substateId) {
+    const output = String(substateId || "");
+    const row = $("outcome-output");
+    const value = $("outcome-output-value");
+    const copy = $("copy-output");
+    if (!row || !value || !output) return;
+    value.textContent = middleEllipsis(output, 34);
+    value.title = output;
+    row.hidden = false;
+    if (copy) {
+        copy.onclick = async () => {
+            try {
+                await navigator.clipboard.writeText(output);
+                copy.textContent = "COPIED";
+                setTimeout(() => { copy.textContent = "COPY"; }, 1200);
+            } catch {
+                copy.textContent = "UNAVAILABLE";
+            }
+        };
+    }
+}
+
 // ---------------------------------------------------------------- the nine steps
 const STEPS = [
     {
@@ -719,6 +763,7 @@ async function prove() {
     }
     $("prove").disabled = true;
     $("outcome").hidden = true;
+    clearOutputPresentation();
     state.step = 0;
     advance("gate"); advance("wallet");
     state.simulated = false;
@@ -774,6 +819,10 @@ async function prove() {
     if (terminal.state === "accepted") {
         advance("grant"); advance("session");
         const r = terminal.result;
+        if (r && r.substate_id) {
+            updateTechnical({ output: r.substate_id });
+            setOutputPresentation(r.substate_id);
+        }
         const sessionInfo = terminal.access
             ? ` A verified session was issued for ${Math.round((terminal.access.expiresUnix - Date.now() / 1000) / 86400)} day(s); afterwards, a fresh proof is required.`
             : (gate.sessionsAvailable ? "" : " (Preview: this bridge does not issue sessions.)");
@@ -836,7 +885,7 @@ async function proveCredential(gate, challenge_nonce, session_commitment) {
         updateTechnical({ credential: "wallet did not provide a proof", verification: "not started", failure: "wallet authorization refused" });
         await refreshTrace();
         $("prove").disabled = false;
-        const d = describeProviderError(e);
+        const d = describeProviderError(e, gate);
         showOutcome("denied", "WALLET REFUSED", d.text, {
             ...(e && e.code !== undefined ? { "provider error": `code ${e.code}` } : {}),
         });
@@ -878,6 +927,7 @@ async function resumeProof() {
     // Start clean, BEFORE anything can fail: the old outcome panel goes away and the steps
     // rail restarts, so what the visitor reads from here on is THIS attempt only.
     $("outcome").hidden = true;
+    clearOutputPresentation();
     state.step = 0;
     renderSteps();
     const proveBtn = $("prove");
@@ -925,7 +975,7 @@ async function resumeProof() {
         // Anything uncaught above — a network failure on the challenge call, a provider that
         // threw before its own handler, anything — lands here with its real shape preserved,
         // and the finally below guarantees the page is never left disabled.
-        const d = describeProviderError(e);
+        const d = describeProviderError(e, gate);
         showOutcome("denied", "RESUME FAILED", d.text,
             e && e.code !== undefined ? { "provider error": `code ${e.code}`, detail: String(e && e.message ? e.message : e) } : {});
     } finally {
@@ -957,7 +1007,9 @@ async function finishCredential(gate, challenge_nonce, session_commitment, subst
         await refreshTrace();
         $("prove").disabled = false;
         $("resume-proof").disabled = false;
-        const d = describeProviderError(e);
+        const providerError = String(e && e.message ? e.message : e || "unknown provider error");
+        updateTechnical({ providerError: providerError.slice(0, 400) });
+        const d = describeProviderError(e, gate);
         showOutcome("denied", "SIGNATURE REFUSED", d.text, {
             ...(e && e.code !== undefined ? { "provider error": `code ${e.code}` } : {}),
             detail: String(e && e.message ? e.message : e),
@@ -1014,15 +1066,17 @@ async function finishCredential(gate, challenge_nonce, session_commitment, subst
             verification: "accepted · verified against chain evidence",
             session: hasSession ? "issued" : "not issued · bridge did not report an access session",
             replay: "single-use challenge consumed on verification",
+            output: substateId,
             failure: null,
         });
+        setOutputPresentation(substateId);
         const title = hasSession ? "ACCESS GRANTED" : "PROOF VERIFIED — SESSION NOT ISSUED";
         const sessionInfo = hasSession
             ? ` A verified session was issued for ${Math.round((asked.body.access.expiresUnix - Date.now() / 1000) / 86400)} day(s); afterwards, a fresh proof is required.`
             : " The proof was verified against chain state, but this bridge issues no session token (not registry-backed). No access was granted.";
         showOutcome(hasSession ? "granted" : "verified", title,
             (hasSession
-                ? "Threshold proven on chain against a real output you own. The output's own public floor was checked, not your balance — the amount above the floor was never disclosed."
+                ? "Threshold verified on chain against an output you control. The output's public floor was checked, not your balance — the amount above the threshold was never disclosed."
                 : "The proof was verified against chain state: the output exists, is unspent, and its floor meets the gate's threshold. However, this bridge does not issue authorization sessions (not registry-backed), so nothing was unlocked.") + sessionInfo,
             {
                 "attested floor": `${formatAmount(r.attested_minimum, gate.divisibility)} ${gate.symbol || ""}`.trim(),

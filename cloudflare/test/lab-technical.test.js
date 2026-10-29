@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import worker from "../src/worker.js";
 import {
   advanceTechnicalLifecycle,
@@ -14,6 +15,17 @@ const gate = {
   resourceAddress: `resource_${"01".repeat(32)}`, thresholdRaw: "100000000", divisibility: 6,
   proofMode: "credential", policyVersion: 3, policyHash, symbol: "tTARI",
 };
+
+test("proof UX uses revised success copy and middle-ellipsis output presentation", () => {
+  const lab = readFileSync(new URL("../../web/lab/lab.js", import.meta.url), "utf8");
+  const html = readFileSync(new URL("../../web/lab/index.html", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../../web/lab/lab.css", import.meta.url), "utf8");
+  assert.match(lab, /Threshold verified on chain against an output you control/);
+  assert.match(lab, /function middleEllipsis\(value, maxChars = 32\)/);
+  assert.match(lab, /setOutputPresentation\(substateId\)/);
+  assert.match(html, /id="copy-output"/);
+  assert.match(css, /\.proof-output[^{]*\{[^}]*overflow-wrap/);
+});
 
 test("the Worker proxies the attempt-scoped technical trace and preserves its trace capability", async () => {
   const originalFetch = globalThis.fetch;
@@ -45,6 +57,7 @@ test("technical summary retains a successful proof through a view switch without
     verification: "accepted · verified against chain evidence",
     session: "issued",
     replay: "single-use challenge consumed on authorization",
+    output: "utxo_0101010101010101010101010101010101010101010101010101010101010101_abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd",
   });
   const switched = switchTechnicalView(lifecycle, "technical");
   assert.equal(switched.view, "technical");
@@ -56,6 +69,7 @@ test("technical summary retains a successful proof through a view switch without
     "relying site": "https://ghostgate.boo", challenge: "issued · fresh single-use", credential: "submitted",
     verification: "accepted · verified against chain evidence", "session / access": "issued",
     "replay / freshness": "single-use challenge consumed on authorization", bridge: "healthy · edge-proxy",
+    "verified output": "utxo_0101010101010101010101010101010101010101010101010101010101010101_abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd",
   });
   assert.equal(JSON.stringify(rows).includes("signature"), false);
   assert.equal(JSON.stringify(rows).includes("nonce"), false);
@@ -73,6 +87,17 @@ test("technical summary renders a neutral failed-proof state instead of becoming
   assert.equal(rows.verification, "not accepted · HTTP 409");
   assert.equal(rows["session / access"], "not issued");
   assert.equal(rows.failure, "proof refused");
+});
+
+test("technical summary retains a full public output identifier and provider diagnostics", () => {
+  const lifecycle = advanceTechnicalLifecycle(newTechnicalLifecycle(), {
+    output: "utxo_0101010101010101010101010101010101010101010101010101010101010101_abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+    providerError: "InsufficientFunds: wallet declined the public minimum",
+  });
+  const rows = Object.fromEntries(technicalSummaryRows(gate, lifecycle, "healthy", "100 tTARI"));
+  assert.match(rows["verified output"], /^utxo_0101/);
+  assert.match(rows["verified output"], /abcd$/);
+  assert.match(rows["provider error"], /InsufficientFunds/);
 });
 
 test("public gate discovery supplies only the published policy metadata the inspector needs", async () => {
