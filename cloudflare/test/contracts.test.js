@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import worker from "../src/worker.js";
 import { originMatches, parseGateCatalog } from "../src/contracts.js";
 
@@ -34,6 +35,12 @@ test("hosted Worker sends root to the Privacy Lab entrypoint", async () => {
   assert.equal(response.headers.get("location"), null, "root must not redirect the browser to /lab/");
   assert.equal(await response.text(), "site");
   assert.deepEqual(seen, ["/lab/"]);
+});
+
+test("Privacy Lab footer does not advertise the blocked public administrator route", () => {
+  const lab = readFileSync(new URL("../../web/lab/index.html", import.meta.url), "utf8");
+  assert.match(lab, /Gate configuration is handled through a private administrator\./);
+  assert.doesNotMatch(lab, /href=["']\/admin["']/);
 });
 
 test("public aliases serve only the intended Telegram assets and never the private administrator", async () => {
