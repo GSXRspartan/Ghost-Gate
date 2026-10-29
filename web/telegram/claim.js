@@ -240,10 +240,13 @@ async function main() {
     }
     const lc = msg.toLowerCase();
     if (lc.includes("insufficientfunds") || lc.includes("insufficient") || lc.includes("insufficient balance")) {
+      const humanThreshold = meta && formatAmount(meta.thresholdRaw, div)
+        ? `${formatAmount(meta.thresholdRaw, div)} ${meta.symbol || "tokens"}`.trim()
+        : "the required threshold";
       return showRejection(
         "Not enough funds.",
         "Your wallet does not hold enough of the required token to pass this gate. " +
-        "Unshield more tTARI and try again with /join.",
+        `Reveal at least ${humanThreshold} in a qualifying output and try again with /join.`,
       );
     }
     if (lc.includes("the bridge refused") || lc.includes("refused the proof")) {

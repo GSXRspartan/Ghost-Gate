@@ -75,6 +75,13 @@ test("canonical and legacy Telegram join assets both expose a structured error p
   }
 });
 
+test("Telegram claim refusal derives human threshold wording from published gate metadata", () => {
+  const source = readFileSync(new URL("../../web/telegram/claim.js", import.meta.url), "utf8");
+  assert.match(source, /Reveal at least \$\{humanThreshold\} in a qualifying output and try again with \/join/);
+  assert.doesNotMatch(source, /Unshield more tTARI and try again with \/join/);
+  assert.match(source, /formatAmount\(meta\.thresholdRaw, div\)/);
+});
+
 test("Telegram expiry tells the user to mint a new link without weakening token checks", () => {
   const source = readFileSync(new URL("../../web/telegram/claim.js", import.meta.url), "utf8");
   assert.match(source, /Verification link expired/);

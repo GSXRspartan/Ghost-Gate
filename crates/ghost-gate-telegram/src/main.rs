@@ -373,10 +373,7 @@ impl TelegramApi for TelegramBot {
                 &json!({ "chat_id": chat, "expire_date": expires_unix, "creates_join_request": true }),
             )
             .await?;
-        v["invite_link"]
-            .as_str()
-            .map(str::to_string)
-            .ok_or_else(|| "telegram: no invite link in response".into())
+        validate_invite_response(&v, now_unix())
     }
     async fn approve_join_request(&mut self, chat: i64, user: i64) -> Result<(), String> {
         self.call("approveChatJoinRequest", &json!({ "chat_id": chat, "user_id": user }))
@@ -411,6 +408,30 @@ impl TelegramApi for TelegramBot {
             .await?;
         serde_json::from_value(v).map_err(|e| e.to_string())
     }
+}
+
+/// Telegram returns a structured ChatInviteLink. Never send a link merely because the API call
+/// returned HTTP success: it must be a current HTTPS join-request link created for this flow.
+fn validate_invite_response(v: &serde_json::Value, now: u64) -> Result<String, String> {
+    if v["creates_join_request"].as_bool() != Some(true) {
+        return Err("telegram: invite is not join-request capable".into());
+    }
+    if v["is_revoked"].as_bool() == Some(true) {
+        return Err("telegram: invite was revoked before delivery".into());
+    }
+    let expires = v["expire_date"]
+        .as_u64()
+        .ok_or_else(|| "telegram: invite response has no expiry".to_string())?;
+    if expires <= now {
+        return Err("telegram: invite expired before delivery".into());
+    }
+    let link = v["invite_link"]
+        .as_str()
+        .ok_or_else(|| "telegram: no invite link in response".to_string())?;
+    if !link.starts_with("https://t.me/") {
+        return Err("telegram: invite link is not an HTTPS Telegram link".into());
+    }
+    Ok(link.to_string())
 }
 
 /// The bridge client. Verifier responses are the only thing this bot trusts about a proof.
@@ -1478,6 +1499,27 @@ mod tests {
             &json!({ "status": "administrator", "can_invite_users": true, "can_restrict_members": false }),
         )
         .is_err());
+    }
+
+    #[test]
+    fn invite_response_must_be_a_live_join_request_link() {
+        let now = 1_700_000_000;
+        let good = json!({
+            "invite_link": "https://t.me/+fresh",
+            "creates_join_request": true,
+            "is_revoked": false,
+            "expire_date": now + 900,
+        });
+        assert_eq!(validate_invite_response(&good, now).unwrap(), "https://t.me/+fresh");
+
+        for bad in [
+            json!({ "invite_link": "https://t.me/+x", "creates_join_request": false, "expire_date": now + 900 }),
+            json!({ "invite_link": "https://t.me/+x", "creates_join_request": true, "is_revoked": true, "expire_date": now + 900 }),
+            json!({ "invite_link": "https://t.me/+x", "creates_join_request": true, "expire_date": now - 1 }),
+            json!({ "invite_link": "http://t.me/+x", "creates_join_request": true, "expire_date": now + 900 }),
+        ] {
+            assert!(validate_invite_response(&bad, now).is_err(), "invalid invite must fail closed");
+        }
     }
 
     #[tokio::test]
