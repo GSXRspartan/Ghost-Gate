@@ -91,6 +91,8 @@ test("public Telegram onboarding has a dedicated two-column layout and Privacy L
   assert.match(bot, /\.step-copy \{ min-width: 0; \}/);
   assert.match(bot, /@media \(max-width: 480px\)/);
   assert.equal((bot.match(/class="step-num"/g) || []).length, 4);
+  assert.match(bot, /<a href="https:\/\/t\.me\/GhostGateGSXRBot"[^>]*>@GhostGateGSXRBot<\/a>/);
+  assert.match(bot, /@GhostGateGSXRBot<\/a> in Telegram and send <code>\/join<\/code>/);
   assert.match(lab, /window\.location\.href = "\/bot"/);
   assert.doesNotMatch(lab, /window\.location\.href = `\/telegram\/join/);
 });
