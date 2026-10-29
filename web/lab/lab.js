@@ -17,6 +17,7 @@
 import { walletdProvider, sapientProvider, universeProvider, windowTariProvider } from "/js/ghost/provider.js";
 import { supportedProofModes, walletUsability, parseAmount, formatAmount, networkVerdict, describeProviderError } from "/js/ghost/capabilities.js";
 import { advanceTechnicalLifecycle, newTechnicalLifecycle, switchTechnicalView, technicalSummaryRows } from "/lab/technical-state.js";
+import { connectButtonState, connectedWallet, disconnectedWallet, newWalletConnection, switchWalletView } from "/lab/wallet-connection-state.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -36,6 +37,9 @@ const state = {
     gateListSig: null,   // signature of the last-rendered gate list (avoid rebuilding an open dropdown)
     walletFailures: 0,   // consecutive polls where the wallet was absent or unreachable
     walletConnecting: false, // one user gesture may create at most one pending wallet request
+    walletConnection: newWalletConnection(),
+    walletConnectionAddress: null,
+    walletConnectionUnsubscribe: null,
     technical: newTechnicalLifecycle(),
     bridgeStatus: "unavailable / not reported",
 };
@@ -306,6 +310,10 @@ async function renderWallets() {
 }
 
 async function selectMode(id) {
+    if (state.walletConnecting) return;
+    if (state.walletConnection.connected && state.walletConnection.mode !== id) {
+        forgetWalletConnection("Wallet selection changed. Connect the selected wallet before proving.");
+    }
     state.mode = id;
     const note = $("wallet-note");
     note.classList.remove("ok", "warn", "bad");
@@ -375,9 +383,10 @@ async function selectMode(id) {
 async function connectWallet() {
     // Disabled buttons stop ordinary pointer clicks, but this guard also covers keyboard and
     // synthetic/re-entrant events. A second click must never produce a second permission prompt.
-    if (state.walletConnecting) return;
+    if (state.walletConnecting || state.walletConnection.connected) return;
     state.walletConnecting = true;
-    const btn = $("connect-wallet");
+    const walletSelect = $("wallet-select");
+    if (walletSelect) walletSelect.disabled = true;
     const detail = $("wallet-detail");
     const walletName = state.mode === "universe" ? "Tari Universe" : "Sapient";
     const setRow = (id, cls, text) => {
@@ -393,9 +402,7 @@ async function connectWallet() {
     setRow("wd-status", null, `Waiting for ${walletName}…`);
     $("wd-address").textContent = "—";
     $("wd-network").textContent = "—";
-    btn.disabled = true;
-    const label = btn.textContent;
-    btn.textContent = `Waiting for ${walletName}…`;
+    renderConnectIntro();
     try {
         if (state.mode === "walletd") {
             const res = await api("/wallet/status");
@@ -459,6 +466,10 @@ async function connectWallet() {
             setRow("wd-status", "bad", "The wallet returned no account address, so there is nothing to connect to.");
             return;
         }
+        state.walletConnection = connectedWallet(state.mode);
+        state.walletConnectionAddress = address;
+        watchWalletConnection();
+        renderConnectIntro();
         $("wd-address").textContent = `${address.slice(0, 24)}…${address.slice(-10)} (${address.length} chars)`;
         setRow("wd-status", "ok", `${provider.label} connected.`);
         // The passive note under the selector must not keep last session's "press Connect" text:
@@ -476,13 +487,22 @@ async function connectWallet() {
         try {
             caps = await provider.request("tari_getCapabilities");
         } catch (e) {
+            if (e && e.code === 4100) {
+                forgetWalletConnection("Wallet authorization ended. Connect wallet again before proving.");
+                return;
+            }
             const d = describeProviderError(e);
             setRow("wd-network", d.cls, d.text);
         }
 
         // 3) Network — compare the wallet's own report against the gate's Ootle byte.
         let netName = null;
-        try { netName = await provider.request("tari_getNetwork"); } catch { /* optional */ }
+        try { netName = await provider.request("tari_getNetwork"); } catch (e) {
+            if (e && e.code === 4100) {
+                forgetWalletConnection("Wallet authorization ended. Connect wallet again before proving.");
+                return;
+            }
+        }
         const gate = state.gate;
         if (gate) {
             const v = networkVerdict(netName, gate.network);
@@ -524,6 +544,7 @@ async function connectWallet() {
                     ? `signed over nonce ${nonce.slice(0, 12)}… (signature ${proof.signature.slice(0, 14)}…) — proof of wallet possession only`
                     : "the wallet returned no signature";
             } catch (e) {
+                if (e && e.code === 4100) forgetWalletConnection("Wallet authorization ended. Connect wallet again before proving.");
                 $("wd-ownership-row").hidden = false;
                 $("wd-ownership").textContent = e && e.code === 4001
                     ? "you declined the signature request"
@@ -537,17 +558,57 @@ async function connectWallet() {
         setRow("wd-status", "bad", `Connection failed: ${e && e.message ? e.message : e}`);
     } finally {
         state.walletConnecting = false;
-        btn.disabled = false;
-        btn.textContent = label;
+        if (walletSelect) walletSelect.disabled = false;
+        renderConnectIntro();
     }
 }
 
 /** One line under the connect button, refreshed whenever the mode changes. */
 function renderConnectIntro() {
-    const el = $("connect-wallet");
-    if (!el) return;
-    el.hidden = !state.gate;
-    el.textContent = state.mode === "walletd" ? "Check wallet daemon" : "Connect wallet";
+    const btn = $("connect-wallet");
+    if (!btn) return;
+    // A removed provider is an actual loss, not an invitation to reconnect automatically. The
+    // next user click is the only path that can request permission again.
+    if (state.walletConnection.connected && state.walletConnection.mode !== "walletd" && !window.tari) {
+        forgetWalletConnection("Wallet provider is no longer available. Connect again when it returns.", true);
+    }
+    const presentation = connectButtonState({
+        hasGate: Boolean(state.gate), mode: state.mode, connecting: state.walletConnecting,
+        connection: state.walletConnection,
+    });
+    btn.hidden = presentation.hidden;
+    btn.disabled = presentation.disabled;
+    btn.textContent = presentation.label;
+    btn.title = presentation.title;
+    btn.setAttribute("aria-label", presentation.label);
+}
+
+function forgetWalletConnection(message, fromRender = false) {
+    if (typeof state.walletConnectionUnsubscribe === "function") state.walletConnectionUnsubscribe();
+    state.walletConnectionUnsubscribe = null;
+    state.walletConnection = disconnectedWallet();
+    state.walletConnectionAddress = null;
+    const note = $("wallet-note");
+    if (message && note) {
+        note.classList.remove("ok", "bad");
+        note.classList.add("warn");
+        note.textContent = message;
+    }
+    if (!fromRender) renderConnectIntro();
+}
+
+function watchWalletConnection() {
+    if (typeof state.walletConnectionUnsubscribe === "function") state.walletConnectionUnsubscribe();
+    state.walletConnectionUnsubscribe = null;
+    const rawProvider = window.tari;
+    if (!rawProvider || typeof rawProvider.on !== "function") return;
+    const unsubscribe = rawProvider.on("accountsChanged", (accounts) => {
+        if (!state.walletConnection.connected) return;
+        if (Array.isArray(accounts) && accounts.includes(state.walletConnectionAddress)) return;
+        const reason = Array.isArray(accounts) && accounts.length ? "Wallet account changed. Connect wallet again before proving." : "Wallet disconnected. Connect wallet again before proving.";
+        forgetWalletConnection(reason);
+    });
+    if (typeof unsubscribe === "function") state.walletConnectionUnsubscribe = unsubscribe;
 }
 
 // ---------------------------------------------------------------- steps + view
@@ -772,6 +833,7 @@ async function proveCredential(gate, challenge_nonce, session_commitment) {
             maxFee: "50000",
         });
     } catch (e) {
+        if (e && e.code === 4100) forgetWalletConnection("Wallet authorization ended. Connect wallet again before proving.");
         updateTechnical({ credential: "wallet did not provide a proof", verification: "not started", failure: "wallet authorization refused" });
         await refreshTrace();
         $("prove").disabled = false;
@@ -891,6 +953,7 @@ async function finishCredential(gate, challenge_nonce, session_commitment, subst
         updateTechnical({ credential: "ownership signature requested" });
         signed = await provider.signChallenge(substateId, challenge_nonce, gate.resourceAddress);
     } catch (e) {
+        if (e && e.code === 4100) forgetWalletConnection("Wallet authorization ended. Connect wallet again before proving.");
         updateTechnical({ credential: "signature not provided", verification: "not started", failure: "wallet signature refused" });
         await refreshTrace();
         $("prove").disabled = false;
@@ -1169,6 +1232,7 @@ function setView(v) {
     const switched = switchTechnicalView(state.technical, v);
     state.view = switched.view;
     state.technical = switched.lifecycle;
+    state.walletConnection = switchWalletView(state.walletConnection, v).connection;
     $("simple-view").hidden = v !== "simple";
     $("technical-view").hidden = v !== "technical";
     $("view-simple").setAttribute("aria-selected", String(v === "simple"));
@@ -1176,6 +1240,7 @@ function setView(v) {
     renderTechnicalFacts();
     renderTerminal();
     updateWalletPill();
+    renderConnectIntro();
 }
 
 function updateWalletPill() {
@@ -1288,6 +1353,9 @@ async function refreshStatus() {
         else renderGateFacts(null);
     }
     loadTelegramScope();
+    // This is a passive presence check only. It never calls a wallet method or asks for
+    // permission; it merely releases a stale disabled button if an injected provider vanished.
+    renderConnectIntro();
     return gates;
 }
 
