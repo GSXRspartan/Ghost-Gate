@@ -33,7 +33,12 @@
   .proof-steps li.active { color: var(--text); }
   .proof-steps li.active::before { border-color: var(--green); color: var(--green); box-shadow: 0 0 0 4px var(--green-glow); }
   .proof-steps li.done::before { background: var(--green); border-color: var(--green); color: var(--ink); content: "✓"; }
-  .error { color: var(--bad); font-size: .88rem; margin-top: 1rem; }
+  .status-panel { margin-top: 1rem; padding: 1rem 1.1rem; border: 1px solid rgba(224,106,106,.6);
+    border-radius: 10px; background: rgba(224,106,106,.08); }
+  .status-panel h3 { color: var(--bad); margin: 0 0 .4rem; font-size: 1rem; }
+  .status-panel p { margin: 0; line-height: 1.5; }
+  .status-panel details { margin-top: .75rem; color: var(--dim); font-size: .82rem; }
+  .status-panel code { display:block; margin-top:.4rem; white-space:normal; overflow-wrap:anywhere; }
   .tg-head a { color: var(--green); text-decoration: none; font-size: .85rem; letter-spacing: .06em; }
 </style>
 </head>
@@ -51,16 +56,25 @@
       <li data-step="verify">The bridge verifies against chain state</li>
       <li data-step="claim">A private-group join request is authorized</li>
     </ol>
-    <p class="error" id="tg-error" hidden></p>
+    <section class="status-panel" id="tg-error" role="alert" hidden>
+      <h3 id="tg-error-heading">Verification unavailable</h3>
+      <p id="tg-error-message"></p>
+      <details id="tg-error-detail" hidden>
+        <summary>Technical details</summary>
+        <code id="tg-error-technical"></code>
+      </details>
+    </section>
     <p class="hint" style="margin-top:1rem">
-      Proof accepted is not the same as access authorized. The bot re-verifies every proof against
-      the bridge before admitting anyone. In local fixture mode, results are labelled test-only
-      and never change Telegram membership.
-    </p>
-    <p class="hint" style="margin-top:1rem">
-      You'll be asked for one wallet approval to create a publicly-auditable proof output (a public
-      minimum, never a balance), and one to sign a challenge. No seed, no keys, no exact balance —
-      ever.
+      Ghost Gate verifies that your wallet meets the required minimum without asking for your seed phrase,
+      private keys, or exact balance.
+      <br><br>
+      For this test gate, Sapient may ask you to reveal enough testnet tTARI to satisfy the 100 tTARI
+      requirement and then sign the Ghost Gate challenge.
+      <br><br>
+      After verification, the Telegram bot independently checks the result before approving the pending
+      join request.
+      <br><br>
+      Testnet only.
     </p>
   </section>
 </main>

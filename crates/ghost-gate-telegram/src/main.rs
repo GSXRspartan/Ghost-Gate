@@ -64,7 +64,7 @@ use serde_json::json;
 
 const DEFAULT_BRIDGE: &str = "http://127.0.0.1:7799";
 const DEFAULT_CLAIM_PORT: u16 = 7808;
-const DEFAULT_GATE: &str = "crypt";
+const DEFAULT_GATE: &str = "Crypt";
 const JOIN_TTL: Duration = Duration::from_secs(600);
 const ACCESS_TTL: Duration = Duration::from_secs(3600);
 const RECHECK_INTERVAL: Duration = Duration::from_secs(60);
@@ -526,7 +526,7 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
     }
 
     /// `/join`: mints a single-use token bound to this Telegram account.
-    pub async fn join(&mut self, user: i64, base_url: &str, claim_base: &str, bridge_public_url: Option<&str>) -> Result<String, String> {
+    pub async fn join(&mut self, user: i64, base_url: &str, _claim_base: &str, _bridge_public_url: Option<&str>) -> Result<String, String> {
         // A user rejoining while a grant is live gets told, rather than silently minting a second
         // proof obligation. A server-backed grant is ASKED, not trusted from memory: if the session
         // was revoked or expired while the bot was looking away, the user simply rejoins.
@@ -580,16 +580,11 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
         Ok(format!(
             "To prove you hold enough of the vault's token, open this link in the browser where your wallet lives:\n\n{}\n\nThis link is for you alone, works once, and expires in 10 minutes. I will never ask for your seed, keys, or exact balance — the check is a public minimum, verified by the network.",
             {
-                let base = format!(
-                    "{}/telegram/join?token={token}&gate={}&claim={}/claim",
+                format!(
+                    "{}/telegram/join?token={token}&gate={}",
                     base_url.trim_end_matches('/'),
                     self.gate,
-                    claim_base.trim_end_matches('/'),
-                );
-                match bridge_public_url {
-                    Some(url) => format!("{base}&bridge={}", url.trim_end_matches('/')),
-                    None => base,
-                }
+                )
             }
         ))
     }
@@ -1385,6 +1380,9 @@ mod tests {
         let (token, reply) = mint_join(&mut bot, 42).await;
         assert!(reply.contains("for you alone"), "the reply says so: {reply}");
         assert!(reply.contains("never ask for your seed"), "the reply states the privacy rule: {reply}");
+        assert!(reply.contains("&gate=crypt"), "the configured gate stays in the opaque join link: {reply}");
+        assert!(!reply.contains("&claim="), "the browser never receives a claim endpoint from the bot: {reply}");
+        assert!(!reply.contains("&bridge="), "the browser never receives a bridge endpoint from the bot: {reply}");
 
         let link = bot.claim(&token, "proof1").await.expect("first claim grants");
         assert_eq!(link, "https://t.me/joinchat/seat1");

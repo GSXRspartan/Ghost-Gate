@@ -7,17 +7,16 @@
  *
  * Query params (all minted by the bot):
  *   token  — the single-use join token
- *   gate   — which registered gate to prove (e.g. "crypt")
- *   claim  — the bot's claim endpoint base URL (its own origin; the bot's CORS names ours exactly)
- *   bridge — (optional) the bridge's public URL through the tunnel; when set, gate metadata,
- *            challenges, and credential proofs are sent there instead of the page's own origin
+ *   gate   — which registered gate to prove (e.g. "Crypt")
+ *
+ * Claim and bridge destinations are never read from the link. The deployed page carries exact,
+ * operator-configured HTTPS origins instead, so a forwarded or edited URL cannot redirect proof
+ * material or a claim token to another service.
  */
 
 import { sapientProvider, universeProvider } from "/js/ghost/provider.js";
 import { formatAmount } from "/js/ghost/capabilities.js";
-// Use an absolute asset path so the canonical /telegram/join/ page resolves the same
-// trust helper as the legacy /telegram/join.html asset.
-import { trustedBase } from "/telegram/trusted-url.js";
+import { configuredJoinEndpoints } from "/telegram/join-endpoints.js";
 
 const $ = (id) => document.getElementById(id);
 const step = (name, state) => {
@@ -27,40 +26,28 @@ const step = (name, state) => {
 
 const params = new URLSearchParams(window.location.search);
 const token = params.get("token") || "";
-const gate = params.get("gate") || "crypt";
-// A query string is not a trust configuration: validate destinations before any wallet request.
-const claimRaw = params.get("claim") || "";
+const gate = params.get("gate") || "";
 const configured = name => document.querySelector(`meta[name="${name}"]`)?.content || "";
-const claimBase = trustedBase(claimRaw, configured("gg-trusted-claims"), location.origin, { allowPath: true });
-const claimUrl = claimBase && new URL(claimBase).pathname === "/claim" ? claimBase : null;
-const bridgeBase = (() => {
-  const raw = params.get("bridge") || "";
-  if (!raw) return "";
-  return trustedBase(raw, configured("gg-trusted-bridges"), location.origin);
-})();
+const { claimUrl, bridgeBase } = configuredJoinEndpoints({
+  bridgeOrigin: configured("gg-trusted-bridges"),
+  claimOrigin: configured("gg-trusted-claims"),
+  pageOrigin: location.origin,
+});
 
-function fail(message) {
+function fail(message, technical = "") {
   const err = $("tg-error");
   err.hidden = false;
-  err.textContent = message;
+  $("tg-error-heading").textContent = "Verification unavailable";
+  $("tg-error-message").textContent = message;
+  const detail = $("tg-error-detail");
+  detail.hidden = !technical;
+  $("tg-error-technical").textContent = technical;
   $("tg-line").textContent = "The verification did not complete.";
 }
 
 function showRejection(heading, explanation) {
-  $("tg-line").textContent = "";
-  const banner = document.createElement("div");
-  banner.style.cssText =
-    "margin:1.5rem auto;padding:1.5rem;text-align:center;border:2px solid #f44;" +
-    "border-radius:12px;background:rgba(255,50,50,0.08);max-width:440px;";
-  const h = document.createElement("div");
-  h.textContent = heading;
-  h.style.cssText = "font-size:1.4rem;font-weight:700;color:#f44;margin-bottom:0.75rem;";
-  const p = document.createElement("div");
-  p.textContent = explanation;
-  p.style.cssText = "font-size:1rem;line-height:1.5;opacity:0.9;";
-  banner.appendChild(h);
-  banner.appendChild(p);
-  $("tg-line").parentNode.insertBefore(banner, $("tg-line").nextSibling);
+  fail(explanation, heading);
+  $("tg-error-heading").textContent = heading;
 }
 
 async function post(path, body) {
@@ -75,14 +62,14 @@ async function post(path, body) {
 }
 
 async function main() {
-  if (bridgeBase === null) return fail("The bridge origin is not trusted by this page.");
-  if (!token) return fail("This page needs a join link from the bot. Send /join there first.");
-  if (!claimUrl) {
+  if (!bridgeBase || !claimUrl) {
     return fail(
-      `The join link's claim endpoint is not acceptable (${claimRaw || "missing"}). ` +
-      "Re-request the link with /join — links are minted by the bot and point at the local bridge.",
+      "This verification page is not configured for the approved Ghost Gate services. Request a new /join link from the bot.",
+      "Configured bridge or claim endpoint is missing or invalid.",
     );
   }
+  if (!token) return fail("This page needs a join link from the bot. Send /join there first.");
+  if (!gate) return fail("This join link does not name a gate. Send /join again.");
 
   // Which wallet? A browser wallet — this flow is the credential mode. The bridge's own walletd
   // path is not reachable from a Telegram user's browser unless they also run the bridge; if no
@@ -135,7 +122,7 @@ async function main() {
     meta = await fetch(`${bridgeBase}/gate/${encodeURIComponent(gate)}`, { redirect: "error", credentials: "omit" }).then((r) => r.json());
     if (!meta.resource_address) throw new Error(meta.error || "not registered");
   } catch (e) {
-    return fail(`The gate ${gate} is not available on this bridge: ${e && e.message ? e.message : e}`);
+    return fail("The requested gate is not available. Send /join again.", "Gate lookup did not return a published gate.");
   }
   const div = Number(meta.divisibility ?? 0);
   $("tg-line").textContent =
@@ -246,7 +233,7 @@ async function main() {
         "Make sure your wallet holds the required balance and try again with /join.",
       );
     }
-    fail(msg);
+    fail("The wallet or verification service could not complete this request. Nothing was authorized.", "The verification flow stopped before a Telegram claim was granted.");
   }
 }
 
