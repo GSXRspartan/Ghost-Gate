@@ -816,6 +816,91 @@ fn hosted_relying_site_is_validated_and_only_binds_after_publish() {
 }
 
 #[test]
+fn existing_crypt_gate_is_visible_after_login_and_stepup_and_drafts_stay_non_live() {
+    // This is the control-plane sequence the deployed administrator follows: an administrator
+    // creates the Crypt draft, explicitly publishes it, signs out, signs in, and performs a
+    // fresh approval.  The resulting state is what the dashboard renders into the existing-gate
+    // editor, so pin the identifiers and exact raw amount the UI must receive.
+    let dir = unique_dir("gg-admin-crypt-editor");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let server = spawn_server(&dir);
+    let admin = WalletAdmin::new();
+    let (registration_cookie, registration_csrf) = admin.register(server.port);
+    let create = http(server.port, "POST", "/admin/api/app/create",
+        &hdrs(&auth_headers(server.port, &registration_cookie, &registration_csrf)),
+        &serde_json::json!({
+            "applicationId": "Crypt", "displayName": "Crypt", "topology": "independent",
+            "defaultSessionTtl": 86_400u64, "production": true,
+        }).to_string());
+    assert_eq!(create.status, 200, "{:#?}", create.body);
+
+    let crypt_gate = |threshold_raw: &str| serde_json::json!({
+        "gateId": "Crypt", "name": "Crypt", "resourceAddress": "resource_0101010101010101010101010101010101010101010101010101010101010101",
+        "symbol": "tTARI", "divisibility": 6, "thresholdRaw": threshold_raw,
+        "proofMode": "consensus", "challengeDomain": "Crypt.localhost", "grants": [],
+        "enabled": true, "testLane": false, "componentAddress": "component_crypt",
+    });
+    let set = |cookie: &str, csrf: &str, threshold_raw: &str| http(server.port, "POST", "/admin/api/gate/set",
+        &hdrs(&auth_headers(server.port, cookie, csrf)),
+        &serde_json::json!({ "applicationId": "Crypt", "gate": crypt_gate(threshold_raw) }).to_string());
+    assert_eq!(set(&registration_cookie, &registration_csrf, "100000000").status, 200,
+        "the 100 tTARI draft must save exactly");
+    let published = http(server.port, "POST", "/admin/api/policy/publish",
+        &hdrs(&auth_headers(server.port, &registration_cookie, &registration_csrf)),
+        r#"{"applicationId":"Crypt","gateId":"Crypt","reason":"editor regression fixture"}"#);
+    assert_eq!(published.status, 200, "{:#?}", published.body);
+
+    // A normal login remains locked.  The next ceremony is a step-up on that SAME session,
+    // exactly as the browser does after Windows Hello.
+    let logout = http(server.port, "POST", "/admin/api/auth/logout",
+        &hdrs(&auth_headers(server.port, &registration_cookie, &registration_csrf)), "{}");
+    assert_eq!(logout.status, 200, "{:#?}", logout.body);
+    let login = admin.login(server.port, false, None);
+    assert_eq!(login.status, 200, "{:#?}", login.body);
+    let cookie = login.set_cookie.expect("ordinary login must mint a session");
+    assert_eq!(state_field(&server, &cookie, "stepupValid"), serde_json::Value::Bool(false));
+    let stepup = admin.login(server.port, true, Some(&cookie));
+    assert_eq!(stepup.status, 200, "{:#?}", stepup.body);
+    assert_eq!(stepup.body.get("stepup").and_then(|v| v.as_bool()), Some(true));
+
+    let state = state_field_value(&server, &cookie);
+    assert_eq!(state.get("stepupValid"), Some(&serde_json::Value::Bool(true)));
+    let crypt = state.get("applications").and_then(|v| v.as_array()).unwrap().iter()
+        .find(|app| as_str(app, "applicationId") == "Crypt")
+        .expect("a published Crypt application stays visible after an ordinary login and step-up");
+    let gate = crypt.get("gates").and_then(|v| v.as_array()).unwrap().iter()
+        .find(|gate| as_str(gate, "gateId") == "Crypt")
+        .expect("the Crypt gate stays visible to the editor");
+    assert_eq!(as_str(gate, "thresholdRaw"), "100000000");
+    assert_eq!(gate.get("divisibility").and_then(|v| v.as_u64()), Some(6));
+    assert_eq!(as_str(gate, "challengeDomain"), "Crypt.localhost");
+    assert_eq!(ghost_gate_core::policy::GatePolicy::raw_units_for("100", 6), Some(100_000_000),
+        "100 tTARI must remain exactly 100000000 raw units");
+
+    // Saving an editor draft must be possible after a fresh approval, but it cannot mutate the
+    // immutable published binding until another explicit publish.
+    let csrf = as_str(&state, "csrf").to_string();
+    assert_eq!(set(&cookie, &csrf, "99999999").status, 200, "the post-step-up editor draft saves");
+    let live = ghost_gate_registry::load_bindings(&server.state.paths).unwrap().unwrap();
+    let live_crypt = live.gates.iter().find(|binding| binding.application_id == "Crypt" && binding.gate_id == "Crypt").unwrap();
+    assert_eq!(live_crypt.threshold_raw, 100_000_000,
+        "the un-published Crypt draft cannot change the live bridge binding");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn dashboard_existing_gate_prefill_uses_the_exact_defined_amount_formatter() {
+    // This source-level guard complements the real-HTTP lifecycle test above. The dashboard is a
+    // static asset, so it catches the class of deployment regression where rendering an existing
+    // gate throws before its card is appended (as rawToHuman did).
+    let script = include_str!("../assets/admin.js");
+    assert!(script.contains("function ghostFormat(raw, div)"));
+    assert!(script.contains("ghostFormat(g.thresholdRaw, g.divisibility)"));
+    assert!(!script.contains("rawToHuman("), "the editor must not call an undefined formatter");
+}
+
+#[test]
 fn tamper_10_a_lower_tier_session_cannot_reach_a_higher_tier() {
     // Covered exhaustively in the registry tests; repeated here as the product-level statement:
     // silver grants bronze, never the reverse.

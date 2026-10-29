@@ -405,7 +405,10 @@ function renderApps(state) {
         s(`gate-resource-${app.applicationId}`, g.resourceAddress);
         s(`gate-symbol-${app.applicationId}`, g.symbol);
         s(`gate-div-${app.applicationId}`, g.divisibility);
-        s(`gate-amount-${app.applicationId}`, rawToHuman(g.thresholdRaw, g.divisibility));
+        // Do not use Number here: token amounts are u128 raw units.  ghostFormat is the
+        // dashboard's exact BigInt formatter, so an existing published gate can be rendered
+        // without rounding or throwing before the card is appended to the page.
+        s(`gate-amount-${app.applicationId}`, ghostFormat(g.thresholdRaw, g.divisibility));
         s(`gate-component-${app.applicationId}`, g.componentAddress || "");
         s(`mode-${app.applicationId}`, g.proofMode);
         s(`ttl-${app.applicationId}`, g.sessionTtlOverrideSecs || "");
