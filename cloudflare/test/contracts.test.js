@@ -303,3 +303,36 @@ test("same visitor may retry the same pending proof, but cannot replace it", asy
     assert.equal(replaced.status, 409);
   } finally { globalThis.fetch = previousFetchAgain; }
 });
+
+test("Worker-side /wallet/status returns unconfigured with browser credential guidance", async () => {
+  const response = await worker.fetch(new Request("https://edge.example/wallet/status"), {
+    GG_GATE_CATALOG: catalog, GG_VERIFIER_ORIGIN: "https://bridge.example",
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.configured, false);
+  assert.equal(body.reachable, false);
+  assert.ok(body.note.includes("browser wallet"), "note should mention browser wallet for credential proofs");
+});
+
+test("ghostgate.boo relying site is a valid HTTPS origin", () => {
+  const ghostgateCatalog = JSON.stringify([{
+    tenant: "Crypt", gateId: "Crypt", relyingSite: "https://ghostgate.boo",
+    network: 38, resourceAddress: "resource_0101010101010101010101010101010101010101010101010101010101010101",
+    thresholdRaw: "100000000", divisibility: 6, proofMode: "credential",
+  }]);
+  const gates = parseGateCatalog(ghostgateCatalog);
+  assert.equal(gates[0].relyingSite, "https://ghostgate.boo");
+  assert.equal(gates[0].gateId, "Crypt");
+});
+
+test("relying-site origin mismatch is rejected for ghostgate.boo gate", () => {
+  const ghostgateCatalog = JSON.stringify([{
+    tenant: "Crypt", gateId: "Crypt", relyingSite: "https://ghostgate.boo",
+    network: 38, resourceAddress: "resource_test", thresholdRaw: "100000000", proofMode: "credential",
+  }]);
+  const gate = parseGateCatalog(ghostgateCatalog)[0];
+  assert.equal(originMatches(new Request("https://ghostgate.boo/api/session"), gate), true);
+  assert.equal(originMatches(new Request("https://ghost-gate-staging.gsxrspartan.workers.dev/api/session"), gate), false);
+  assert.equal(originMatches(new Request("https://evil.example/api/session"), gate), false);
+});

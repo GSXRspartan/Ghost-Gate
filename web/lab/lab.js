@@ -1075,6 +1075,21 @@ function setView(v) {
     $("technical-view").hidden = v !== "technical";
     $("view-simple").setAttribute("aria-selected", String(v === "simple"));
     $("view-technical").setAttribute("aria-selected", String(v === "technical"));
+    updateWalletPill();
+}
+
+function updateWalletPill() {
+    const k = document.getElementById("pill-walletd-k");
+    if (!k) return;
+    const hasCredentialGate = state.gates.some((g) => g.proofMode === "credential");
+    const walletdUnconfigured = k.dataset.walletdConfigured === "false";
+    if (walletdUnconfigured && hasCredentialGate && state.view === "simple") {
+        k.textContent = "WALLET MODE";
+        setPill("pill-walletd", "ok", "browser credential");
+    } else if (walletdUnconfigured) {
+        k.textContent = "WALLETD";
+        setPill("pill-walletd", "warn", "not configured (optional)");
+    }
 }
 
 // ---------------------------------------------------------------- status strip
@@ -1114,13 +1129,17 @@ async function refreshStatus() {
     // (a real service error — the route says 503), and not configured at all (the bridge runs in
     // offline demonstration mode, which is a configuration the operator chose).
     const ws = await api("/wallet/status").catch(() => null);
+    const wk = document.getElementById("pill-walletd-k");
     if (ws && ws.ok && ws.body.configured === false) {
-        setPill("pill-walletd", "warn", "not configured (offline demo)");
+        if (wk) wk.dataset.walletdConfigured = "false";
+        updateWalletPill();
         state.walletFailures++;
     } else if (ws && ws.ok && ws.body.reachable) {
+        if (wk) { wk.textContent = "WALLETD"; wk.dataset.walletdConfigured = "true"; }
         setPill("pill-walletd", "ok", ws.body.has_default_account ? "reachable · account ready" : "reachable · no account");
         state.walletFailures = 0;
     } else {
+        if (wk) { wk.textContent = "WALLETD"; delete wk.dataset.walletdConfigured; }
         setPill("pill-walletd", "bad", ws && ws.status === 503 ? "not reachable" : "unreachable");
         state.walletFailures++;
     }
@@ -1134,6 +1153,7 @@ async function refreshStatus() {
         return d;
     });
     state.gates = gates;
+    updateWalletPill();
     const modes = [];
     if (gates.some((g) => g.proofMode === "consensus")) modes.push("consensus");
     if (gates.some((g) => g.proofMode === "credential")) modes.push("credential");
