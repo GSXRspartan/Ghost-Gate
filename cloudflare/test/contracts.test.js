@@ -54,6 +54,8 @@ test("Privacy Lab presents hosted browser credentials clearly and constrains the
   assert.match(css, /grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
   assert.match(css, /\.pill \{ display: grid; grid-template-columns: auto auto minmax\(0, 1fr\)/);
   assert.match(css, /\.view-switch \{ flex: 1 1 auto; \}/);
+  assert.match(css, /\.technical-facts \{ grid-template-columns: 1fr; gap: 0\.12rem;/);
+  assert.match(css, /\.technical-facts dd \{ margin-bottom: 0\.35rem; \}/);
 });
 
 test("public aliases serve only the intended Telegram assets and never the private administrator", async () => {
