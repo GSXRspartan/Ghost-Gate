@@ -1123,7 +1123,9 @@ function updateWalletPill() {
         setPill("pill-walletd", "ok", "browser credential");
     } else if (walletdUnconfigured) {
         k.textContent = "WALLETD";
-        setPill("pill-walletd", "warn", "not configured (optional)");
+        // Hosted browser credentials do not use walletd. Keep the diagnostic available in
+        // Technical view, but present its absence as neutral information rather than a fault.
+        setPill("pill-walletd", "", "optional · not in use");
     }
 }
 
@@ -1149,7 +1151,10 @@ async function refreshStatus() {
     // Bridge + configuration flags: one cheap call, and the ONLY place that may say "healthy".
     const health = await api("/health").catch(() => null);
     if (health && health.ok) {
-        setPill("pill-bridge", "ok", `healthy v${health.body.version || "?"}`);
+        const bridgeVersion = String(health.body.version || "").trim();
+        // `version` may be a semantic version or a deployment label such as `edge-proxy`.
+        // A separator is truthful for both and avoids the malformed `vedge-proxy` display.
+        setPill("pill-bridge", "ok", bridgeVersion ? `healthy · ${bridgeVersion}` : "healthy");
         setPill("pill-indexer", health.body.credential_configured ? "ok" : "", health.body.credential_configured ? "configured" : "not configured");
         // Chain sync is not asserted here: "configured" says what this process was wired with,
         // nothing more. The verifier refuses proofs it cannot verify against real chain state.

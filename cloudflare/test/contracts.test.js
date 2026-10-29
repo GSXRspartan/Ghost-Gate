@@ -43,6 +43,18 @@ test("Privacy Lab footer does not advertise the blocked public administrator rou
   assert.doesNotMatch(lab, /href=["']\/admin["']/);
 });
 
+test("Privacy Lab presents hosted browser credentials clearly and constrains the mobile status strip", () => {
+  const lab = readFileSync(new URL("../../web/lab/lab.js", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../../web/lab/lab.css", import.meta.url), "utf8");
+  assert.match(lab, /setPill\("pill-walletd", "ok", "browser credential"\)/);
+  assert.match(lab, /setPill\("pill-walletd", "", "optional · not in use"\)/);
+  assert.match(lab, /`healthy · \$\{bridgeVersion\}`/);
+  assert.doesNotMatch(lab, /healthy v\$\{health\.body\.version/);
+  assert.match(css, /grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
+  assert.match(css, /\.pill \{ display: grid; grid-template-columns: auto auto minmax\(0, 1fr\)/);
+  assert.match(css, /\.view-switch \{ flex: 1 1 auto; \}/);
+});
+
 test("public aliases serve only the intended Telegram assets and never the private administrator", async () => {
   const seen = [];
   const env = { ASSETS: { fetch(request) { seen.push(new URL(request.url).pathname); return new Response("site"); } } };

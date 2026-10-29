@@ -125,10 +125,11 @@ body {
     color: var(--dim);
     background: rgba(11, 15, 13, 0.6);
     white-space: nowrap;
+    min-width: 0;
 }
 .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dim); flex: none; }
 .pill .k { color: var(--dim); letter-spacing: 0.09em; }
-.pill .v { color: var(--text); }
+.pill .v { color: var(--text); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .pill.ok .dot { background: var(--green); box-shadow: 0 0 6px var(--green); }
 .pill.ok .v { color: var(--green); }
 .pill.ok { border-color: rgba(41, 212, 124, 0.35); }
@@ -498,13 +499,17 @@ details.explain p { color: var(--dim); font-size: 0.8rem; line-height: 1.5; marg
 }
 @media (max-width: 600px) {
     #lab-root { padding: 0 0.7rem 3rem; }
-    .masthead { padding-top: 0.9rem; }
+    .masthead { padding-top: 0.9rem; gap: 0.55rem; }
     .masthead h1 { font-size: 1.1rem; }
-    .card { padding: 0.9rem 0.85rem; }
+    .masthead nav { width: 100%; justify-content: space-between; gap: 0.45rem; }
+    .view-switch { flex: 1 1 auto; }
+    .view-switch button { flex: 1 1 0; padding: 0.48rem 0.55rem; }
+    .card { padding: 0.8rem; }
     .steps li { grid-template-columns: 1.55rem 1fr; gap: 0.6rem; }
-    .terminal { height: 360px; font-size: 0.7rem; }
-    .status-strip { gap: 0.35rem; padding: 0.5rem 0.6rem; }
-    .pill { font-size: 0.62rem; padding: 0.25rem 0.5rem; }
+    .terminal { height: 300px; font-size: 0.7rem; }
+    .status-strip { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.35rem; padding: 0.45rem 0.5rem; margin: 0.35rem 0 0.65rem; }
+    .pill { display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: 0.28rem; font-size: 0.62rem; padding: 0.28rem 0.45rem; }
+    .wallet-connect { margin-top: 0.6rem; }
 }
 @media (max-width: 360px) {
     .masthead h1 { letter-spacing: 0.08em; }

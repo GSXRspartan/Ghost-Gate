@@ -289,6 +289,36 @@ async function main() {
   const missing = await evaluate(`document.getElementById("wd-status").textContent`);
   check("missing provider reports a bounded initialization failure", /did not finish initializing within 1\.5 seconds/i.test(missing || ""), `${Date.now() - missingStart}ms: ${missing}`);
 
+  console.log("\n== 7. mobile status semantics and layout fit the viewport ==");
+  await send("Emulation.setDeviceMetricsOverride", {
+    width: 360, height: 740, deviceScaleFactor: 2, mobile: true,
+  });
+  await reloadWithMock(MOCK_TARI);
+  const simpleMobile = await evaluate(`(() => {
+    const strip = document.getElementById("status-strip");
+    const toggle = document.querySelector(".view-switch").getBoundingClientRect();
+    const wallet = document.getElementById("pill-walletd");
+    return {
+      viewport: innerWidth,
+      documentWidth: document.documentElement.scrollWidth,
+      stripWidth: strip.scrollWidth,
+      stripClientWidth: strip.clientWidth,
+      toggleRight: toggle.right,
+      walletKey: wallet.querySelector(".k").textContent,
+      walletValue: wallet.querySelector(".v").textContent,
+    };
+  })()`);
+  check("mobile document and status strip do not overflow", simpleMobile.documentWidth <= simpleMobile.viewport && simpleMobile.stripWidth <= simpleMobile.stripClientWidth, JSON.stringify(simpleMobile));
+  check("mobile toggle remains fully visible", simpleMobile.toggleRight <= simpleMobile.viewport, JSON.stringify(simpleMobile));
+  check("Simple mode labels hosted browser credential", simpleMobile.walletKey === "WALLET MODE" && simpleMobile.walletValue === "browser credential", JSON.stringify(simpleMobile));
+  await evaluate(`document.getElementById("view-technical").click()`);
+  const technicalMobile = await evaluate(`(() => {
+    const wallet = document.getElementById("pill-walletd");
+    return { key: wallet.querySelector(".k").textContent, value: wallet.querySelector(".v").textContent, classes: wallet.className };
+  })()`);
+  check("Technical mode makes optional walletd neutral", technicalMobile.key === "WALLETD" && technicalMobile.value === "optional · not in use" && !/warn|bad/.test(technicalMobile.classes), JSON.stringify(technicalMobile));
+  await send("Emulation.clearDeviceMetricsOverride");
+
   console.log("\n== console health ==");
   check("no console errors", consoleErrors.length === 0, consoleErrors.slice(0, 3).join(" | "));
 
