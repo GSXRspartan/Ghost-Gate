@@ -34,7 +34,20 @@ const state = {
     lastSeq: 0,
     gateListSig: null,   // signature of the last-rendered gate list (avoid rebuilding an open dropdown)
     walletFailures: 0,   // consecutive polls where the wallet was absent or unreachable
+    walletConnecting: false, // one user gesture may create at most one pending wallet request
 };
+
+// Local browser instrumentation only. These marks never leave the page and contain no wallet
+// material; they let an operator distinguish an injection delay from the wallet's own approval UI.
+function markWalletConnect(stage) {
+    if (typeof performance === "undefined" || typeof performance.mark !== "function") return;
+    performance.mark(`ghost-gate:connect:${stage}`);
+}
+
+function measureWalletConnect(name, start, end) {
+    if (typeof performance === "undefined" || typeof performance.measure !== "function") return;
+    try { performance.measure(`ghost-gate:connect:${name}`, start, end); } catch { /* optional diagnostic */ }
+}
 
 // ---------------------------------------------------------------- formatting
 function api(path, options = {}) {
@@ -337,8 +350,13 @@ async function selectMode(id) {
 // mint a bridge challenge, does not build a proof, and never authorizes a spend: per the
 // integration contract, a connection can never grant access by itself.
 async function connectWallet() {
+    // Disabled buttons stop ordinary pointer clicks, but this guard also covers keyboard and
+    // synthetic/re-entrant events. A second click must never produce a second permission prompt.
+    if (state.walletConnecting) return;
+    state.walletConnecting = true;
     const btn = $("connect-wallet");
     const detail = $("wallet-detail");
+    const walletName = state.mode === "universe" ? "Tari Universe" : "Sapient";
     const setRow = (id, cls, text) => {
         const row = $(id).closest(".wd-row");
         row.classList.remove("ok", "warn", "bad");
@@ -348,12 +366,13 @@ async function connectWallet() {
     detail.hidden = false;
     $("wd-caps-row").hidden = true;
     $("wd-ownership-row").hidden = true;
-    setRow("wd-status", null, "Connecting…");
+    markWalletConnect("click");
+    setRow("wd-status", null, `Waiting for ${walletName}…`);
     $("wd-address").textContent = "—";
     $("wd-network").textContent = "—";
     btn.disabled = true;
     const label = btn.textContent;
-    btn.textContent = "Connecting…";
+    btn.textContent = `Waiting for ${walletName}…`;
     try {
         if (state.mode === "walletd") {
             const res = await api("/wallet/status");
@@ -374,12 +393,20 @@ async function connectWallet() {
         // connector on script load. Wait briefly (or for tari#initialized) so a slow-injecting
         // wallet is not mistaken for "no wallet installed".
         if (!window.tari) {
+            markWalletConnect("provider-wait-start");
+            setRow("wd-status", null, `Waiting for ${walletName} to finish initializing…`);
             await new Promise((resolve) => {
                 let settled = false;
                 const done = () => { if (!settled) { settled = true; window.removeEventListener("tari#initialized", done); resolve(); } };
                 window.addEventListener("tari#initialized", done);
                 setTimeout(done, 1500);
             });
+            markWalletConnect("provider-wait-end");
+            measureWalletConnect("provider-wait", "ghost-gate:connect:provider-wait-start", "ghost-gate:connect:provider-wait-end");
+            if (!window.tari) {
+                setRow("wd-status", "bad", `${walletName} did not finish initializing within 1.5 seconds. It was not asked to connect; wait for the wallet and try again.`);
+                return;
+            }
         }
         const provider = state.mode === "universe" ? universeProvider() : sapientProvider();
 
@@ -391,8 +418,15 @@ async function connectWallet() {
         //    calls, so a declined prompt is never re-asked by accident.
         let accounts;
         try {
+            setRow("wd-status", null, `Waiting for ${provider.label} approval…`);
+            btn.textContent = `Waiting for ${provider.label}…`;
+            markWalletConnect("accounts-requested");
             accounts = await provider.request("tari_requestAccounts");
+            markWalletConnect("accounts-resolved");
+            measureWalletConnect("approval", "ghost-gate:connect:accounts-requested", "ghost-gate:connect:accounts-resolved");
         } catch (e) {
+            markWalletConnect("accounts-rejected");
+            measureWalletConnect("approval", "ghost-gate:connect:accounts-requested", "ghost-gate:connect:accounts-rejected");
             const d = describeProviderError(e);
             setRow("wd-status", d.cls, d.text);
             return;
@@ -479,6 +513,7 @@ async function connectWallet() {
     } catch (e) {
         setRow("wd-status", "bad", `Connection failed: ${e && e.message ? e.message : e}`);
     } finally {
+        state.walletConnecting = false;
         btn.disabled = false;
         btn.textContent = label;
     }

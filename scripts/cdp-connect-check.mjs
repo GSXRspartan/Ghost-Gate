@@ -245,6 +245,50 @@ async function main() {
   check("strict wallet's mismatch verdict shown",
     /mismatch/i.test(strict["wd-network"] || ""), strict["wd-network"]);
 
+  console.log("\n== 5. pending approval gets immediate feedback and never double-prompts ==");
+  await evaluate(`(() => {
+    window.__ggSlowAccountCalls = 0;
+    window.tari = {
+      isTariWallet: true,
+      request(args) {
+        if (args.method === "tari_requestAccounts") {
+          window.__ggSlowAccountCalls += 1;
+          return new Promise((resolve) => setTimeout(() => resolve(["otl_esm_1slow" + "x".repeat(80)]), 90));
+        }
+        if (args.method === "tari_getCapabilities") return Promise.resolve({ privateSpend: true, minimumValuePromise: true, ownershipProof: true });
+        if (args.method === "tari_getNetwork") return Promise.resolve("esmeralda");
+        return Promise.reject(Object.assign(new Error("mock: unsupported " + args.method), { code: 4200 }));
+      },
+    };
+    const s = document.getElementById("wallet-select");
+    s.value = [...s.options].find(o => /Sapient/i.test(o.textContent)).value;
+    s.dispatchEvent(new Event("change"));
+  })()`);
+  await sleep(100);
+  const pending = await evaluate(`(() => {
+    const b = document.getElementById("connect-wallet");
+    b.click(); b.click();
+    return { disabled: b.disabled, label: b.textContent, status: document.getElementById("wd-status").textContent };
+  })()`);
+  check("pending approval disables the button immediately", pending.disabled === true, JSON.stringify(pending));
+  check("pending approval names Sapient", /Waiting for Sapient/i.test(`${pending.label} ${pending.status}`), JSON.stringify(pending));
+  await sleep(220);
+  const pendingResult = await evaluate(`(() => ({
+    accountCalls: window.__ggSlowAccountCalls,
+    marks: performance.getEntriesByType("mark").map(e => e.name).filter(n => n.startsWith("ghost-gate:connect:")),
+    status: document.getElementById("wd-status").textContent,
+  }))()`);
+  check("repeated click produces one account request", pendingResult.accountCalls === 1, String(pendingResult.accountCalls));
+  check("connection marks identify request and completion", pendingResult.marks.includes("ghost-gate:connect:accounts-requested") && pendingResult.marks.includes("ghost-gate:connect:accounts-resolved"), pendingResult.marks.join(", "));
+
+  console.log("\n== 6. missing provider times out without asking for permission ==");
+  await evaluate(`window.tari = undefined`);
+  const missingStart = Date.now();
+  await evaluate(`document.getElementById("connect-wallet").click()`);
+  await sleep(1650);
+  const missing = await evaluate(`document.getElementById("wd-status").textContent`);
+  check("missing provider reports a bounded initialization failure", /did not finish initializing within 1\.5 seconds/i.test(missing || ""), `${Date.now() - missingStart}ms: ${missing}`);
+
   console.log("\n== console health ==");
   check("no console errors", consoleErrors.length === 0, consoleErrors.slice(0, 3).join(" | "));
 
