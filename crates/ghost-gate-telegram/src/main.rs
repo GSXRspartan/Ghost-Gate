@@ -67,6 +67,7 @@ const DEFAULT_CLAIM_PORT: u16 = 7808;
 const DEFAULT_GATE: &str = "Crypt";
 const JOIN_TTL: Duration = Duration::from_secs(600);
 const ACCESS_TTL: Duration = Duration::from_secs(3600);
+const WELCOME_MESSAGE: &str = "👻 Welcome to Ghost Gate.\n\nI verify token-gated access for supported Telegram groups without asking for your seed phrase, private keys, or exact wallet balance.\n\nTo verify your access:\n\n1. Request to join the protected Telegram group.\n2. Send me /join.\n3. Open the single-use Ghost Gate verification link I send you.\n4. Connect your wallet and complete the required token proof.\n\nIf your verification succeeds, I'll automatically approve your pending group join request.\n\nTestnet only.";
 const RECHECK_INTERVAL: Duration = Duration::from_secs(60);
 /// Whether the fixture bridge/telegram pair is in use; set once at startup.
 static FIXTURE_POLL_PAUSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -769,26 +770,11 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
                     .await
                     .ok();
             }
-        } else if text.starts_with("/start") {
-            let payload = text.strip_prefix("/start").unwrap_or("").trim();
-            if payload == "join" {
-                if let Ok(reply) = self.join(user, base_url, claim_base, bridge_public_url).await {
-                    self.telegram.send_message(user, &reply).await.ok();
-                } else {
-                    self.telegram
-                        .send_message(user, "Something went wrong minting your join link; try again.")
-                        .await
-                        .ok();
-                }
-            } else {
-                self.telegram
-                    .send_message(
-                        user,
-                        "Send /join to prove you hold enough of the vault's token. I'll ask for a wallet proof, never for your seed or keys, and never for an exact balance.",
-                    )
-                    .await
-                    .ok();
-            }
+        } else {
+            // /start and ordinary pre-join messages are guidance only. /join is
+            // deliberately the sole command that mints a single-use token.
+            let _ = (base_url, claim_base, bridge_public_url);
+            self.telegram.send_message(user, WELCOME_MESSAGE).await.ok();
         }
     }
 
@@ -1371,6 +1357,49 @@ mod tests {
         let rest = &reply[i..];
         let token = rest.split('&').next().expect("token value").to_string();
         (token, reply)
+    }
+
+    #[tokio::test]
+    async fn start_and_pre_join_messages_only_send_welcome_guidance() {
+        let (mut bot, tg) = bot_owned(FakeBridge { answers: HashMap::new(), access: None });
+        let update = |text: &str| TgUpdate {
+            update_id: 1,
+            message: Some(TgMessage {
+                from: Some(TgUser { id: 42 }),
+                text: Some(text.into()),
+            }),
+            chat_join_request: None,
+        };
+
+        bot.handle_update(update("/start"), "https://ghostgate.boo", "https://claim.ghostgate.boo", None).await;
+        bot.handle_update(update("hello"), "https://ghostgate.boo", "https://claim.ghostgate.boo", None).await;
+
+        let messages = &tg.lock().unwrap().messages;
+        assert_eq!(messages.len(), 2);
+        assert!(messages.iter().all(|(_, text)| text == WELCOME_MESSAGE));
+        assert_eq!(bot.tokens.len(), 0, "/start and normal messages must not mint tokens");
+    }
+
+    #[tokio::test]
+    async fn join_remains_the_explicit_token_minting_command() {
+        let (mut bot, tg) = bot_owned(FakeBridge { answers: HashMap::new(), access: None });
+        bot.handle_update(
+            TgUpdate {
+                update_id: 2,
+                message: Some(TgMessage {
+                    from: Some(TgUser { id: 42 }),
+                    text: Some("/join".into()),
+                }),
+                chat_join_request: None,
+            },
+            "https://ghostgate.boo",
+            "https://claim.ghostgate.boo",
+            None,
+        )
+        .await;
+
+        assert_eq!(bot.tokens.len(), 1);
+        assert!(tg.lock().unwrap().messages[0].1.contains("token="));
     }
 
     #[tokio::test]
