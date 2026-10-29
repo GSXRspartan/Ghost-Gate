@@ -150,12 +150,53 @@ function gateAndOrigin(request, gates, match) {
 }
 
 function bridgeRoute(method, pathname) {
-  if (method === "GET" && (pathname === "/health" || pathname === "/wallet/status" || pathname === "/lab/gates")) return true;
-  if (method === "GET" && pathname === "/lab/trace") return true;
-  if (method === "POST" && pathname === "/lab/simulate") return true;
   if (method === "POST" && /^\/gate\/[^/]+\/(challenge|credential|prove)$/.test(pathname)) return true;
+  if (method === "GET" && /^\/gate\/[^/]+$/.test(pathname)) return true;
   if (method === "GET" && /^\/proof\/[^/]+\/status$/.test(pathname)) return true;
   return false;
+}
+
+async function labGates(env) {
+  const gates = catalog(env);
+  if (gates instanceof Error) return json(200, { gates: [] });
+  const enriched = [];
+  for (const g of gates) {
+    let symbol = "";
+    try {
+      const r = await fetch(`${env.GG_VERIFIER_ORIGIN.replace(/\/$/, "")}/gate/${encodeURIComponent(g.gateId)}`, {
+        headers: { accept: "application/json" }, redirect: "error", signal: AbortSignal.timeout(5000),
+      });
+      if (r.ok) { const meta = await r.json(); symbol = meta.symbol || ""; }
+    } catch { /* bridge unreachable — symbol stays empty */ }
+    enriched.push({
+      gateId: g.gateId, symbol, resourceAddress: g.resourceAddress, thresholdRaw: g.thresholdRaw,
+      divisibility: g.divisibility, network: g.network, proofMode: g.proofMode || "credential",
+      activatable: (g.proofMode || "credential") !== "xtm",
+      sessionsAvailable: Boolean(env.REPLAY_COORDINATOR && env.GG_COORDINATOR_TOKEN),
+      useMode: "both",
+    });
+  }
+  return json(200, { gates: enriched });
+}
+
+async function labHealth(env) {
+  let bridgeReachable = false;
+  const gates = catalog(env);
+  const gateIds = gates instanceof Error ? [] : gates.map((g) => g.gateId);
+  if (env.GG_VERIFIER_ORIGIN && gateIds.length) {
+    try {
+      const r = await fetch(`${env.GG_VERIFIER_ORIGIN.replace(/\/$/, "")}/gate/${encodeURIComponent(gateIds[0])}`, {
+        headers: { accept: "application/json" }, redirect: "error", signal: AbortSignal.timeout(5000),
+      });
+      bridgeReachable = r.ok;
+    } catch { /* unreachable */ }
+  }
+  return json(200, {
+    service: "ghost-gate-bridge", version: "edge-proxy",
+    gates: gateIds, live_challenges: 0,
+    registry_backed: Boolean(env.REPLAY_COORDINATOR), credential_configured: bridgeReachable,
+    xtm_configured: false,
+  });
 }
 
 async function bridgeProxy(env, request) {
@@ -194,6 +235,9 @@ export default {
       service: "ghost-gate-edge", coordinator: Boolean(env.REPLAY_COORDINATOR && env.GG_COORDINATOR_TOKEN),
       verifier: Boolean(env.GG_VERIFIER_ORIGIN && env.GG_VERIFIER_TOKEN && env.GG_VERIFIER_REQUEST_KEY && env.GG_VERIFIER_RESPONSE_KEY),
     });
+    if (request.method === "GET" && parsed.pathname === "/health") return labHealth(env);
+    if (request.method === "GET" && parsed.pathname === "/lab/gates") return labGates(env);
+    if (request.method === "GET" && parsed.pathname === "/wallet/status") return json(200, { configured: false, reachable: false, note: "wallet daemon is bridge-local; use a browser wallet for credential proofs" });
     if (bridgeRoute(request.method, parsed.pathname)) return bridgeProxy(env, request);
     if (request.method === "GET" && !parsed.pathname.startsWith("/api/") && env.ASSETS) {
       if (parsed.pathname === "/") return env.ASSETS.fetch(new Request(new URL("/lab/index.html", request.url), request));

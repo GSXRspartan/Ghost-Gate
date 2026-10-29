@@ -62,9 +62,9 @@ test("hosted proof endpoint bounds both an announced and chunked request body", 
 });
 
 test("bridge proxy rejects methods not in the allowlist", async () => {
-  const env = { GG_VERIFIER_ORIGIN: "https://bridge.example" };
+  const env = { GG_VERIFIER_ORIGIN: "https://bridge.example", ASSETS: { fetch() { return new Response("static"); } } };
   for (const method of ["PUT", "DELETE", "PATCH", "OPTIONS"]) {
-    for (const path of ["/health", "/gate/crypt/challenge", "/proof/abc/status"]) {
+    for (const path of ["/gate/crypt/challenge", "/proof/abc/status"]) {
       const response = await worker.fetch(new Request(`https://edge.example${path}`, { method }), env);
       assert.equal(response.status, 404, `${method} ${path} must not be proxied`);
     }
@@ -83,7 +83,7 @@ test("bridge proxy rejects paths outside the allowlist", async () => {
 test("bridge proxy rejects an oversized POST body", async () => {
   const env = { GG_VERIFIER_ORIGIN: "https://bridge.example" };
   const oversized = "x".repeat(128 * 1024);
-  const response = await worker.fetch(new Request("https://edge.example/lab/simulate", {
+  const response = await worker.fetch(new Request("https://edge.example/gate/crypt/challenge", {
     method: "POST", headers: { "content-type": "application/json", "content-length": String(oversized.length) }, body: oversized,
   }), env);
   assert.equal(response.status, 413);
@@ -94,8 +94,8 @@ test("bridge proxy does not forward browser cookies, Authorization, or Origin to
   const previousFetch = globalThis.fetch;
   globalThis.fetch = async (_url, init) => { captured = init.headers; return new Response("{}"); };
   try {
-    await worker.fetch(new Request("https://edge.example/health", {
-      headers: { cookie: "secret=token", authorization: "Bearer steal-me", origin: "https://evil.example" },
+    await worker.fetch(new Request("https://edge.example/gate/crypt/challenge", {
+      method: "POST", headers: { cookie: "secret=token", authorization: "Bearer steal-me", origin: "https://evil.example", "content-type": "application/json" }, body: "{}",
     }), { GG_VERIFIER_ORIGIN: "https://bridge.example" });
     assert.ok(captured, "bridge request must have been sent");
     assert.equal(captured.cookie, undefined);
@@ -109,24 +109,44 @@ test("bridge proxy locks content-type to application/json for POST", async () =>
   const previousFetch = globalThis.fetch;
   globalThis.fetch = async (_url, init) => { captured = init.headers; return new Response("{}"); };
   try {
-    await worker.fetch(new Request("https://edge.example/lab/simulate", {
+    await worker.fetch(new Request("https://edge.example/gate/crypt/challenge", {
       method: "POST", headers: { "content-type": "text/html" }, body: "{}",
     }), { GG_VERIFIER_ORIGIN: "https://bridge.example" });
     assert.equal(captured["content-type"], "application/json");
   } finally { globalThis.fetch = previousFetch; }
 });
 
-test("bridge proxy exact-matches /lab/trace and does not match /lab/traceable", async () => {
-  const env = { GG_VERIFIER_ORIGIN: "https://bridge.example", ASSETS: { fetch() { return new Response("static"); } } };
-  let proxied = false;
+test("Worker-side /lab/gates serves enriched gate data from catalog", async () => {
   const previousFetch = globalThis.fetch;
-  globalThis.fetch = async () => { proxied = true; return new Response("{}"); };
+  globalThis.fetch = async () => new Response(JSON.stringify({ symbol: "tTARI", proof_kind: "ootle" }));
   try {
-    await worker.fetch(new Request("https://edge.example/lab/trace?attempt=123"), env);
-    assert.equal(proxied, true, "/lab/trace must be proxied");
-    proxied = false;
-    await worker.fetch(new Request("https://edge.example/lab/traceable"), env);
-    assert.equal(proxied, false, "/lab/traceable must NOT be proxied");
+    const response = await worker.fetch(new Request("https://edge.example/lab/gates"), {
+      GG_GATE_CATALOG: catalog, GG_VERIFIER_ORIGIN: "https://bridge.example",
+      REPLAY_COORDINATOR: {}, GG_COORDINATOR_TOKEN: "token",
+    });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.gates.length, 1);
+    assert.equal(body.gates[0].gateId, "esm10");
+    assert.equal(body.gates[0].symbol, "tTARI");
+    assert.equal(body.gates[0].activatable, true);
+    assert.equal(body.gates[0].sessionsAvailable, true);
+  } finally { globalThis.fetch = previousFetch; }
+});
+
+test("Worker-side /health probes bridge via tunnel-routed path", async () => {
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response("{}", { status: 200 });
+  try {
+    const response = await worker.fetch(new Request("https://edge.example/health"), {
+      GG_GATE_CATALOG: catalog, GG_VERIFIER_ORIGIN: "https://bridge.example",
+      REPLAY_COORDINATOR: {},
+    });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.service, "ghost-gate-bridge");
+    assert.equal(body.credential_configured, true);
+    assert.deepEqual(body.gates, ["esm10"]);
   } finally { globalThis.fetch = previousFetch; }
 });
 
