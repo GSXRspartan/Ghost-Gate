@@ -897,6 +897,8 @@ fn dashboard_existing_gate_prefill_uses_the_exact_defined_amount_formatter() {
     let script = include_str!("../assets/admin.js");
     assert!(script.contains("function ghostFormat(raw, div)"));
     assert!(script.contains("ghostFormat(g.thresholdRaw, g.divisibility)"));
+    assert!(script.contains("editor.querySelector(`#${CSS.escape(id)}`)"),
+        "existing-gate fields are prefilled before their card is attached to the document");
     assert!(!script.contains("rawToHuman("), "the editor must not call an undefined formatter");
 }
 

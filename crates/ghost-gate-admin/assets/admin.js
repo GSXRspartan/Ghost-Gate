@@ -399,7 +399,13 @@ function renderApps(state) {
       // Pre-populate the editor from the first existing gate so edits work without re-typing.
       if (app.gates.length > 0) {
         const g = app.gates[0];
-        const s = (id, v) => { const el = $(id); if (el && v != null) el.value = String(v); };
+        // The editor has not been appended to #apps-list yet. Query within the detached editor,
+        // rather than through document.getElementById(), so every existing-gate field is filled
+        // after a save/refresh. (The relying-site input already has a direct reference above.)
+        const s = (id, v) => {
+          const el = editor.querySelector(`#${CSS.escape(id)}`);
+          if (el && v != null) el.value = String(v);
+        };
         s(`gate-id-${app.applicationId}`, g.gateId);
         s(`gate-name-${app.applicationId}`, g.name);
         s(`gate-resource-${app.applicationId}`, g.resourceAddress);
