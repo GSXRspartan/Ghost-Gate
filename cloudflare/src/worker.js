@@ -263,7 +263,10 @@ export default {
       return env.ASSETS.fetch(new Request(new URL("/bot/index.html", request.url), request));
     }
     if (request.method === "GET" && !parsed.pathname.startsWith("/api/") && env.ASSETS) {
-      if (parsed.pathname === "/") return env.ASSETS.fetch(new Request(new URL("/lab/index.html", request.url), request));
+      // Cloudflare Assets canonicalizes a directory's `index.html` as a redirect to the
+      // directory URL. Fetch that canonical asset path internally so the outer root request
+      // remains a 200 at `/` instead of inheriting an unwanted `/lab/` redirect.
+      if (parsed.pathname === "/") return env.ASSETS.fetch(new Request(new URL("/lab/", request.url), request));
       // Telegram's bot historically minted /telegram/join links.  /claim is the concise public
       // alias.  Both serve the same static page and still require a bot-minted single-use token.
       if (parsed.pathname === "/claim" || parsed.pathname === "/claim/" || parsed.pathname === "/telegram/join") {

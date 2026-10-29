@@ -30,8 +30,10 @@ test("hosted Worker sends root to the Privacy Lab entrypoint", async () => {
   const response = await worker.fetch(new Request("https://edge.example/"), {
     ASSETS: { fetch(request) { seen.push(new URL(request.url).pathname); return new Response("site"); } },
   });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("location"), null, "root must not redirect the browser to /lab/");
   assert.equal(await response.text(), "site");
-  assert.deepEqual(seen, ["/lab/index.html"]);
+  assert.deepEqual(seen, ["/lab/"]);
 });
 
 test("public aliases serve only the intended Telegram assets and never the private administrator", async () => {
