@@ -7,6 +7,7 @@ const MAX_PROOF_BYTES = 8 * 1024;
 // Bound the wire body as well as the canonical proof. `Request.json()` otherwise buffers an
 // attacker-controlled chunked body before the proof-size check below can run.
 const MAX_PROOF_REQUEST_BYTES = MAX_PROOF_BYTES + 8 * 1024;
+const MAX_PROXY_BODY_BYTES = 64 * 1024;
 
 function catalog(env) {
   try { return parseGateCatalog(env.GG_GATE_CATALOG, { allowLocalHttp: env.GG_LOCAL_DEVELOPMENT === "1" }); }
@@ -148,17 +149,54 @@ function gateAndOrigin(request, gates, match) {
   return { gate };
 }
 
+function bridgeRoute(method, pathname) {
+  if (method === "GET" && (pathname === "/health" || pathname === "/wallet/status" || pathname === "/lab/gates")) return true;
+  if (method === "GET" && pathname === "/lab/trace") return true;
+  if (method === "POST" && pathname === "/lab/simulate") return true;
+  if (method === "POST" && /^\/gate\/[^/]+\/(challenge|credential|prove)$/.test(pathname)) return true;
+  if (method === "GET" && /^\/proof\/[^/]+\/status$/.test(pathname)) return true;
+  return false;
+}
+
+async function bridgeProxy(env, request) {
+  if (!env.GG_VERIFIER_ORIGIN) return json(503, { error: "GG: bridge origin is not configured" });
+  const parsed = new URL(request.url);
+  const url = `${env.GG_VERIFIER_ORIGIN.replace(/\/$/, "")}${parsed.pathname}${parsed.search}`;
+  const headers = { accept: "application/json" };
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    headers["content-type"] = "application/json";
+  }
+  const attempt = request.headers.get("x-gg-attempt");
+  if (attempt) headers["x-gg-attempt"] = attempt;
+  const init = { method: request.method, headers, redirect: "error", signal: AbortSignal.timeout(10000) };
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    const announced = Number(request.headers.get("content-length"));
+    if (Number.isFinite(announced) && announced > MAX_PROXY_BODY_BYTES) return json(413, { error: "GG: proxy request is too large" });
+    const body = await request.text();
+    if (text.encode(body).byteLength > MAX_PROXY_BODY_BYTES) return json(413, { error: "GG: proxy request is too large" });
+    init.body = body;
+  }
+  try {
+    const response = await fetch(url, init);
+    return new Response(response.body, {
+      status: response.status,
+      headers: { "content-type": response.headers.get("content-type") || "application/json", "cache-control": "no-store" },
+    });
+  } catch {
+    return json(503, { error: "GG: bridge is unreachable" });
+  }
+}
+
 export default {
   async fetch(request, env) {
     const parsed = new URL(request.url);
-    if (request.method === "GET" && parsed.pathname === "/health") return json(200, {
+    if (request.method === "GET" && parsed.pathname === "/_edge/health") return json(200, {
       service: "ghost-gate-edge", coordinator: Boolean(env.REPLAY_COORDINATOR && env.GG_COORDINATOR_TOKEN),
       verifier: Boolean(env.GG_VERIFIER_ORIGIN && env.GG_VERIFIER_TOKEN && env.GG_VERIFIER_REQUEST_KEY && env.GG_VERIFIER_RESPONSE_KEY),
     });
+    if (bridgeRoute(request.method, parsed.pathname)) return bridgeProxy(env, request);
     if (request.method === "GET" && !parsed.pathname.startsWith("/api/") && env.ASSETS) {
-      // The hosted product owns `/`; the older bridge serves its own local assets and never runs
-      // through this Worker. All other static requests retain their normal asset path.
-      if (parsed.pathname === "/") return env.ASSETS.fetch(new Request(new URL("/hosted.html", request.url), request));
+      if (parsed.pathname === "/") return env.ASSETS.fetch(new Request(new URL("/lab/index.html", request.url), request));
       return env.ASSETS.fetch(request);
     }
     const gates = catalog(env);
