@@ -119,7 +119,7 @@ async function trustedVerify(env, verificationRequest) {
   let response;
   try {
     response = await fetch(`${env.GG_VERIFIER_ORIGIN.replace(/\/$/, "")}/v1/hosted/verify`, {
-      method: "POST", redirect: "error", headers: {
+      method: "POST", redirect: "manual", headers: {
         "content-type": "application/json", authorization: `Bearer ${env.GG_VERIFIER_TOKEN}`,
         "x-gg-verifier-request-signature": requestSignature,
       },
@@ -164,7 +164,7 @@ async function labGates(env) {
     let symbol = "";
     try {
       const r = await fetch(`${env.GG_VERIFIER_ORIGIN.replace(/\/$/, "")}/gate/${encodeURIComponent(g.gateId)}`, {
-        headers: { accept: "application/json" }, redirect: "error", signal: AbortSignal.timeout(5000),
+        headers: { accept: "application/json" }, redirect: "manual", signal: AbortSignal.timeout(5000),
       });
       if (r.ok) { const meta = await r.json(); symbol = meta.symbol || ""; }
     } catch { /* bridge unreachable — symbol stays empty */ }
@@ -186,7 +186,7 @@ async function labHealth(env) {
   if (env.GG_VERIFIER_ORIGIN && gateIds.length) {
     try {
       const r = await fetch(`${env.GG_VERIFIER_ORIGIN.replace(/\/$/, "")}/gate/${encodeURIComponent(gateIds[0])}`, {
-        headers: { accept: "application/json" }, redirect: "error", signal: AbortSignal.timeout(5000),
+        headers: { accept: "application/json" }, redirect: "manual", signal: AbortSignal.timeout(5000),
       });
       bridgeReachable = r.ok;
     } catch { /* unreachable */ }
@@ -209,7 +209,7 @@ async function bridgeProxy(env, request) {
   }
   const attempt = request.headers.get("x-gg-attempt");
   if (attempt) headers["x-gg-attempt"] = attempt;
-  const init = { method: request.method, headers, redirect: "error", signal: AbortSignal.timeout(10000) };
+  const init = { method: request.method, headers, redirect: "manual", signal: AbortSignal.timeout(10000) };
   if (request.method !== "GET" && request.method !== "HEAD") {
     const announced = Number(request.headers.get("content-length"));
     if (Number.isFinite(announced) && announced > MAX_PROXY_BODY_BYTES) return json(413, { error: "GG: proxy request is too large" });
