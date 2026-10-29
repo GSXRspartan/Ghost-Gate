@@ -17,6 +17,7 @@
 import { sapientProvider, universeProvider } from "/js/ghost/provider.js";
 import { formatAmount } from "/js/ghost/capabilities.js";
 import { configuredJoinEndpoints } from "/telegram/join-endpoints.js";
+import { resolvePublishedGate } from "/telegram/published-gate.js";
 
 const $ = (id) => document.getElementById(id);
 const step = (name, state) => {
@@ -28,7 +29,7 @@ const params = new URLSearchParams(window.location.search);
 const token = params.get("token") || "";
 const gate = params.get("gate") || "";
 const configured = name => document.querySelector(`meta[name="${name}"]`)?.content || "";
-const { claimUrl, bridgeBase } = configuredJoinEndpoints({
+const { claimUrl, bridgeBase: trustedBridgeOrigin } = configuredJoinEndpoints({
   bridgeOrigin: configured("gg-trusted-bridges"),
   claimOrigin: configured("gg-trusted-claims"),
   pageOrigin: location.origin,
@@ -62,7 +63,7 @@ async function post(path, body) {
 }
 
 async function main() {
-  if (!bridgeBase || !claimUrl) {
+  if (!trustedBridgeOrigin || !claimUrl) {
     return fail(
       "This verification page is not configured for the approved Ghost Gate services. Request a new /join link from the bot.",
       "Configured bridge or claim endpoint is missing or invalid.",
@@ -116,31 +117,36 @@ async function main() {
 
   $("tg-line").textContent = `${provider.label} found. Fetching the gate's terms…`;
 
-  // The gate's resource and threshold come from the bridge — the page has no opinion.
+  // The bot's query parameter selects one exact published gate.  The policy itself
+  // comes from the same Worker catalog as Privacy Lab, not from the query string or
+  // a separately maintained Telegram list.  Browser proof requests stay same-origin
+  // through that Worker; the bridge deliberately does not grant arbitrary browser CORS.
   let meta;
   try {
-    meta = await fetch(`${bridgeBase}/gate/${encodeURIComponent(gate)}`, { redirect: "error", credentials: "omit" }).then((r) => r.json());
-    if (!meta.resource_address) throw new Error(meta.error || "not registered");
+    meta = await resolvePublishedGate(gate);
+    if (!meta) throw new Error("not registered");
   } catch (e) {
     return fail("The requested gate is not available. Send /join again.", "Gate lookup did not return a published gate.");
   }
+  const gateId = meta.gateId;
+  const gatePath = `/gate/${encodeURIComponent(gateId)}`;
   const div = Number(meta.divisibility ?? 0);
   $("tg-line").textContent =
-    `Gate ${gate}: needs at least ${meta.threshold} raw units` +
-    (formatAmount(meta.threshold, div) ? ` (${formatAmount(meta.threshold, div)})` : "") +
+    `Gate ${gateId}: needs at least ${meta.thresholdRaw} raw units` +
+    (formatAmount(meta.thresholdRaw, div) ? ` (${formatAmount(meta.thresholdRaw, div)})` : "") +
     `. A fresh challenge is being issued…`;
 
   try {
     step("challenge", "active");
-    const ch = await post(`${bridgeBase}/gate/${gate}/challenge`, {});
+    const ch = await post(`${gatePath}/challenge`, {});
     step("challenge", "done");
 
     step("output", "active");
     $("tg-line").textContent = "Approve the proof output in your wallet — it is public and permanent.";
     const built = await provider.approveAndBuildProof("credential", {
-      resourceAddress: meta.resource_address,
-      amount: String(BigInt(meta.threshold)),
-      minimumValuePromise: String(BigInt(meta.threshold)),
+      resourceAddress: meta.resourceAddress,
+      amount: String(BigInt(meta.thresholdRaw)),
+      minimumValuePromise: String(BigInt(meta.thresholdRaw)),
       maxFee: "50000",
     });
 
@@ -152,8 +158,8 @@ async function main() {
 
     step("verify", "active");
     $("tg-line").textContent = "The bridge is verifying against chain state…";
-    const verdict = await post(`${bridgeBase}/gate/${gate}/credential`, {
-      gate_id: gate,
+    const verdict = await post(`${gatePath}/credential`, {
+      gate_id: gateId,
       challenge_nonce: ch.challenge_nonce,
       session_commitment: ch.session_commitment,
       substate_id: built.substateId,
