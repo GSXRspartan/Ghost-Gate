@@ -449,7 +449,6 @@ async function connectWallet() {
         let accounts;
         try {
             setRow("wd-status", null, `Waiting for ${provider.label} approval…`);
-            btn.textContent = `Waiting for ${provider.label}…`;
             markWalletConnect("accounts-requested");
             accounts = await provider.request("tari_requestAccounts");
             markWalletConnect("accounts-resolved");

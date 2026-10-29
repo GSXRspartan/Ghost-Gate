@@ -41,3 +41,10 @@ test("Lab wiring guards synthetic duplicate clicks and renders the native disabl
   assert.match(lab, /btn\.disabled = presentation\.disabled;/);
   assert.match(lab, /rawProvider\.on\("accountsChanged"/);
 });
+
+test("the approval request path does not reference a button local to its renderer", () => {
+  const lab = readFileSync(new URL("../../web/lab/lab.js", import.meta.url), "utf8");
+  const connect = lab.slice(lab.indexOf("async function connectWallet()"), lab.indexOf("function renderConnectIntro()"));
+  assert.match(connect, /renderConnectIntro\(\);[\s\S]*provider\.request\("tari_requestAccounts"\)/);
+  assert.doesNotMatch(connect, /\bbtn\./, "connectWallet must not use renderConnectIntro's local btn");
+});
