@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rand::Rng;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use crate::gate_registry::GateRegistry;
@@ -1993,6 +1993,104 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
 const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Reads exactly one bounded HTTP/1.1 request.  A tunnel is allowed to split the headers and body
+/// across separate TCP reads (or reframe a Worker fetch as chunked); treating the first read as a
+/// complete request silently turns a valid credential JSON body into an empty string.
+///
+/// The bridge deliberately accepts only the two framings it can bound: a single Content-Length, or
+/// chunked encoding.  It never waits for connection close, and it refuses ambiguous framing.
+async fn read_http_request<R: AsyncRead + Unpin>(reader: &mut R) -> Option<String> {
+    const MAX_HEADERS: usize = 2 * 1024;
+    let mut wire = Vec::with_capacity(MAX_HEADERS + MAX_BODY);
+    let mut chunk = [0u8; 1024];
+
+    loop {
+        if let Some(header_end) = wire.windows(4).position(|window| window == b"\r\n\r\n") {
+            let body_start = header_end + 4;
+            let headers = std::str::from_utf8(&wire[..header_end]).ok()?;
+            let mut content_length = None;
+            let mut chunked = false;
+            for line in headers.split("\r\n").skip(1) {
+                let Some((name, value)) = line.split_once(':') else { return None };
+                if name.eq_ignore_ascii_case("content-length") {
+                    if content_length.replace(value.trim().parse::<usize>().ok()?).is_some() {
+                        return None;
+                    }
+                } else if name.eq_ignore_ascii_case("transfer-encoding") {
+                    let codings: Vec<_> = value.split(',').map(|coding| coding.trim()).collect();
+                    if codings.len() != 1 || !codings[0].eq_ignore_ascii_case("chunked") {
+                        return None;
+                    }
+                    chunked = true;
+                }
+            }
+            if chunked && content_length.is_some() {
+                return None;
+            }
+
+            if let Some(length) = content_length {
+                if length > MAX_BODY { return None; }
+                let expected = body_start.checked_add(length)?;
+                if wire.len() == expected {
+                    return String::from_utf8(wire).ok();
+                }
+                if wire.len() > expected { return None; }
+            } else if chunked {
+                match decode_chunked_body(&wire[body_start..])? {
+                    Some(body) => {
+                        if body.len() > MAX_BODY { return None; }
+                        wire.truncate(body_start);
+                        wire.extend_from_slice(&body);
+                        return String::from_utf8(wire).ok();
+                    }
+                    None => {}
+                }
+            } else {
+                return String::from_utf8(wire).ok();
+            }
+        } else if wire.len() >= MAX_HEADERS {
+            return None;
+        }
+
+        let read = reader.read(&mut chunk).await.ok()?;
+        if read == 0 || wire.len().checked_add(read)? > MAX_HEADERS + MAX_BODY + 256 {
+            return None;
+        }
+        wire.extend_from_slice(&chunk[..read]);
+    }
+}
+
+/// Returns `None` while a valid chunked body is incomplete, and `Some` once its final empty chunk
+/// and terminating CRLF arrive. Trailers are refused because this bridge has no route that uses
+/// them and accepting unparsed header-like data would widen the HTTP surface unnecessarily.
+fn decode_chunked_body(wire: &[u8]) -> Option<Option<Vec<u8>>> {
+    let mut offset = 0usize;
+    let mut decoded = Vec::new();
+    loop {
+        let line_end = wire[offset..].windows(2).position(|window| window == b"\r\n");
+        let Some(line_end) = line_end else { return Some(None) };
+        let line_end = offset + line_end;
+        let size_text = std::str::from_utf8(&wire[offset..line_end]).ok()?;
+        // Chunk extensions are irrelevant to this small JSON server and are deliberately refused.
+        if size_text.contains(';') || size_text.is_empty() { return None; }
+        let size = usize::from_str_radix(size_text, 16).ok()?;
+        if size > MAX_BODY || decoded.len().checked_add(size)? > MAX_BODY { return None; }
+        let data_start = line_end + 2;
+        let data_end = data_start.checked_add(size)?;
+        let trailer_end = data_end.checked_add(2)?;
+        if wire.len() < trailer_end { return Some(None); }
+        if &wire[data_end..trailer_end] != b"\r\n" { return None; }
+        if size == 0 {
+            // The final CRLF is the empty trailer section in `0\r\n\r\n`. Trailers are not
+            // accepted, so a complete request ends exactly here.
+            if wire.len() != trailer_end { return None; }
+            return Some(Some(decoded));
+        }
+        decoded.extend_from_slice(&wire[data_start..data_end]);
+        offset = trailer_end;
+    }
+}
+
 pub async fn serve<W, R, X, XR>(addr: &str, bridge: Bridge<W, R, X, XR>) -> std::io::Result<()>
 where
     W: WalletChannel + Send + 'static,
@@ -2008,21 +2106,17 @@ where
             Err(_) => continue,
         };
 
-        let mut buf = vec![0u8; MAX_BODY + 2048];
         // Bounded read: a silent or half-closed peer costs at most READ_TIMEOUT, not forever.
-        let read = match tokio::time::timeout(READ_TIMEOUT, socket.read(&mut buf)).await {
-            Ok(Ok(0)) => {
-                let _ = socket.shutdown().await;
-                continue;
-            }
-            Ok(Ok(n)) => n,
-            // Read error, or the peer never finished sending: drop it and serve the next one.
-            Ok(Err(_)) | Err(_) => {
+        // Unlike the old one-read implementation, this waits for the HTTP framing to complete.
+        let raw = match tokio::time::timeout(READ_TIMEOUT, read_http_request(&mut socket)).await {
+            Ok(Some(raw)) => raw,
+            // Read error, an oversized/ambiguous request, or an incomplete body: drop it and
+            // serve the next connection. The parser never receives a truncated credential body.
+            Ok(None) | Err(_) => {
                 let _ = socket.shutdown().await;
                 continue;
             }
         };
-        let raw = String::from_utf8_lossy(&buf[..read]).to_string();
 
         let response = match parse_request(&raw) {
             Some(request) => {
@@ -2050,6 +2144,57 @@ mod tests {
     use tari_crypto::tari_utilities::ByteArray;
     use tari_template_lib_types::stealth::StealthTransferStatement;
     use tari_template_lib_types::{ComponentAddress, MaxBytes, ObjectKey, ResourceAddress};
+
+    #[tokio::test]
+    async fn http_reader_waits_for_a_credential_body_sent_after_its_headers() {
+        let body = r#"{"gate_id":"Crypt","challenge_nonce":"nonce","public_key":"key","public_nonce":"nonce","session_commitment":"commitment","signature":"signature","substate_id":"utxo"}"#;
+        let expected_len = body.len();
+        let headers = format!(
+            "POST /gate/Crypt/credential HTTP/1.1\r\nHost: bridge.example\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        let (mut writer, mut reader) = tokio::io::duplex(MAX_BODY + 2048);
+        let body = body.to_string();
+        let writer_task = tokio::spawn(async move {
+            writer.write_all(headers.as_bytes()).await.unwrap();
+            // This is the tunnel framing that the former one-read listener treated as an empty body.
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            writer.write_all(body.as_bytes()).await.unwrap();
+        });
+
+        let raw = tokio::time::timeout(READ_TIMEOUT, read_http_request(&mut reader))
+            .await
+            .unwrap()
+            .expect("complete request");
+        writer_task.await.unwrap();
+        let request = parse_request(&raw).expect("parsed request");
+        let fields = serde_json::from_str::<serde_json::Value>(&request.body)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.path, "/gate/Crypt/credential");
+        assert_eq!(request.body.len(), expected_len);
+        assert_eq!(fields, ["challenge_nonce", "gate_id", "public_key", "public_nonce", "session_commitment", "signature", "substate_id"]);
+    }
+
+    #[tokio::test]
+    async fn http_reader_decodes_a_bounded_chunked_credential_body() {
+        let body = r#"{"gate_id":"Crypt"}"#;
+        let wire = format!(
+            "POST /gate/Crypt/credential HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n{:X}\r\n{}\r\n0\r\n\r\n",
+            body.len(), body
+        );
+        let (mut writer, mut reader) = tokio::io::duplex(MAX_BODY + 2048);
+        let writer_task = tokio::spawn(async move { writer.write_all(wire.as_bytes()).await.unwrap(); });
+        let raw = read_http_request(&mut reader).await.expect("complete chunked request");
+        writer_task.await.unwrap();
+        let request = parse_request(&raw).expect("parsed request");
+        assert_eq!(request.body, body);
+    }
 
     /// A stand-in for the wallet daemon.
     ///

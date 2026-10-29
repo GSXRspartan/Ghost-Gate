@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import worker from "../src/worker.js";
 import { originMatches, parseGateCatalog } from "../src/contracts.js";
 
@@ -168,6 +169,29 @@ test("bridge proxy locks content-type to application/json for POST", async () =>
       method: "POST", headers: { "content-type": "text/html" }, body: "{}",
     }), { GG_VERIFIER_ORIGIN: "https://bridge.example" });
     assert.equal(captured["content-type"], "application/json");
+  } finally { globalThis.fetch = previousFetch; }
+});
+
+test("bridge proxy forwards a nonempty credential body from a fresh string", async () => {
+  let captured = null;
+  const body = JSON.stringify({
+    gate_id: "Crypt", challenge_nonce: "n", public_key: "k", public_nonce: "pn",
+    session_commitment: "sc", signature: "s", substate_id: "utxo_x",
+  });
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, init) => {
+    captured = { method: init.method, contentType: init.headers["content-type"], body: await new Response(init.body).text() };
+    return new Response("{}");
+  };
+  try {
+    await worker.fetch(new Request("https://edge.example/gate/Crypt/credential", {
+      method: "POST", headers: { "content-type": "application/json" }, body,
+    }), { GG_VERIFIER_ORIGIN: "https://bridge.example" });
+    assert.equal(captured.method, "POST");
+    assert.equal(captured.contentType, "application/json");
+    assert.equal(new TextEncoder().encode(captured.body).byteLength, new TextEncoder().encode(body).byteLength);
+    assert.equal(createHash("sha256").update(captured.body).digest("hex"), createHash("sha256").update(body).digest("hex"));
+    assert.deepEqual(Object.keys(JSON.parse(captured.body)).sort(), ["challenge_nonce", "gate_id", "public_key", "public_nonce", "session_commitment", "signature", "substate_id"]);
   } finally { globalThis.fetch = previousFetch; }
 });
 
