@@ -4,16 +4,18 @@ Ghost Gate separates public presentation, policy verification, and administratio
 
 ```mermaid
 flowchart TD
-  U[Visitor wallet] --> W[Cloudflare Worker / Privacy Lab]
+  U[Wallet] --> W[Cloudflare Worker / Privacy Lab]
   W --> R[Durable Object replay coordinator]
   W --> B[VPS verifier bridge]
   B --> G[Crypt v3 policy]
   G --> B
   B --> W
   W --> A[Seven-day verified session]
-  TG[Telegram bot] --> B
-  TG --> JR[Bound Telegram join request]
-  ADM[Private administrator plane] --> G
+  TG[Telegram user] --> BOT[Ghost Gate Telegram service]
+  BOT --> B
+  BOT --> JR[Approve matching pending join request only]
+  ADM[Private administrator] --> P[Versioned gate policy publishing]
+  P --> B
 ```
 
 ## Components
@@ -28,6 +30,10 @@ flowchart TD
 - **Private administrator plane:** manages policy/admin concerns independently of public traffic.
 - **Cloudflare Tunnel:** provides restricted ingress to the verifier bridge rather than exposing
   its loopback listener directly.
+
+The resulting primitive is policy-bound proof followed by an authorization decision. Privacy Lab
+and Telegram are demonstrated surfaces for it; future applications can use the same policy model
+without treating a browser UI or a chat bot as the authority.
 
 ## Active Crypt policy
 
