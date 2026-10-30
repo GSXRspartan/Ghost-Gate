@@ -61,6 +61,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use serde::Deserialize;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 const DEFAULT_BRIDGE: &str = "http://127.0.0.1:7799";
 const DEFAULT_CLAIM_PORT: u16 = 7808;
@@ -136,6 +137,7 @@ struct JoinToken {
 #[derive(Debug, Clone)]
 struct Grant {
     expires: Instant,
+    flow_id: String,
     /// The registry-backed session this grant was issued under, when the bridge has an access
     /// plane. While this is Some, the SERVER decides expiry, revocation and policy validity — the
     /// bot asks on every tick instead of trusting its own clock. `None` is the legacy bridge path:
@@ -599,6 +601,15 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
             token.clone(),
             JoinToken { user, expires: Instant::now() + self.join_ttl, used: false },
         );
+        audit(
+            "JOIN_TOKEN_CREATED",
+            json!({
+                "flow_id": audit_id(&token),
+                "telegram_user_id": user,
+                "chat_id": self.chat,
+                "expires_unix": now_unix() + self.join_ttl.as_secs(),
+            }),
+        );
         Ok(format!(
             "To prove you hold enough of the vault's token, open this link in the browser where your wallet lives:\n\n{}\n\nThis link is for you alone, works once, and expires in 10 minutes. I will never ask for your seed, keys, or exact balance — the check is a public minimum, verified by the network.",
             {
@@ -613,35 +624,63 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
 
     /// The claim endpoint's logic. Single-use token, TTL, and the bridge's own receipt re-read.
     pub async fn claim(&mut self, token: &str, proof_id: &str) -> Result<String, String> {
+        let flow_id = audit_id(token);
         let record = self
             .tokens
             .get(token)
-            .ok_or("unknown or already-consumed join link")?;
+            .ok_or_else(|| {
+                audit(
+                    "CLAIM_RECEIVED",
+                    json!({ "flow_id": flow_id, "chat_id": self.chat, "binding": "unknown_token" }),
+                );
+                "unknown or already-consumed join link"
+            })?;
         if record.used {
+            audit(
+                "CLAIM_RECEIVED",
+                json!({ "flow_id": flow_id, "telegram_user_id": record.user, "chat_id": self.chat, "binding": "replay" }),
+            );
             return Err("this join link was already used".into());
         }
         if record.expires < Instant::now() {
+            audit(
+                "CLAIM_RECEIVED",
+                json!({ "flow_id": flow_id, "telegram_user_id": record.user, "chat_id": self.chat, "binding": "expired" }),
+            );
             self.tokens.remove(token);
             return Err("this join link expired; send /join again".into());
         }
         let user = record.user;
+        audit(
+            "CLAIM_RECEIVED",
+            json!({ "flow_id": flow_id, "telegram_user_id": user, "chat_id": self.chat, "binding": "matched" }),
+        );
 
         // Server-side verification, from the bridge only. The page's word is not evidence.
         let status = self
             .bridge
             .proof_status(proof_id)
             .await
-            .map_err(|e| format!("could not read the proof from the bridge: {e}"))?;
+            .map_err(|e| {
+                audit("CRYPT_VERIFIED", json!({ "flow_id": flow_id, "verified": false, "reason": error_class(&e) }));
+                format!("could not read the proof from the bridge: {e}")
+            })?;
         if status.state != "credential_accepted" {
+            audit("CRYPT_VERIFIED", json!({ "flow_id": flow_id, "verified": false, "reason": "bridge_not_accepted" }));
             return Err("the bridge does not show this proof as accepted".into());
         }
         let receipt = status
             .result
-            .ok_or("the bridge's accepted proof carries no receipt")?;
+            .ok_or_else(|| {
+                audit("CRYPT_VERIFIED", json!({ "flow_id": flow_id, "verified": false, "reason": "missing_receipt" }));
+                "the bridge's accepted proof carries no receipt"
+            })?;
         if receipt.mode != "credential" {
+            audit("CRYPT_VERIFIED", json!({ "flow_id": flow_id, "verified": false, "gate_id": receipt.gate_id, "reason": "wrong_proof_mode" }));
             return Err("the proof is not a credential-mode receipt".into());
         }
         if receipt.gate_id != self.gate {
+            audit("CRYPT_VERIFIED", json!({ "flow_id": flow_id, "verified": false, "gate_id": receipt.gate_id, "reason": "wrong_gate" }));
             return Err(format!(
                 "this proof is for gate {:?}, not the community gate {:?}",
                 receipt.gate_id, self.gate
@@ -657,7 +696,17 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
             application_id: a.application_id,
             expires_unix: a.expires_unix,
         });
+        audit(
+            "CRYPT_VERIFIED",
+            json!({
+                "flow_id": flow_id,
+                "gate_id": receipt.gate_id,
+                "verified": true,
+                "session_id": server.as_ref().map(|grant| audit_id(&grant.token)),
+            }),
+        );
         if server.is_none() && !self.fixture_authorization {
+            audit("GRANT_CREATED", json!({ "flow_id": flow_id, "telegram_user_id": user, "chat_id": self.chat, "created": false, "reason": "missing_server_session" }));
             return Err(
                 "the bridge accepted a proof but issued no production access session; Telegram admission remains fail-closed"
                     .into(),
@@ -681,16 +730,44 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
         let link = self
             .telegram
             .create_join_request_invite(self.chat, expires_unix)
-            .await?;
+            .await
+            .map_err(|error| {
+                audit(
+                    "TELEGRAM_INVITE_CREATED",
+                    json!({ "flow_id": flow_id, "chat_id": self.chat, "valid": false, "error_class": error_class(&error) }),
+                );
+                error
+            })?;
+        audit(
+            "TELEGRAM_INVITE_CREATED",
+            json!({
+                "flow_id": flow_id,
+                "chat_id": self.chat,
+                "valid": true,
+                "creates_join_request": true,
+                "expires_unix": expires_unix,
+            }),
+        );
 
         // Consume the one-time browser token only after the Telegram invite has been created.
         // Until this point no admission artifact exists, so a transient Bot API failure must not
         // strand an otherwise valid proof. The event loop serializes claims; once the invite is
         // returned, marking the token and recording the grant happen without another await.
         self.tokens.get_mut(token).expect("checked above").used = true;
+        audit("TOKEN_CONSUMED", json!({ "flow_id": flow_id, "telegram_user_id": user, "chat_id": self.chat }));
         self.grants.insert(
             user,
-            Grant { expires, server },
+            Grant { expires, flow_id: flow_id.clone(), server },
+        );
+        audit(
+            "GRANT_CREATED",
+            json!({
+                "flow_id": flow_id,
+                "telegram_user_id": user,
+                "chat_id": self.chat,
+                "expires_unix": expires_unix,
+                "created": true,
+            }),
         );
         let duration = duration_label(minutes.saturating_mul(60));
         let message = if is_fixture_grant {
@@ -803,27 +880,76 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
     /// from the browser claim. A forwarded invite reaches this check under the forwarder's own
     /// Telegram user id and is declined unless that id owns a live grant for this exact chat.
     async fn handle_join_request(&mut self, request: TgJoinRequest) {
+        audit(
+            "CHAT_JOIN_REQUEST_RECEIVED",
+            json!({ "telegram_user_id": request.from.id, "chat_id": request.chat.id }),
+        );
         if request.chat.id != self.chat {
+            audit(
+                "GRANT_MATCH",
+                json!({ "telegram_user_id": request.from.id, "chat_id": request.chat.id, "matched": false, "reason": "wrong_chat" }),
+            );
             return;
         }
         let user = request.from.id;
         let grant = self.grants.get(&user).cloned();
+        let flow_id = grant.as_ref().map(|grant| grant.flow_id.clone());
+        audit(
+            "GRANT_MATCH",
+            json!({
+                "flow_id": flow_id,
+                "telegram_user_id": user,
+                "chat_id": request.chat.id,
+                "matched": grant.is_some(),
+                "reason": if grant.is_some() { "candidate" } else { "no_grant" },
+            }),
+        );
         let authorized = match grant {
             Some(grant) => match grant.server {
-                Some(server) => matches!(
-                    self.bridge
+                Some(server) => {
+                    let check = self
+                        .bridge
                         .access_check(&server.application_id, &self.gate, &server.token)
-                        .await,
-                    Ok(true)
-                ),
+                        .await;
+                    audit(
+                        "BRIDGE_ACCESS_CHECK",
+                        json!({
+                            "flow_id": grant.flow_id,
+                            "telegram_user_id": user,
+                            "chat_id": self.chat,
+                            "allowed": matches!(check, Ok(true)),
+                            "reason": match &check { Ok(true) => "authorized", Ok(false) => "denied", Err(error) => error_class(error) },
+                        }),
+                    );
+                    matches!(check, Ok(true))
+                }
                 None => self.fixture_authorization && grant.expires > Instant::now(),
             },
             None => false,
         };
         if authorized {
-            let _ = self.telegram.approve_join_request(self.chat, user).await;
+            let result = self.telegram.approve_join_request(self.chat, user).await;
+            audit(
+                "TELEGRAM_APPROVAL",
+                json!({
+                    "telegram_user_id": user,
+                    "chat_id": self.chat,
+                    "success": result.is_ok(),
+                    "error_class": result.as_ref().err().map(|error| error_class(error)),
+                }),
+            );
         } else {
-            let _ = self.telegram.decline_join_request(self.chat, user).await;
+            let result = self.telegram.decline_join_request(self.chat, user).await;
+            audit(
+                "TELEGRAM_APPROVAL",
+                json!({
+                    "telegram_user_id": user,
+                    "chat_id": self.chat,
+                    "success": false,
+                    "action": "declined",
+                    "error_class": result.as_ref().err().map(|error| error_class(error)),
+                }),
+            );
         }
     }
 
@@ -855,6 +981,36 @@ impl TruncateTail for std::collections::BTreeSet<u64> {
 
 fn now_unix() -> u64 {
     SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Return a short, non-reversible correlation identifier for an in-memory bearer value.
+/// Diagnostic output must never contain join tokens or bridge session tokens themselves.
+fn audit_id(value: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(value.as_bytes());
+    hex::encode(&digest.finalize()[..8])
+}
+
+fn audit(event: &str, fields: serde_json::Value) {
+    let mut object = match fields {
+        serde_json::Value::Object(object) => object,
+        _ => serde_json::Map::new(),
+    };
+    object.insert("event".into(), serde_json::Value::String(event.into()));
+    eprintln!("ghost-gate-telegram: audit {}", serde_json::Value::Object(object));
+}
+
+fn error_class(error: &str) -> &'static str {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("timeout") || lower.contains("request failed") || lower.contains("connection") {
+        "transport"
+    } else if lower.contains("permission") || lower.contains("forbidden") || lower.contains("not enough rights") {
+        "permission"
+    } else if lower.contains("expired") || lower.contains("revoked") {
+        "expired_or_revoked"
+    } else {
+        "api_error"
+    }
 }
 
 /// Keep human-facing access duration readable without changing the exact server expiry.
