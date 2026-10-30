@@ -32,9 +32,30 @@ part of this candidate.
 
 ## Validation
 
-Validation outcomes and the final release commit/tag are recorded here immediately before release.
-The candidate must not be pushed unless this section shows successful applicable checks and the
-remote is explicitly configured.
+| Check | Outcome |
+| --- | --- |
+| Current Worker suite (`cloudflare/npm test`) | PASS — 53 passed, 1 intentionally skipped integration test |
+| Current browser-provider suite (`node --test web/js/ghost/test.js`) | PASS — 31 passed |
+| Clean clone | PASS — local clone at `35c59ca2e8b25cd41437f2b9759e864cb4e2291d`, clean status |
+| Fresh Tari cohort bootstrap | PASS — official v0.42.0 commit cloned and `docs/wallet-mvp.patch` applied; clean-clone Cargo metadata resolved |
+| Clean-clone Worker install/test | PASS — `npm ci` followed by 53 passed / 1 skipped |
+| Clean-clone browser-provider suite | PASS — 31 passed |
+| Rust workspace suite (`cargo test --workspace`) | BLOCKED — `randomx-rs` CMake selected Visual Studio 18 2026, but no compatible Visual Studio instance is installed. Tests did not start. |
+| Clean-clone Rust workspace suite | NOT RUN — blocked by the same missing Windows CMake/Visual Studio toolchain prerequisite |
+
+The candidate must not be tagged or pushed until the Rust workspace suite passes in an environment
+with the required native build toolchain and a GitHub destination is configured.
+
+## GitHub release state
+
+No Git remote was configured at audit start or at this checkpoint. No GitHub authentication,
+repository visibility, push, remote README check, or release tag verification was possible.
+
+## Public-source review
+
+The current candidate has no personal-path or private-network reference match. Historical commits
+contain development-era local-path references in archival documents/scripts; no history rewrite was
+performed. The scan found no live secret in current files, local candidate artifacts, or history.
 
 ## Known release limitations
 
