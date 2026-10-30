@@ -1106,13 +1106,14 @@ async fn run() -> i32 {
             .next()
             .expect("token")
             .to_string();
+        let redacted_reply = reply.replace(&token_part, "<redacted>");
         eprintln!(
             "ghost-gate-telegram: FIXTURE MODE — no Telegram is contacted; grants are local only.\n\
-             fixture join page (for a browser with a wallet):\n\
-               {reply}\n\
-             and a ready-made claim (the fixture bridge accepts proof ids starting with 'fixture_'):\n\
-               curl -s -X POST http://127.0.0.1:{claim_port}/claim -H 'Content-Type: application/json' \\
-                 -d '{{\"token\":\"{token_part}\",\"proof_id\":\"fixture_smoke\"}}'"
+             fixture join page (bearer token redacted):\n\
+               {redacted_reply}\n\
+             fixture flow id: {}\n\
+             the fixture bridge accepts proof ids starting with 'fixture_'",
+            audit_id(&token_part),
         );
         return serve(bot, &bridge_base, &format!("http://127.0.0.1:{claim_port}"), claim_port, &gate, bridge_public_url.as_deref()).await;
     }
