@@ -34,8 +34,21 @@ test("hosted Worker sends root to the Privacy Lab entrypoint", async () => {
   });
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("location"), null, "root must not redirect the browser to /lab/");
+  assert.equal(response.headers.get("cross-origin-resource-policy"), "cross-origin", "the public dApp document must opt in to a COEP-protected wallet iframe");
   assert.equal(await response.text(), "site");
   assert.deepEqual(seen, ["/lab/"]);
+});
+
+test("only public Privacy Lab documents opt in to Web Tari Universe cross-origin embedding", async () => {
+  const env = { ASSETS: { fetch() { return new Response("site"); } } };
+  for (const path of ["/lab", "/lab/"]) {
+    const response = await worker.fetch(new Request(`https://ghostgate.boo${path}`), env);
+    assert.equal(response.headers.get("cross-origin-resource-policy"), "cross-origin");
+  }
+  const admin = await worker.fetch(new Request("https://ghostgate.boo/admin"), env);
+  assert.equal(admin.headers.get("cross-origin-resource-policy"), null);
+  const claim = await worker.fetch(new Request("https://ghostgate.boo/claim"), env);
+  assert.equal(claim.headers.get("cross-origin-resource-policy"), null);
 });
 
 test("Privacy Lab footer does not advertise the blocked public administrator route", () => {

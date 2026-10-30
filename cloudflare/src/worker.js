@@ -9,6 +9,17 @@ const MAX_PROOF_BYTES = 8 * 1024;
 const MAX_PROOF_REQUEST_BYTES = MAX_PROOF_BYTES + 8 * 1024;
 const MAX_PROXY_BODY_BYTES = 64 * 1024;
 
+// Web Tari Universe deliberately runs its dApp container under
+// Cross-Origin-Embedder-Policy: require-corp. Its public dApp iframe can load
+// only a document that explicitly permits cross-origin embedding. Keep that
+// opt-in limited to the public Privacy Lab documents; it must never spill over
+// to authenticated bridge, claim, Telegram, or administrator routes.
+function embeddableLabDocument(response) {
+  const headers = new Headers(response.headers);
+  headers.set("cross-origin-resource-policy", "cross-origin");
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
 function catalog(env) {
   try { return parseGateCatalog(env.GG_GATE_CATALOG, { allowLocalHttp: env.GG_LOCAL_DEVELOPMENT === "1" }); }
   catch (error) { return error; }
@@ -274,7 +285,12 @@ export default {
       // Cloudflare Assets canonicalizes a directory's `index.html` as a redirect to the
       // directory URL. Fetch that canonical asset path internally so the outer root request
       // remains a 200 at `/` instead of inheriting an unwanted `/lab/` redirect.
-      if (parsed.pathname === "/") return env.ASSETS.fetch(new Request(new URL("/lab/", request.url), request));
+      if (parsed.pathname === "/") {
+        return embeddableLabDocument(await env.ASSETS.fetch(new Request(new URL("/lab/", request.url), request)));
+      }
+      if (parsed.pathname === "/lab" || parsed.pathname === "/lab/") {
+        return embeddableLabDocument(await env.ASSETS.fetch(request));
+      }
       // Telegram's bot historically minted /telegram/join links.  /claim is the concise public
       // alias.  Both serve the same static page and still require a bot-minted single-use token.
       if (parsed.pathname === "/claim" || parsed.pathname === "/claim/" || parsed.pathname === "/telegram/join") {
