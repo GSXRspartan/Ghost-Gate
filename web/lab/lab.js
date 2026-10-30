@@ -1582,7 +1582,9 @@ if (tgStart) {
         // A user must start at the bot: only it mints the account-bound, single-use join token.
         // /bot redirects to the configured official bot, or explains why Telegram is not yet
         // configured.  The public /claim route is intentionally not enough on its own.
-        window.location.href = "/bot";
+        // Keep Telegram navigation outside an embedded Web Tari Universe dApp frame. The click
+        // remains user-initiated so popup blockers and wallet permissions are not bypassed.
+        window.open("/bot", "_blank", "noopener,noreferrer");
     };
 }
 

@@ -217,7 +217,7 @@ async function main() {
       const a = document.createElement("a");
       a.href = inviteLink;
       a.target = "_blank";
-      a.rel = "noopener";
+      a.rel = "noopener noreferrer";
       a.textContent = "Join the group on Telegram";
       a.style.cssText =
         "display:inline-block;padding:0.75rem 2rem;background:#0f0;color:#000;font-weight:700;" +

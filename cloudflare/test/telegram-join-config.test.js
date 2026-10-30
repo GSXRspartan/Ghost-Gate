@@ -93,13 +93,26 @@ test("Telegram expiry tells the user to mint a new link without weakening token 
 test("public Telegram onboarding has a dedicated two-column layout and Privacy Lab opens it", () => {
   const bot = readFileSync(new URL("../../web/bot/index.html", import.meta.url), "utf8");
   const lab = readFileSync(new URL("../../web/lab/lab.js", import.meta.url), "utf8");
+  const claim = readFileSync(new URL("../../web/telegram/claim.js", import.meta.url), "utf8");
   assert.match(bot, /class="telegram-steps"/);
   assert.match(bot, /grid-template-columns: 2rem minmax\(0, 1fr\)/);
   assert.match(bot, /\.step-copy \{ min-width: 0; \}/);
   assert.match(bot, /@media \(max-width: 480px\)/);
   assert.equal((bot.match(/class="step-num"/g) || []).length, 4);
-  assert.match(bot, /<a href="https:\/\/t\.me\/GhostGateGSXRBot"[^>]*>@GhostGateGSXRBot<\/a>/);
+  assert.match(bot, /<a href="https:\/\/t\.me\/GhostGateGSXRBot"[^>]*target="_blank"[^>]*rel="noopener noreferrer"[^>]*>@GhostGateGSXRBot<\/a>/);
   assert.match(bot, /@GhostGateGSXRBot<\/a> in Telegram and send <code>\/join<\/code>/);
-  assert.match(lab, /window\.location\.href = "\/bot"/);
+  assert.match(lab, /window\.open\("\/bot", "_blank", "noopener,noreferrer"\)/);
+  assert.doesNotMatch(lab, /window\.location\.href = "\/bot"/);
   assert.doesNotMatch(lab, /window\.location\.href = `\/telegram\/join/);
+  assert.match(claim, /a\.target = "_blank"/);
+  assert.match(claim, /a\.rel = "noopener noreferrer"/);
+});
+
+test("Telegram links leave an embedded dApp frame without weakening origin checks", () => {
+  const bot = readFileSync(new URL("../../web/bot/index.html", import.meta.url), "utf8");
+  const lab = readFileSync(new URL("../../web/lab/lab.js", import.meta.url), "utf8");
+  assert.match(bot, /target="_blank" rel="noopener noreferrer"/);
+  assert.match(lab, /user-initiated/);
+  assert.doesNotMatch(lab, /window\.top\.location/);
+  assert.doesNotMatch(lab, /location\.replace\([^)]*t\.me/);
 });
