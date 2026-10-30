@@ -648,11 +648,6 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
             ));
         }
 
-        // Consume the token only after every check passed. It is *marked*, not removed: a replay
-        // then answers "already used" — the informative refusal — and the ticker prunes it once
-        // the TTL has passed.
-        self.tokens.get_mut(token).expect("checked above").used = true;
-
         // The bridge hands back the session the registry issued for this proof, when it has an
         // access plane. From then on the SERVER owns the clock: expiry, revocation and policy
         // replacements all apply to this user the moment they happen, and the session appears in
@@ -687,19 +682,24 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
             .telegram
             .create_join_request_invite(self.chat, expires_unix)
             .await?;
+
+        // Consume the one-time browser token only after the Telegram invite has been created.
+        // Until this point no admission artifact exists, so a transient Bot API failure must not
+        // strand an otherwise valid proof. The event loop serializes claims; once the invite is
+        // returned, marking the token and recording the grant happen without another await.
+        self.tokens.get_mut(token).expect("checked above").used = true;
         self.grants.insert(
             user,
             Grant { expires, server },
         );
+        let duration = duration_label(minutes.saturating_mul(60));
         let message = if is_fixture_grant {
             format!(
-                "TEST ONLY: a local fixture authorized this test-group request for {} minute(s). No consensus-verified production access was granted.",
-                minutes
+                "TEST ONLY: a local fixture authorized this test-group request for {duration}. No consensus-verified production access was granted."
             )
         } else {
             format!(
-                "Verified: the network attested at least the threshold, and I never learned a balance. Doors open for {} minute(s). I'll ask for a fresh proof when it lapses.\n\nJoin the group: {}",
-                minutes, link
+                "Verified: the network attested at least the threshold, and I never learned a balance. Doors open for {duration}. I'll ask for a fresh proof when it lapses.\n\nJoin the group: {link}"
             )
         };
         self.telegram
@@ -855,6 +855,22 @@ impl TruncateTail for std::collections::BTreeSet<u64> {
 
 fn now_unix() -> u64 {
     SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Keep human-facing access duration readable without changing the exact server expiry.
+/// Registry-backed sessions are normally seven days; show that as "7 days" instead of
+/// "10080 minute(s)" while retaining minute/hour wording for shorter or unusual lifetimes.
+fn duration_label(seconds: u64) -> String {
+    let minutes = ((seconds + 59) / 60).max(1);
+    if minutes >= 24 * 60 {
+        let days = (minutes + (24 * 60 - 1)) / (24 * 60);
+        return format!("{days} day{}", if days == 1 { "" } else { "s" });
+    }
+    if minutes >= 60 {
+        let hours = (minutes + 59) / 60;
+        return format!("{hours} hour{}", if hours == 1 { "" } else { "s" });
+    }
+    format!("{minutes} minute{}", if minutes == 1 { "" } else { "s" })
 }
 
 fn main() {
@@ -1225,6 +1241,7 @@ mod tests {
     /// Records what the bot would send.
     struct FakeTelegram {
         invites: Vec<i64>,
+        invite_fails: bool,
         kicked: Vec<i64>,
         unbanned: Vec<i64>,
         approved: Vec<(i64, i64)>,
@@ -1239,6 +1256,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 invites: Vec::new(),
+                invite_fails: false,
                 kicked: Vec::new(),
                 unbanned: Vec::new(),
                 approved: Vec::new(),
@@ -1262,6 +1280,9 @@ mod tests {
         }
         async fn create_join_request_invite(&mut self, chat: i64, _expires_unix: u64) -> Result<String, String> {
             let mut g = self.0.lock().unwrap();
+            if g.invite_fails {
+                return Err("telegram create invite failed".into());
+            }
             g.invites.push(chat);
             Ok(g.next_link.clone())
         }
@@ -1442,6 +1463,27 @@ mod tests {
         // Second claim with the same token: refused.
         let err = bot.claim(&token, "proof2").await.expect_err("single-use");
         assert!(err.contains("already used"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn invite_failure_does_not_consume_the_browser_token_or_create_a_grant() {
+        let bridge = FakeBridge {
+            answers: HashMap::from([("proof-retry".to_string(), FakeBridge::accepted("crypt"))]),
+            access: None,
+        };
+        let (mut bot, tg) = bot_owned(bridge);
+        let (token, _) = mint_join(&mut bot, 43).await;
+        tg.lock().unwrap().invite_fails = true;
+
+        let first = bot.claim(&token, "proof-retry").await.expect_err("invite failure must fail closed");
+        assert!(first.contains("create invite failed"), "{first}");
+        assert!(!bot.tokens.get(&token).expect("failed claim retains token").used);
+        assert_eq!(bot.grant_count(), 0);
+
+        tg.lock().unwrap().invite_fails = false;
+        bot.claim(&token, "proof-retry").await.expect("the valid proof can be retried after transport failure");
+        assert!(bot.tokens.get(&token).expect("successful claim retains replay marker").used);
+        assert_eq!(bot.grant_count(), 1);
     }
 
     #[tokio::test]
@@ -1737,13 +1779,31 @@ mod tests {
         let fake = tg.lock().unwrap();
         let said = fake.messages.iter().find(|(_, m)| m.contains("Doors open")).expect("the success message was sent").1.clone();
         drop(fake);
-        assert!(said.contains("Doors open for 10080 minute(s)"), "the duration is the server's, not the bot's: {said}");
+        assert!(said.contains("Doors open for 7 days"), "the duration is the server's, not the bot's: {said}");
         assert_eq!(bot.grant_count(), 1);
 
         tokio::time::sleep(Duration::from_millis(60)).await;
         bot.tick().await;
         assert_eq!(bot.grant_count(), 1, "the local TTL must not expire a server-backed session");
         assert!(tg.lock().unwrap().kicked.is_empty(), "nobody was kicked");
+    }
+
+    #[tokio::test]
+    async fn a_server_backed_grant_approves_only_the_bound_join_request() {
+        let bridge = FakeBridge {
+            answers: HashMap::from([("proof-telegram".to_string(), FakeBridge::accepted_with_access("crypt", 7))]),
+            access: Some(Ok(true)),
+        };
+        let (mut bot, tg) = bot_owned(bridge);
+        let (token, _) = mint_join(&mut bot, 77).await;
+        bot.claim(&token, "proof-telegram").await.expect("server session creates grant");
+
+        bot.handle_join_request(TgJoinRequest { chat: TgChat { id: -1001234 }, from: TgUser { id: 77 } }).await;
+        bot.handle_join_request(TgJoinRequest { chat: TgChat { id: -1001234 }, from: TgUser { id: 78 } }).await;
+
+        let fake = tg.lock().unwrap();
+        assert_eq!(fake.approved, vec![(-1001234, 77)]);
+        assert_eq!(fake.declined, vec![(-1001234, 78)]);
     }
 
     #[tokio::test]
