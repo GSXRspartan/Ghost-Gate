@@ -10,13 +10,14 @@ const MAX_PROOF_REQUEST_BYTES = MAX_PROOF_BYTES + 8 * 1024;
 const MAX_PROXY_BODY_BYTES = 64 * 1024;
 
 // Web Tari Universe deliberately runs its dApp container under
-// Cross-Origin-Embedder-Policy: require-corp. Its public dApp iframe can load
-// only a document that explicitly permits cross-origin embedding. Keep that
-// opt-in limited to the public Privacy Lab documents; it must never spill over
-// to authenticated bridge, claim, Telegram, or administrator routes.
+// Cross-Origin-Embedder-Policy: require-corp. A cross-origin nested document
+// must both permit cross-origin embedding and carry a compatible COEP policy.
+// Keep that opt-in limited to the public Privacy Lab documents; it must never
+// spill over to authenticated bridge, claim, Telegram, or administrator routes.
 function embeddableLabDocument(response) {
   const headers = new Headers(response.headers);
   headers.set("cross-origin-resource-policy", "cross-origin");
+  headers.set("cross-origin-embedder-policy", "require-corp");
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
