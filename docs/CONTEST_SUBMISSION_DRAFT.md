@@ -146,4 +146,3 @@ replay coordination, session expiry, origin restrictions, and private policy adm
 boundary explicit. The current demo uses a revealed/public qualifying output and remains
 operator-trusted testnet technology; fully confidential threshold proofs and Minotari L1 XTM support
 are active future-work directions, not present-tense claims.
-
