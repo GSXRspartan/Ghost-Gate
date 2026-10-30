@@ -1,25 +1,40 @@
-# Keep build artifacts out of the repo.
+# Build artifacts
 target/
 _cargo-target/
+_cargo-target-*/
 
-# Never commit keys, wallets or databases.
+# Credentials, wallets, local deployment configuration, and private backups
+.env
+.env.*
+*.pem
+*.p12
+*.pfx
+*.key
+*.seed
+*.mnemonic
+keys.json
+credentials/
+secrets/
+deploy/*.env
+deploy/*.env.*
+cloudflare/wrangler.staging.toml
 *.sqlite
 *.sqlite3
 *.db
-keys.json
-*.key
-.env
-.env.*
 .ghost-gate/
+.ghost-gate-*/
+.tari-*/
+browser-profile*/
+.chrome-profile/
 
-# Editor / OS noise
-.idea/
-.vscode/
-*.swp
-.DS_Store
-Thumbs.db
-
-# Local test scratch
+# Generated packages, staging assets, logs, and scratch space
+*.tar
+*.tar.gz
+*.bak
+*.backup
+staging-web/
+staging-web.pre-*/
+artifacts/
 temp/
 /tmp/
 *.log
@@ -27,9 +42,14 @@ npm-debug.log*
 node_modules/
 .wrangler/
 .pnpm-store/
-# Generated staging assets and source packages are deployment artifacts, not source.
-/staging-web/
-/artifacts/
-# Machine-local Cargo config (absolute target-dir path; see the file for why)
-/.cargo/
+
+# Machine-local build/source configuration
+.cargo/
 .tari-v047-reference/
+
+# Editor / OS noise
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

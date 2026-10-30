@@ -1,5 +1,8 @@
 # Demo guide — screenshots, video storyboard, presentation notes
 
+> **Historical presentation guide.** It documents an earlier local/demo interface. Use
+> `docs/DEMO.md` for the current Crypt v3 happy path; screenshots will be refreshed separately.
+
 This is the presentation kit for the contest submission. Everything here is reproducible on the
 demo machine; nothing requires publishing anything without operator approval.
 

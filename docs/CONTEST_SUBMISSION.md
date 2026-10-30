@@ -1,5 +1,8 @@
 # Tari Ootle Spooky Secrets contest submission
 
+> **Historical draft.** It predates the Crypt v3 release state and must not be used as the current
+> contest description. See the top-level `README.md` and `docs/DEMO.md`.
+
 ## One-sentence claim
 
 **Ghost Gate: a user proved they controlled sufficient private Tari without revealing the amount,

@@ -1,5 +1,8 @@
 # Telegram admission boundary
 
+> **Historical security/design record.** It captures an earlier deployment stage. The current
+> public-release summary is `docs/TELEGRAM.md`; do not use this document as a live runbook.
+
 Ghost Gate's Telegram bot binds a browser proof to the Telegram account that sent `/join`. It
 does not accept a browser-provided Telegram user ID. A one-time token is minted from Telegram's
 own update, the bot re-reads the proof from the bridge, and the eventual Telegram join request is

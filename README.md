@@ -1,164 +1,174 @@
 # Ghost Gate
 
-**Your balance stays in the shadows.**
+Privacy-aware access control for Tari. **Prove enough. Reveal less.**
 
-> Prove you control enough without revealing exactly how much.
+Ghost Gate lets a relying site check that a visitor meets a minimum tTARI threshold without asking
+for a seed phrase, private key, or exact wallet balance. The public demonstration is **Privacy Lab**
+at [ghostgate.boo](https://ghostgate.boo); Ghost Gate is the underlying gating technology.
 
-Ghost Gate is a private threshold access system for [Tari Ootle](https://github.com/tari-project/tari-ootle).
-It lets a user prove control of at least a configured amount of a **supported Ootle stealth fungible
-resource** at access time, without revealing the exact amount.
+> **Status:** Crypt v3 is a live, operator-trusted Esmeralda testnet demonstration. It is
+> fail-closed, but it is not production consensus-verified authorization infrastructure.
 
-tTARI is one such resource, not a special case. A gate binds to a **resource address** and a **raw
-integer threshold**; it never reads a token symbol, a token name or a divisibility. Any stealth
-fungible resource works, including one a user created themselves. See `docs/RESOURCE_SUPPORT.md`.
+## What Ghost Gate Does
+
+The current Crypt policy checks a 100 tTARI floor. A successful result demonstrates that the user
+presented a qualifying output for the policy, without disclosing their total wallet balance or the
+amount above the required floor.
+
+The current browser flow is credential-based. It uses a qualifying **revealed/public tTARI output**;
+fully confidential minimum-balance proofs that avoid revealing or unshielding such an output remain
+future work. Do not describe the current Crypt v3 flow as a fully confidential balance proof.
+
+## Live Demo
+
+Visit [ghostgate.boo](https://ghostgate.boo) to use Privacy Lab.
+
+- Privacy Lab provides simple and technical views of the gate decision.
+- Sapient is a tested wallet integration.
+- Web Tari Universe embedding and wallet connection are tested integrations.
+- The Telegram bot supports account-bound onboarding and gated join approval.
+
+The active Crypt v3 demo policy is:
+
+| Field | Value |
+| --- | --- |
+| Network | Esmeralda testnet (`38`) |
+| Threshold | 100 tTARI (`100000000` raw) |
+| Proof mode | Credential |
+| Policy version | v3 |
+| Policy hash | `13af3169aefb313f355368c5b9131d512d86048ab700d850024c79ddb680b74f` |
+| Verified-session lifetime | 7 days |
+
+## How It Works
 
 ```text
-GHOST GATE
-
-VIP Vault
-
-Requirement:
-≥ 1,000,000 GHOSTTEST
-  resource_230e244ddc1b61fe8803d1c4d77df336b7a0b1e0e795739894b49d4de358a006
-
-[ PROVE ACCESS ]
-
-Result:
-QUALIFIED ✓
-
-Exact balance:
-NOT DISCLOSED
+wallet → challenge → qualifying output proof → verifier → policy threshold check → session/access decision
 ```
 
-The number on screen is the raw threshold formatted with the resource's own divisibility. Consensus
-compares the raw integer; only a display divides.
+For Telegram, the bot issues an account-bound, single-use link after `/join`. Ghost Gate verifies
+the proof server-side, then the bot approves only the matching pending Telegram join request.
 
-The threshold is enforced **inside an Ootle template**, under consensus. A relying site cannot
-reinterpret the cryptography: if a proof is accepted, every validator that executed the transaction
-ran the same rule.
+## Privacy Properties
 
-## What a proof actually asserts
+- Ghost Gate never requests a seed phrase or private key.
+- The Ghost Gate result does not disclose the exact wallet balance.
+- The verifier learns the policy's required lower bound, not the amount above it.
+- The current Crypt implementation relies on a revealed/public qualifying tTARI output.
+- Testnet activity and normal transaction metadata remain observable; this is not an anonymity claim.
 
-At the moment the proof transaction committed, its signer controlled at least the gate threshold of
-the gate's resource, and proved it without publishing an amount.
+See [docs/SECURITY.md](docs/SECURITY.md) for the security and trust model.
 
-It is **not** a proof of total wallet balance, identity, uniqueness, or holdings at any later time.
-`docs/PRIVACY_MODEL.md` states the boundary precisely, including what leaks.
+## Supported Integrations
 
-## Status
-
-Newly written, pinned to Tari Ootle **v0.42.0** (commit `a43773e6…`). Everything was written during
-the October 2026 Spooky Secrets build contest; nothing predates the theme announcement.
-
-| Area | State | Where |
-|---|---|---|
-| MVP binding: the promise is covered by the range proof | PROVEN | `docs/GATE1_RESULTS.md` |
-| Statement-shape rules (no revealed amounts, one output, key-spendable, balance proof) | PROVEN | `gate_engine.rs` |
-| Template enforcement under the engine | PROVEN | `gate_engine.rs`, 30/30 |
-| Ordinary wallet funds through the component | PROVEN | `gate_engine.rs`, `a_wallet_built_statement_satisfies_the_gate` |
-| Live network submission, validator-committed, replay refused | PROVEN | `docs/GATE3_RESULTS.md`, `@ghost_gate` |
-| Any stealth fungible resource, any divisibility | PROVEN | `cross_resource.rs`, `@ghost_gate` scenario 2 |
-| Unsupported resource classes refused by name | PROVEN | `cross_resource.rs` |
-| GHSA-pp4v-v773-9qxg reconciled and backported | PROVEN | `docs/GATE3_RESULTS.md`, 48/48 |
-| Local wallet bridge, interactive frontend | see `docs/GATE4_RESULTS.md` |
-| Native Minotari XTM backend, no Ootle burn | research only — see `docs/XTM_RESEARCH.md` |
-
-`PROVEN` means a test in this repository demonstrates it. It never means simulated.
+| Integration | Release status |
+| --- | --- |
+| Sapient | Tested in the live demo |
+| Web Tari Universe | Tested embedded-dapp integration |
+| Telegram (`@GhostGateGSXRBot`) | Tested onboarding and server-side gated approval |
+| Other wallet/provider paths | Experimental unless separately documented |
 
 ## Architecture
 
-```text
-ordinary key-path stealth tTARI
-            │
-            ▼
-wallet selects sufficient private inputs
-            │
-            ▼
-one fresh self-owned stealth output, MVP ≥ threshold
-            │
-            ▼
-GhostGate::prove_access(challenge, statement)
-            │
-            ├─ challenge matches gate, resource, threshold, network, site, session
-            ├─ challenge not expired, not already burnt
-            ├─ inputs live, key-path authorised, nothing revealed
-            ├─ exactly one output, key-spendable
-            └─ MVP ≥ threshold
-            │
-            ▼
-ResourceManager::stealth_transfer(statement)
-            │
-            ▼
-Ootle engine: key-path authorisation · liveness · balance proof · bulletproof
-            │
-            ▼
-COMMITTED → nonce burnt → relying site issues session
+```mermaid
+flowchart LR
+  W[Wallet] --> C[Cloudflare Worker<br/>Privacy Lab]
+  C --> D[Durable Object<br/>replay coordination]
+  C --> V[VPS verifier bridge]
+  V --> P[Crypt v3 policy check]
+  P --> C
+  C --> S[Verified session]
+  T[Telegram bot] --> V
+  T --> J[Matching Telegram join request]
 ```
 
-The V1 proof is transaction-backed. That is a pragmatic shortcut, not a theoretical requirement: the
-transaction supplies liveness, unspentness, ownership authorisation, value conservation and
-range-proof enforcement for free. See `docs/TRANSACTIONLESS_FUTURE.md` for what a transactionless
-version would need, and why two of its seven requirements are unavailable today.
+The Worker hosts Privacy Lab and coordinates challenge replay state. A VPS bridge verifies the
+credential against the published policy. The private administrator plane is separate from the
+public application. A Cloudflare Tunnel provides restricted ingress to the bridge. More detail:
+[architecture](docs/ARCHITECTURE.md) and [Telegram flow](docs/TELEGRAM.md).
 
-## Privacy
+## Security Model
 
-Hidden: the exact value behind the qualifying output, the exact wallet balance, and the ownership
-information the stealth primitive hides.
+Ghost Gate is designed to fail closed. It binds proof processing to the relying-site origin, policy
+version/hash, challenge nonce, and session commitment. The Worker/bridge contract is authenticated;
+replay coordination is handled by a Durable Object when configured. Telegram admission performs a
+server-side re-verification and only approves the account that requested the matching join.
 
-Observable: that a Ghost Gate transaction happened, which gate, the public lower bound it committed
-to, and its timing. **The transaction itself is public metadata.**
+This release is **operator-trusted testnet** technology. It is not a production consensus-verifiable
+authorization system, and it must not be represented as one.
 
-Not claimed: anonymity of gate usage, permanent eligibility, holdings after the access event, total
-balance, identity, uniqueness, Sybil resistance, or network anonymity.
+## Running Locally
 
-## Quick start
-
-Requires Rust **1.97.1** (the toolchain v0.42.0 pins) and a checkout of `tari-ootle` at tag `v0.42.0`.
+The Rust workspace is pinned to a patched Tari Ootle v0.42.0 source cohort. Before running Rust
+commands in a fresh checkout, prepare that sibling directory from the pinned public source:
 
 ```powershell
-# 1. Verify the reference cohort
-git -C ..\tari-ootle-v0.42.0-reference rev-parse HEAD
-#    expect a43773e600b9503ed3fadcd3f0048f86131e3644
-
-# 2. Create the writable build copy (the script header explains why a copy rather than in place)
-bash scripts/prepare_reference.sh
-
-# 3. Suites that do not need the engine — fast, runs on Windows
-$env:CARGO_TARGET_DIR = "..\_cargo-target"
-cargo test -p ghost-gate-core -p ghost-gate-wallet -p ghost-gate-verifier
-
-# 4. Engine-backed suites — WSL, because wasmer's Cranelift backend cannot build on Windows
-bash scripts/wsl_run.sh test -p ghost-gate-tests
+# Run from the Ghost Gate repository root. The resulting sibling is required by Cargo.toml.
+git clone https://github.com/tari-project/tari-ootle.git ..\_ootle-v042-ghost-gate
+git -C ..\_ootle-v042-ghost-gate checkout a43773e600b9503ed3fadcd3f0048f86131e3644
+git -C ..\_ootle-v042-ghost-gate apply "$PWD\docs\wallet-mvp.patch"
 ```
 
-`docs/GATE0_RESULTS.md` records the exact toolchain, the dependency cohort, and the two build
-obstacles that were hit rather than anticipated.
+A full local Crypt demonstration additionally requires separately provisioned testnet
+infrastructure and operator-managed secrets; none are included in this repository.
 
-## Layout
+```powershell
+# Rust workspace tests
+cargo test --workspace
 
-```text
-ghost-gate/
-├── templates/ghost_gate/                    the on-chain template
-├── templates/ghost_gate_faucet/             test fixture: creates stealth resources and outputs
-├── templates/ghost_gate_other_classes/       test fixture: creates the resource classes we refuse
-├── crates/
-│   ├── ghost-gate-core/                     qualification rules shared by template and verifier
-│   ├── ghost-gate-wallet/                   wallet-side statement assembly
-│   ├── ghost-gate-verifier/                 self-hostable relying-side logic
-│   └── ghost-gate-tests/                    engine-backed and unit suites
-├── docs/                                    source trace, gates, privacy, threat model
-└── scripts/                                 reference preparation, WSL runner
+# Cloudflare Worker tests
+Set-Location cloudflare
+npm ci
+npm test
+Set-Location ..
 ```
 
-`ghost-gate-core` is the point of the layout. The template and the relying site both compile the
-same `qualify` function, so a site cannot disagree with consensus about what a valid proof is.
+Deployment environment templates are in [`deploy/`](deploy/README.md). Keep actual deployment
+configuration and secrets outside Git; the templates use placeholders only.
 
-## Clean room
+## Testing
 
-Ghost Gate is a new implementation. No application code from any previous project was consulted,
-copied or ported. It depends only on official `tari-project/tari-ootle` crates, official Tari
-cryptography, and general-purpose libraries. See `docs/CLEAN_ROOM.md`.
+Run the commands above plus the focused browser-provider suite when changing the browser adapter:
+
+```powershell
+node --test web/js/ghost/test.js
+```
+
+Test counts are intentionally not hard-coded here. The release-readiness record identifies the
+commands and their results for this candidate.
+
+## Deployment
+
+The public Worker, private verifier bridge, Telegram service, and private administrator plane are
+deployed as separate trust domains. Configure Worker secrets through the deployment platform and
+service secrets through the host's secret-management process; do not place them in Wrangler files,
+source files, screenshots, or shell history. See [`deploy/README.md`](deploy/README.md).
+
+## Known Limitations
+
+- Crypt v3 uses a revealed/public qualifying output.
+- Telegram grant state is process-memory state and is not persistent across process restart.
+- The demo is testnet and operator-trusted.
+- Fully confidential minimum-balance proofs are future work.
+
+## Roadmap
+
+- Fully confidential minimum-balance proofs.
+- Persistent Telegram grant state.
+- Self-service gate creation and Telegram group onboarding.
+- Production trust/bootstrap hardening.
+- Additional assets and policies.
+
+These are roadmap items, not completed features.
+
+## Release Documentation
+
+- [Demo walkthrough](docs/DEMO.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [Security model](docs/SECURITY.md)
+- [Telegram integration](docs/TELEGRAM.md)
+- [Release readiness](RELEASE_READINESS.md)
+- [Historical notes](docs/HISTORICAL_NOTES.md)
 
 ## License
 
-MIT — see `LICENSE`. Official Tari Ootle is BSD-3-Clause and is used unmodified.
+MIT. See [LICENSE](LICENSE). Tari Ootle and its dependencies retain their respective licenses.

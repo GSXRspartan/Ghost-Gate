@@ -1,5 +1,8 @@
 # Ghost Gate demo script
 
+> **Historical demo script.** This is retained for development provenance and is not the current
+> Crypt v3 release walkthrough. See `docs/DEMO.md`.
+
 Two paths. **Path A** runs fully offline in any browser — no localnet, no wallet, no network.
 **Path B** runs the full consensus demo and needs the Ootle localnet up. Pick based on who you are
 demoing to and how much time you have.

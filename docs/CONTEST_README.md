@@ -1,5 +1,8 @@
 # GHOST GATE — PRIVACY LAB
 
+> **Historical development record.** This document describes a prior local/demo state and is not
+> the Crypt v3 release contract. See the top-level `README.md` and `docs/DEMO.md`.
+
 **Prove enough. Reveal less.**
 
 Ghost Gate is a privacy-verification platform: you prove that you hold **at least** a configured
