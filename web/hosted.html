@@ -1,0 +1,69 @@
+<!doctype html>
+<!-- Hosted Ghost Gate UI. This page is served by the Cloudflare Worker, never by walletd. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Ghost Gate</title>
+  <link rel="stylesheet" href="/hosted.css">
+</head>
+<body>
+  <main>
+    <header>
+      <p class="eyebrow">GHOST GATE</p>
+      <h1>Prove eligibility. Keep custody.</h1>
+      <p>Your browser wallet remains yours. Ghost Gate never asks for a seed, API key, or walletd account.</p>
+      <div class="mode" role="group" aria-label="Display mode">
+        <button id="simple-mode" class="selected" type="button">Simple</button>
+        <button id="technical-mode" type="button">Technical</button>
+      </div>
+    </header>
+
+    <section class="card">
+      <h2>Choose a gate</h2>
+      <label for="gate">Available eligibility policy</label>
+      <select id="gate" disabled><option>Loading server-configured gates…</option></select>
+      <p id="gate-summary" class="muted"></p>
+      <dl id="gate-detail" class="technical" hidden></dl>
+    </section>
+
+    <section class="card">
+      <h2>Connect your wallet</h2>
+      <div class="wallets" role="group" aria-label="Wallet provider">
+        <button data-wallet="sapient" type="button" class="selected">Sapient</button>
+        <button data-wallet="universe" type="button">Tari Universe</button>
+      </div>
+      <button id="connect" type="button" class="primary">Connect wallet</button>
+      <p id="wallet-status" class="muted">Connecting a wallet alone never grants access.</p>
+      <dl id="wallet-detail" class="technical" hidden></dl>
+      <button id="disconnect" type="button" disabled>Forget wallet connection</button>
+    </section>
+
+    <section class="card">
+      <h2>Request a challenge</h2>
+      <p class="simple">This safely prepares a short-lived, one-time proof request. It does not move funds or charge a fee.</p>
+      <p class="technical" hidden>A challenge is tenant, gate, relying-site, network, resource, threshold, policy-version, and visitor-session bound in Durable Object storage.</p>
+      <button id="challenge" type="button" class="primary" disabled>Request challenge</button>
+      <p id="challenge-status" class="muted">Connect a compatible wallet first.</p>
+    </section>
+
+    <section class="card">
+      <h2>Submit proof</h2>
+      <p class="simple">After the challenge is ready, your wallet builds and signs a proof of holdings. No funds leave your wallet.</p>
+      <p class="technical" hidden>The proof output (minimumValuePromise) is created on-chain, then the ownership signature is verified by the bridge through the Worker's trusted-verify relay.</p>
+      <button id="submit-proof" type="button" class="primary" disabled>Submit proof</button>
+      <p id="proof-status" class="muted">Request a challenge first.</p>
+    </section>
+
+    <section class="card">
+      <h2>Eligibility verification</h2>
+      <p id="verification-status">No authorization has been issued.</p>
+      <button id="protected" type="button">Check protected area</button>
+      <button id="logout" type="button">Log out of this browser</button>
+    </section>
+  </main>
+  <script src="https://universe.tari.mw/tari-connector.js"></script>
+  <script type="module" src="/hosted.js"></script>
+</body>
+</html>

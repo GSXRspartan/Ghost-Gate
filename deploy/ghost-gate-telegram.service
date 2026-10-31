@@ -1,0 +1,35 @@
+[Unit]
+Description=Ghost Gate Telegram Bot
+After=ghost-gate-bridge.service
+Wants=ghost-gate-bridge.service
+
+[Service]
+Type=simple
+User=ghostgate-telegram
+Group=ghostgate-telegram
+WorkingDirectory=/opt/ghost-gate
+ExecStart=/opt/ghost-gate/bin/ghost-gate-telegram
+EnvironmentFile=/opt/ghost-gate/etc/ghost-gate-telegram.env
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+LockPersonality=yes
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ghost-gate-telegram
+
+[Install]
+WantedBy=multi-user.target

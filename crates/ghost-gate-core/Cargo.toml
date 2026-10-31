@@ -1,0 +1,22 @@
+[package]
+name = "ghost-gate-core"
+description = "Consensus-visible Ghost Gate proof qualification rules, shared by the on-chain template and the off-chain verifier"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+tari_template_lib_types = { workspace = true, features = ["std"] }
+# Matches the minicbor the v0.42.0 workspace resolves; the derive must be the same major as the
+# one tari_template_lib_types derives its CBOR impls with, or the two disagree on the wire format.
+minicbor = { version = "2.3", default-features = false, features = ["std", "derive"] }
+# Policy records serialise for the registry store and the admin API. default-features = false with
+# alloc keeps ghost-gate-core compilable for the template's wasm32 target, where std is absent;
+# the workspace convention (serde 1.0 + derive) is unchanged otherwise.
+serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }
+
+[features]
+# Exposes ConsensusAttestation::fixture for tests only. Never enable it in a shipped binary.
+test-fixtures = []

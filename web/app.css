@@ -1,0 +1,156 @@
+:root {
+  color-scheme: dark;
+  --bg: #0b0d12;
+  --card: #141822;
+  --line: #232a38;
+  --text: #e7ecf3;
+  --muted: #8b97ab;
+  --accent: #7ee0c0;
+  --good: #7ee0c0;
+  --bad: #ff8f8f;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 2rem 1rem 4rem;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+#app { max-width: 44rem; margin: 0 auto; }
+
+header { margin-bottom: 2rem; }
+
+h1 {
+  margin: 0;
+  font-size: 2.4rem;
+  letter-spacing: 0.22em;
+  font-weight: 600;
+}
+
+h2 {
+  margin: 0 0 0.9rem;
+  font-size: 0.78rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.tagline {
+  margin: 0.35rem 0 0;
+  color: var(--accent);
+  font-size: 1.05rem;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 1.25rem 1.35rem;
+  margin-bottom: 1.1rem;
+}
+
+dl { margin: 0; display: grid; grid-template-columns: 9rem 1fr; gap: 0.45rem 1rem; }
+dt { color: var(--muted); font-size: 0.9rem; }
+dd { margin: 0; }
+
+code, .wrap { word-break: break-all; font-family: ui-monospace, "SFMono-Regular", Menlo, monospace; font-size: 0.8rem; }
+
+.hint { color: var(--muted); font-size: 0.85rem; }
+
+.privacy-note {
+  margin: 1.1rem 0 0;
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--line);
+  color: var(--accent);
+  font-size: 0.92rem;
+}
+
+button {
+  font: inherit;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: #1b2130;
+  color: var(--text);
+  padding: 0.6rem 1.1rem;
+  cursor: pointer;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #06231b;
+  font-weight: 600;
+}
+
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+#steps { margin: 0; padding-left: 1.3rem; color: var(--muted); }
+#steps li { margin-bottom: 0.4rem; }
+#steps li.done { color: var(--text); text-decoration: line-through; }
+#steps li.active { color: var(--accent); font-weight: 600; }
+
+#outcome.granted h2 { color: var(--good); }
+#outcome.denied h2 { color: var(--bad); }
+
+#outcome-title.granted { font-size: 1.6rem; letter-spacing: 0.08em; }
+
+form { display: grid; gap: 0.8rem; }
+
+label { display: grid; gap: 0.3rem; font-size: 0.9rem; color: var(--muted); }
+
+input, select {
+  font: inherit;
+  padding: 0.5rem 0.6rem;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: #0e1219;
+  color: var(--text);
+}
+
+pre {
+  background: #0e1219;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.8rem;
+  overflow-x: auto;
+  font-size: 0.78rem;
+}
+
+footer { margin-top: 1.5rem; }
+
+/* ---- wallet picker ---- */
+.wallet-cards {
+  display: grid;
+  gap: 12px;
+}
+.wallet-card {
+  border: 1px solid var(--line, #2a2f3a);
+  border-radius: 8px;
+  padding: 12px;
+  display: grid;
+  gap: 6px;
+}
+.wallet-card.unsupported {
+  opacity: 0.75;
+}
+.wallet-state {
+  min-height: 1.2em;
+}
+.mode-list {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 4px;
+}
+.mode-item {
+  display: grid;
+  gap: 2px;
+}
+.wallet-blurb {
+  margin: 0;
+}

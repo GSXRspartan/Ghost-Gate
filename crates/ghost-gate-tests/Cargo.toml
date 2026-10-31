@@ -1,0 +1,42 @@
+[package]
+name = "ghost-gate-tests"
+description = "Engine-backed and unit tests for Ghost Gate, run against the pinned Tari Ootle v0.42.0 cohort"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
+ghost-gate-core = { path = "../ghost-gate-core" }
+# The off-chain relying-side crate, used here for its `display` module: the tests assert that a
+# threshold renders from raw units and divisibility without either entering a consensus rule.
+ghost-gate-verifier = { path = "../ghost-gate-verifier" }
+tari_template_test_tooling = { workspace = true }
+tari_engine_types = { workspace = true }
+tari_ootle_transaction = { workspace = true }
+tari_ootle_common_types = { workspace = true }
+tari_ootle_wallet_crypto = { workspace = true }
+tari_template_lib = { workspace = true }
+tari_template_lib_types = { workspace = true, features = ["std", "serde"] }
+ootle_byte_type = { workspace = true }
+ootle-network = { workspace = true }
+tari_bor = { workspace = true, features = ["std"] }
+tari_crypto = { workspace = true }
+rand = { workspace = true }
+hex = { workspace = true }
+# Gate 3 builds its statement with a real wallet, so these come along. The SDK is the patched crate:
+# the promise-bearing output request below only type-checks against the tree carrying the MVP change.
+tari_ootle_wallet_sdk = { workspace = true }
+# `indexer_client` is what puts `IndexerRestApiNetworkInterface` in the crate: the SDK requires a network
+# interface to be supplied at construction, and this is the one the cohort's own default spec uses. The
+# Gate 3 tests never call it -- the statement path resolves its inputs from the wallet store, not the
+# network -- but the spec still has to name a real implementation.
+tari_ootle_wallet_sdk_services = { workspace = true, features = ["indexer_client"] }
+tari_ootle_wallet_storage_sqlite = { workspace = true }
+tari_ootle_address = { workspace = true }
+tari_utilities = { workspace = true }
+tempfile = "3.24"

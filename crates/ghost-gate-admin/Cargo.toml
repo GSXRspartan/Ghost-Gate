@@ -1,0 +1,32 @@
+[package]
+name = "ghost-gate-admin"
+description = "Ghost Gate's administrator control plane: passkey/wallet authentication, CSRF-protected policy management, the audit log and the dashboard"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+ghost-gate-core = { path = "../ghost-gate-core" }
+ghost-gate-registry = { path = "../ghost-gate-registry" }
+tokio = { workspace = true, features = ["macros", "rt", "net", "io-util", "time", "sync"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+rand_core = "0.9"
+blake3 = "1.8.7"
+sha2 = { workspace = true }
+# p256 0.13.2 is already resolved in the workspace lock (via the cohort's dependency tree); used
+# only to VERIFY WebAuthn ES256 signatures — no private-key operations exist in this crate.
+p256 = { version = "0.13.2", default-features = false, features = ["ecdsa", "ecdsa-core"] }
+# The Ristretto Schnorr machinery the audited credential flow uses, for wallet-challenge admins.
+tari_crypto = { workspace = true }
+
+[dev-dependencies]
+# The admin_plane integration tests synthesise Production-grade consensus evidence to exercise the
+# session lifecycle; the fixture constructor lives behind this feature and never reaches a shipped
+# binary. Features are additive, so enabling it here affects test builds only.
+ghost-gate-registry = { path = "../ghost-gate-registry", features = ["test-fixtures"] }
+ghost-gate-core = { path = "../ghost-gate-core", features = ["test-fixtures"] }

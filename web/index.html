@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<!--
+  Ghost Gate demo.
+
+  Served by the local bridge, same origin as the API, on purpose: a page on any other origin would need
+  CORS, and a CORS-enabled wallet bridge is a wallet bridge every page in the browser can reach.
+
+  This page never holds a key, a mask, a balance or a UTXO identifier, because the API never sends it
+  one. There is no code here that could display a balance even if the bridge sent one.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Ghost Gate</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<main id="app">
+  <header>
+    <h1>GHOST GATE</h1>
+    <p class="tagline">Your balance stays in the shadows.</p>
+  </header>
+
+  <!-- Gate identity. Everything here comes from the gate itself over the API, never from a caller. -->
+  <section id="gate" class="card">
+    <h2>Requirement</h2>
+    <dl>
+      <dt>Asset</dt>
+      <dd><span id="asset-symbol">&mdash;</span></dd>
+      <dt>Resource</dt>
+      <dd><code id="asset-address" class="wrap">&mdash;</code></dd>
+      <dt>Threshold</dt>
+      <dd id="threshold">&mdash;</dd>
+      <dt>Divisibility</dt>
+      <dd><span id="divisibility">&mdash;</span> decimal places <span class="hint">(display only)</span></dd>
+    </dl>
+    <p class="privacy-note">
+      Your exact balance will not be revealed. The gate learns a lower bound, never an amount.
+    </p>
+  </section>
+
+  <!-- Wallet selection. Each card reports what THAT wallet supports, probed from capabilities --
+       never from wallet identity. A wallet with no supported mode is shown as unsupported, with
+       the reason, rather than hidden or silently skipped. -->
+  <section id="wallets" class="card">
+    <h2>Choose a wallet</h2>
+    <p class="hint">
+      Each wallet supports different proof modes. The mode determines what the site learns and what
+      is disclosed on chain; the choice below is per account, as reported by the wallet itself.
+    </p>
+    <div id="wallet-cards" class="wallet-cards"></div>
+  </section>
+
+  <!-- Connection + action -->
+  <section id="connect" class="card" hidden>
+    <h2 id="connect-title">Connect</h2>
+    <p id="wallet-line" class="hint">Checking for a local Tari wallet&hellip;</p>
+    <button id="connect" class="primary">Connect Tari Wallet</button>
+  </section>
+
+  <!-- Proof action, shown after a wallet is chosen -->
+  <section id="prove-area" class="card" hidden>
+    <h2>Prove access</h2>
+    <p id="proof-mode-line" class="hint"></p>
+    <div id="credential-fields" hidden>
+      <label>Proof output amount <span class="hint">(raw units; carries the public minimum; permanent and public on chain)</span>
+        <input id="proof-amount" type="text" inputmode="numeric">
+      </label>
+      <label>Max fee <span class="hint">(raw units, disclosed on your wallet's approval screen)</span>
+        <input id="proof-maxfee" type="text" inputmode="numeric" value="5000">
+      </label>
+      <p id="lookup-line" class="hint"></p>
+    </div>
+    <button id="prove" class="primary">Prove access</button>
+  </section>
+
+  <!-- Progress -->
+  <section id="progress" class="card" hidden>
+    <h2>Preparing private proof</h2>
+    <ol id="steps">
+      <li data-step="statement">Building the private statement</li>
+      <li data-step="approval">Awaiting wallet approval</li>
+      <li data-step="submitting">Submitting</li>
+      <li data-step="waiting">Waiting for commitment</li>
+    </ol>
+  </section>
+
+  <!-- Outcome -->
+  <section id="outcome" class="card" hidden>
+    <h2 id="outcome-title"></h2>
+    <p id="outcome-body"></p>
+    <dl id="outcome-detail"></dl>
+    <button id="again" class="primary">Request a fresh challenge</button>
+  </section>
+
+  <!-- Gate configuration -->
+  <section id="create" class="card">
+    <h2>Create Ghost Gate</h2>
+    <p class="hint">
+      A gate is defined by a <strong>resource address</strong> and a <strong>raw threshold</strong>.
+      Symbols and names are display only and are never authority.
+    </p>
+    <form id="create-form">
+      <label>Resource address
+        <input id="c-resource" placeholder="resource_0101…" required>
+      </label>
+      <label>Symbol (display only)
+        <input id="c-symbol" placeholder="GHOSTTEST">
+      </label>
+      <label>Threshold <span class="hint">(raw units in the resource's smallest unit)</span>
+        <input id="c-threshold" type="number" min="1" step="1" value="1000000" required>
+      </label>
+      <label>Divisibility <span class="hint">(display only)</span>
+        <input id="c-divisibility" type="number" min="0" max="18" step="1" value="6">
+      </label>
+      <label>Relying site
+        <input id="c-site" value="vip.example" required>
+      </label>
+      <label>Session duration
+        <select id="c-session">
+          <option value="300">5 minutes</option>
+          <option value="1800" selected>30 minutes</option>
+          <option value="3600">1 hour</option>
+        </select>
+      </label>
+      <button type="submit" class="primary">Create Gate</button>
+    </form>
+    <pre id="c-output" hidden></pre>
+  </section>
+
+  <footer>
+    <p class="hint">
+      Bridge <span id="version">&mdash;</span> &middot; served on loopback only.
+      Nothing on this page has a private key, a mask, or a balance.
+    </p>
+  </footer>
+</main>
+<script src="https://universe.tari.mw/tari-connector.js"></script>
+<script type="module" src="/js/ghost/ghost-gate.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

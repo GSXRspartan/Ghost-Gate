@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Ghost Gate — Administrator</title>
+<link rel="stylesheet" href="/admin/admin.css">
+</head>
+<body class="vault">
+<main id="app">
+  <section id="admin-root">
+    <header class="admin-head">
+      <h1>Ghost Gate <span class="admin-accent">Administrator</span></h1>
+      <p class="hint">The control plane owns gate policy. Visitors cannot change anything here:
+      every write is authenticated, CSRF-checked and audited.</p>
+      <div class="admin-status" id="admin-status"></div>
+    </header>
+
+    <!-- First run: register the first administrator -->
+    <section id="bootstrap-panel" hidden>
+      <h2>First run — register the administrator</h2>
+      <p class="hint">Paste the bootstrap token the admin server printed on first start (also on
+      disk as <code>bootstrap.token</code>). It is void once one administrator exists.</p>
+      <label>Bootstrap token <input id="bootstrap-token" type="password" autocomplete="off"></label>
+      <label>Label for this credential <input id="reg-label" value="operator"></label>
+      <div class="row">
+        <button id="reg-passkey" class="btn primary">Register a passkey</button>
+        <button id="reg-wallet" class="btn ghost">Register a wallet key</button>
+      </div>
+      <div id="wallet-register" hidden>
+        <p class="hint">Sign the challenge with your wallet's spend key (Ristretto). Provide the
+        public key hex, the nonce and the signature — the server verifies them with the same
+        machinery the gate-credential flow uses.</p>
+        <label>Public key (hex) <input id="wallet-pk"></label>
+        <label>Signature (hex) <input id="wallet-sig"></label>
+        <button id="wallet-register-go" class="btn primary">Submit wallet registration</button>
+      </div>
+      <p id="passkey-note" class="hint" hidden></p>
+      <p id="bootstrap-error" class="error" hidden></p>
+    </section>
+
+    <!-- Login / step-up -->
+    <section id="login-panel" hidden>
+      <h2>Administrator sign-in</h2>
+      <div class="row">
+        <button id="login-passkey" class="btn primary">Sign in with passkey</button>
+        <button id="login-wallet" class="btn ghost">Sign in with wallet key</button>
+      </div>
+      <div id="wallet-login" hidden>
+        <label>Public key (hex) <input id="wallet-login-pk"></label>
+        <label>Signature (hex) <input id="wallet-login-sig"></label>
+        <button id="wallet-login-go" class="btn primary">Submit</button>
+      </div>
+      <p id="login-error" class="error" hidden></p>
+    </section>
+
+    <!-- The dashboard -->
+    <section id="dashboard" hidden>
+      <div class="row dashboard-top">
+        <span id="actor-line" class="hint"></span>
+        <span id="stepup-line" class="hint"></span>
+        <button id="btn-stepup" class="btn small primary">Step up (fresh approval)</button>
+        <button id="btn-logout" class="btn small ghost">Sign out</button>
+      </div>
+
+      <section class="card">
+        <h2>Applications</h2>
+        <div class="row">
+          <button id="btn-new-app" class="btn primary">New application</button>
+        </div>
+        <div id="new-app-form" hidden class="stacked">
+          <label>Application ID <input id="new-app-id" placeholder="my-meme-coin"></label>
+          <label>Display name <input id="new-app-name" placeholder="My Meme Coin"></label>
+          <label>Topology
+            <select id="new-app-topology">
+              <option value="independent">Independent — each gate grants itself only</option>
+              <option value="hierarchical">Hierarchical — higher tiers grant lower ones</option>
+            </select>
+          </label>
+          <label>Default session length
+            <select id="new-app-ttl">
+              <option value="3600">1 hour</option>
+              <option value="43200">12 hours</option>
+              <option value="86400" selected>1 day (standard website default)</option>
+              <option value="259200">3 days</option>
+              <option value="604800">7 days (community membership)</option>
+              <option value="1209600">14 days</option>
+              <option value="2592000">30 days (enforced maximum)</option>
+            </select>
+          </label>
+          <label>Deployment
+            <select id="new-app-production">
+              <option value="true">Production (test-lane gates cannot be enabled)</option>
+              <option value="false" selected>Test / demo (test-lane gates allowed)</option>
+            </select>
+          </label>
+          <label>Network
+            <select id="new-app-network">
+              <option value="esmeralda" selected>Esmeralda (testnet, byte 38)</option>
+              <option value="localnet">Localnet (byte 16)</option>
+              <option value="igor">Igor</option>
+              <option value="nextnet">Nextnet</option>
+              <option value="stagenet">Stagenet</option>
+              <option value="mainnet">Mainnet</option>
+            </select>
+          </label>
+          <label>Genesis hash (ledger identity, hex) <input id="new-app-genesis" placeholder="the ledger's genesis identity, hex"></label>
+          <button id="new-app-go" class="btn primary">Create application</button>
+        </div>
+        <div id="apps-list"></div>
+      </section>
+
+      <section class="card">
+        <h2>Verified sessions</h2>
+        <p class="hint">Sessions are issued by the bridge on accepted proofs. Revocation is
+        immediate: the bridge honours it on the next access check.</p>
+        <div id="sessions-list"></div>
+      </section>
+
+      <section class="card">
+        <h2>Audit log (latest events)</h2>
+        <div id="audit-list"></div>
+      </section>
+    </section>
+  </section>
+</main>
+<script src="/admin/admin.js"></script>
+</body>
+</html>

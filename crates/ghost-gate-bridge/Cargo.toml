@@ -1,0 +1,46 @@
+[package]
+name = "ghost-gate-bridge"
+description = "Local Ghost Gate wallet bridge: the trusted local half between a relying site and walletd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+ghost-gate-core = { path = "../ghost-gate-core" }
+# The registry: the authoritative policy + session store the bridge reads.
+ghost-gate-registry = { path = "../ghost-gate-registry" }
+ghost-gate-verifier = { path = "../ghost-gate-verifier" }
+tari_template_lib_types = { workspace = true, features = ["std", "serde"] }
+tari_ootle_wallet_crypto = { workspace = true }
+# The ownership-proof message and the Schnorr verification, both the same primitives the wallets
+# themselves use. The domain framing in credential.rs is byte-checked against the reference verifier.
+tari_crypto = { workspace = true }
+# The L1 spend-key signature construction. The same crate the Minotari wallet's key manager uses
+# for `sign_script_message`, so the bridge verifies byte-for-byte what was signed, and the same
+# tari_crypto version (0.23.4) as the whole 6.0.1-pre.2 stack.
+tari_script = "6.0.1-pre.2"
+blake2 = "0.10.6"
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
+# `net` and `io-util` are the only additions to the workspace's tokio feature set, and both are for
+# TcpListener and read/write. There is no web framework here on purpose: the security-relevant behaviour
+# is which request may do what, and that should be readable without tracing a framework's defaults.
+tokio = { workspace = true, features = ["macros", "rt", "net", "io-util"] }
+
+[dev-dependencies]
+# The credential tests sign real ownership proofs, which needs the same primitives the wallets use;
+# server tests need a real, minimal statement for the fake wallet to return.
+tari_crypto = { workspace = true }
+blake2 = "0.10.6"
+# xtm.rs's tests are async.
+tokio = { workspace = true, features = ["macros", "rt", "net", "io-util", "time"] }
+# Turns on the fixture evidence constructors (ConsensusAttestation::fixture) for this crate's tests
+# only. Features are additive, so this affects test builds alone and never a shipped bridge binary.
+ghost-gate-registry = { path = "../ghost-gate-registry", features = ["test-fixtures"] }
+ghost-gate-core = { path = "../ghost-gate-core", features = ["test-fixtures"] }
+

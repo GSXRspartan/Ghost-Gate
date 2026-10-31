@@ -1,0 +1,24 @@
+[package]
+name = "ghost-gate-cbor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# Deliberately isolated: this crate depends on NO Tari Ootle cohort. It decodes the base64 CBOR
+# wire form the post-reset indexer serves (#3100/#3101/#3107/#3110) into a strict, bounded, generic
+# value, so the final reset-compatible release can be adopted by mapping that value to the real
+# engine types without rewriting the rest of Ghost Gate.
+[dependencies]
+# Same minicbor major the v0.42 and v0.47 cohorts resolve, so the decoded wire bytes are read the
+# same way. No derive: this crate drives the low-level decoder directly to bound depth and width.
+# `half` enables the low-level token API (minicbor::data::Token + Decoder::tokens) this crate uses
+# to walk arbitrary CBOR with bounded depth/width; `half` 2.x is already in the workspace lock.
+minicbor = { version = "2.3", default-features = false, features = ["std", "half"] }
+# STANDARD base64 with canonical padding, matching the indexer envelope (ootle_serde::base64).
+base64 = "0.22"
+thiserror = { workspace = true }
+
+[dev-dependencies]
+hex = { workspace = true }

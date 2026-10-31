@@ -1,0 +1,23 @@
+[package]
+name = "ghost-gate-verifier"
+description = "Self-hostable Ghost Gate relying-side library: challenge issuance, commitment observation and session issuing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+ghost-gate-core = { path = "../ghost-gate-core" }
+tari_template_lib_types = { workspace = true, features = ["std"] }
+tari_crypto = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+hex = { workspace = true }
+time = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "net", "io-util"] }
+
+[dev-dependencies]

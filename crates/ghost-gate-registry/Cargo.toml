@@ -1,0 +1,28 @@
+[package]
+name = "ghost-gate-registry"
+description = "The one authoritative store for applications, gate policies, verified sessions and the audit log — shared by the admin plane, the bridge and the integrations"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+ghost-gate-core = { path = "../ghost-gate-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rand = { workspace = true }
+hex = { workspace = true }
+# blake3 1.8.7 is already resolved in the workspace lock; used for policy digests.
+blake3 = "1.8.7"
+
+[features]
+# Re-exposes ghost-gate-core's fixture constructors for tests that need to synthesise consensus
+# evidence (the only way to reach Production before the sidecar client exists). Never enabled in a
+# shipped binary.
+test-fixtures = ["ghost-gate-core/test-fixtures"]
+
+[dev-dependencies]
+# Turns on the fixture constructors for this crate's own tests. Features are additive, so this only
+# affects test builds of the crate.
+ghost-gate-core = { path = "../ghost-gate-core", features = ["test-fixtures"] }

@@ -1,0 +1,32 @@
+# Cloudflare Tunnel configuration for Ghost Gate VPS
+# Copy to /opt/ghost-gate/etc/cloudflared-config.yml
+# Replace TUNNEL_ID and domain names.
+
+tunnel: TUNNEL_ID_HERE
+credentials-file: /opt/ghost-gate/etc/cloudflared-tunnel.json
+
+ingress:
+  # Only the hosted verifier and the Telegram credential routes are public.
+  # The private administrator dashboard on 127.0.0.1:7811 is reached only over SSH forwarding;
+  # never add /admin or its port to this Tunnel configuration.
+  # Rules match paths, not methods; the bridge must still enforce its own authorization.
+  - hostname: bridge.DOMAIN_HERE
+    path: '^/v1/hosted/verify$'
+    service: http://127.0.0.1:7799
+  - hostname: bridge.DOMAIN_HERE
+    path: '^/gate/[A-Za-z0-9_-]+(/challenge|/credential)?$'
+    service: http://127.0.0.1:7799
+    originRequest:
+      noTLSVerify: false
+      connectTimeout: 10s
+
+  # Telegram claim endpoint
+  - hostname: claim.DOMAIN_HERE
+    path: '^/claim$'
+    service: http://127.0.0.1:7808
+    originRequest:
+      noTLSVerify: false
+      connectTimeout: 10s
+
+  # Catch-all: reject unmatched hostnames
+  - service: http_status:404

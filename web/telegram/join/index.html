@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<!-- Canonical directory asset for Cloudflare Assets; keep the legacy join.html source as a
+     compatibility artifact, while Worker aliases fetch this slash-safe path directly. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<!-- Configure exact HTTPS origins before staging; blank values fail closed for cross-origin links. -->
+<!-- <meta name="gg-trusted-bridges" content="https://bridge.your-tunnel-domain.example"> -->
+<!-- <meta name="gg-trusted-claims" content="https://claim.your-tunnel-domain.example"> -->
+<title>Ghost Gate — Telegram verification</title>
+<link rel="stylesheet" href="/lab/lab.css">
+<style>
+  body.vault { background: var(--ink); color: var(--text); font-family: var(--sans); }
+  #app { max-width: 680px; margin: 0 auto; padding: 3rem 1.25rem 5rem; }
+  .proof-box { background: linear-gradient(180deg, var(--panel) 0%, var(--ink-2) 100%);
+    border: 1px solid var(--line); border-radius: 14px; padding: 1.6rem 1.7rem; }
+  .proof-box h2 { color: var(--green); letter-spacing: .16em; font-size: 1.05rem; margin: 0 0 .4rem; }
+  .hint { color: var(--dim); font-size: .88rem; line-height: 1.6; }
+  .proof-steps { list-style: none; counter-reset: s; padding: 0; margin: 1.2rem 0 0; }
+  .proof-steps li { counter-increment: s; display: grid; grid-template-columns: 1.9rem 1fr; gap: .8rem;
+    padding: .65rem 0; border-top: 1px solid var(--line); color: var(--dim); font-size: .88rem; }
+  .proof-steps li::before { content: counter(s); font-family: var(--mono); width: 1.7rem; height: 1.7rem;
+    line-height: 1.7rem; text-align: center; border: 1px solid var(--line); border-radius: 50%; }
+  .proof-steps li.active { color: var(--text); }
+  .proof-steps li.active::before { border-color: var(--green); color: var(--green); box-shadow: 0 0 0 4px var(--green-glow); }
+  .proof-steps li.done::before { background: var(--green); border-color: var(--green); color: var(--ink); content: "✓"; }
+  .status-panel { margin-top: 1rem; padding: 1rem 1.1rem; border: 1px solid rgba(224,106,106,.6);
+    border-radius: 10px; background: rgba(224,106,106,.08); }
+  .status-panel h3 { color: var(--bad); margin: 0 0 .4rem; font-size: 1rem; }
+  .status-panel p { margin: 0; line-height: 1.5; }
+  .status-panel details { margin-top: .75rem; color: var(--dim); font-size: .82rem; }
+  .status-panel code { display:block; margin-top:.4rem; white-space:normal; overflow-wrap:anywhere; }
+  .status-panel .cta { display: inline-block; margin-top: .85rem; }
+  .tg-head a { color: var(--green); text-decoration: none; font-size: .85rem; letter-spacing: .06em; }
+</style>
+</head>
+<body class="vault">
+<div id="vignette" aria-hidden="true"></div>
+<p class="tg-head" style="max-width:680px;margin:2rem auto 0"><a href="/lab">← Privacy Lab</a></p>
+<main id="app">
+  <section class="proof-box">
+    <h2 style="letter-spacing:.2em">Telegram verification</h2>
+    <p class="hint" id="tg-line">Reading your join link…</p>
+    <ol class="proof-steps" id="tg-steps">
+      <li data-step="challenge">The gate issues a fresh, single-use challenge</li>
+      <li data-step="output">Your wallet creates the proof output — public and permanent (approval in your wallet)</li>
+      <li data-step="sign">Your wallet signs the gate's challenge</li>
+      <li data-step="verify">The bridge verifies against chain state</li>
+      <li data-step="claim">A private-group join request is authorized</li>
+    </ol>
+    <section class="status-panel" id="tg-error" role="alert" hidden>
+      <h3 id="tg-error-heading">Verification unavailable</h3>
+      <p id="tg-error-message"></p>
+      <details id="tg-error-detail" hidden>
+        <summary>Technical details</summary>
+        <code id="tg-error-technical"></code>
+      </details>
+      <a class="cta" id="tg-error-action" href="/bot" target="_blank" rel="noopener noreferrer" hidden>Open Telegram instructions</a>
+    </section>
+    <p class="hint" style="margin-top:1rem">
+      Ghost Gate verifies that your wallet meets the required minimum without asking for your seed phrase,
+      private keys, or exact balance.
+      <br><br>
+      For this test gate, Sapient may ask you to reveal enough testnet tTARI to satisfy the 100 tTARI
+      requirement and then sign the Ghost Gate challenge.
+      <br><br>
+      After verification, the Telegram bot independently checks the result before approving the pending
+      join request.
+      <br><br>
+      Testnet only.
+    </p>
+  </section>
+</main>
+<script src="https://universe.tari.mw/tari-connector.js"></script>
+<script type="module" src="/js/ghost/provider.js"></script>
+<script type="module" src="/telegram/claim.js"></script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+[package]
+name = "ghost-gate-telegram"
+description = "Telegram token-gating POC: membership granted only by fresh, bridge-verified Ghost Gate proofs, expiring by design"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+# The verifier is the bridge — the bot is only its client. It never verifies a proof itself and
+# never holds wallet material of any kind.
+reqwest = { version = "0.12", features = ["json"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "net", "io-util", "time"] }
+rand = { workspace = true }
+hex = { workspace = true }
+sha2 = { workspace = true }
+
+[[bin]]
+name = "ghost-gate-telegram"
+path = "src/main.rs"

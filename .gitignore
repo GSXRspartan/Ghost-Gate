@@ -1,0 +1,55 @@
+# Build artifacts
+target/
+_cargo-target/
+_cargo-target-*/
+
+# Credentials, wallets, local deployment configuration, and private backups
+.env
+.env.*
+*.pem
+*.p12
+*.pfx
+*.key
+*.seed
+*.mnemonic
+keys.json
+credentials/
+secrets/
+deploy/*.env
+deploy/*.env.*
+cloudflare/wrangler.staging.toml
+*.sqlite
+*.sqlite3
+*.db
+.ghost-gate/
+.ghost-gate-*/
+.tari-*/
+browser-profile*/
+.chrome-profile/
+
+# Generated packages, staging assets, logs, and scratch space
+*.tar
+*.tar.gz
+*.bak
+*.backup
+staging-web/
+staging-web.pre-*/
+artifacts/
+temp/
+/tmp/
+*.log
+npm-debug.log*
+node_modules/
+.wrangler/
+.pnpm-store/
+
+# Machine-local build/source configuration
+.cargo/
+.tari-v047-reference/
+
+# Editor / OS noise
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

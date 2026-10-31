@@ -1,0 +1,113 @@
+/* Ghost Gate administrator dashboard — plain, legible, no frameworks. */
+
+/* Self-contained palette. The dashboard used to pull the bridge's /app.css, which is not an asset
+   of THIS server (the request came back 401) and defined none of the variables these rules use
+   anyway. Everything the page needs is declared here, so the only stylesheets served are the ones
+   the admin plane itself embeds. */
+:root {
+  color-scheme: dark;
+  --bg: #0b0d12;
+  --card: #141822;
+  --line: #232a38;
+  --text: #e7ecf3;
+  --text-dim: #8b97ab;
+  --ember: #e0b96a;
+  --ok: #7ee0c0;
+  --mono: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+body {
+  margin: 0;
+  padding: 0 1rem 1rem;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+
+.admin-head h1 { margin: 1.2rem 0 .4rem; letter-spacing: .08em; }
+.admin-accent { color: var(--ember); }
+#admin-root { max-width: 1100px; margin: 0 auto; padding: 1rem 1.2rem 4rem; }
+.admin-status { min-height: 1.4em; color: var(--text-dim); }
+
+.card {
+  background: rgba(20,22,30,.8); border: 1px solid #343a4c; border-radius: 14px;
+  padding: 1.1rem 1.2rem; margin: 1.2rem 0;
+}
+.card h2 { margin-top: 0; letter-spacing: .12em; text-transform: uppercase; font-size: .95rem; }
+.row { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; margin: .6rem 0; }
+.stacked { display: grid; gap: .5rem; margin: .6rem 0; }
+label { display: grid; gap: .25rem; font-size: .9rem; color: var(--text-dim); }
+input, select {
+  background: #14161d; border: 1px solid #3a4052; color: var(--text); border-radius: 8px;
+  padding: .45rem .6rem; font: inherit; max-width: 460px;
+}
+table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+th, td { text-align: left; padding: .4rem .5rem; border-bottom: 1px solid #2a2f3c; vertical-align: top; }
+th { color: var(--text-dim); font-weight: 600; }
+code { color: #9aa4c0; }
+.mono { font-family: ui-monospace, monospace; font-size: .8rem; }
+.ok { color: var(--ok); }
+.bad { color: #ff8080; }
+.gate-card {
+  border: 1px solid #3a4052; border-radius: 10px; padding: .7rem .8rem; margin: .5rem 0;
+  background: #14161d;
+}
+.gate-card .row { margin: .3rem 0; }
+.gate-card input { max-width: 260px; }
+.gate-actions { display: flex; gap: .4rem; flex-wrap: wrap; }
+.hint { color: var(--text-dim); }
+.error { color: #ff8080; }
+.published { color: var(--ok); }
+.draft { color: #c9b26b; }
+.badge {
+  display: inline-block; padding: .05rem .45rem; border-radius: 999px; font-size: .75rem;
+  border: 1px solid #3a4052; color: var(--text-dim);
+}
+.badge.test { border-color: #7a5a2a; color: #e0b96a; }
+.badge.enabled { border-color: #2a6a3a; color: #8ee0a0; }
+.badge.tier-prod { border-color: #2a6a3a; color: #8ee0a0; }
+.badge.tier-testnet { border-color: #5a6a2a; color: #e0d07a; }
+.badge.tier-dev { border-color: #6a3a2a; color: #e07a7a; }
+.field-note { display: block; color: var(--text-dim); font-size: .8rem; margin-top: .2rem; }
+/* A gate row carries an address, a raw threshold and a version: it cannot be squeezed into a
+   phone without either wrapping or scrolling. Wrap long values, and let the table scroll inside
+   its own box instead of pushing the whole page sideways. */
+.mono { overflow-wrap: anywhere; word-break: break-word; }
+td, th { overflow-wrap: anywhere; }
+/* Long single-line values (a credential id, an address, a reason) must wrap rather than widen the
+   page: an operator on a phone should never have to scroll sideways to read the dashboard. */
+.hint, .admin-status, label, p { overflow-wrap: anywhere; }
+
+@media (max-width: 720px) {
+  #admin-root { padding: .8rem .7rem 3rem; }
+  /* The gate table has nine columns of addresses and thresholds: it scrolls inside its own box.
+     max-width:100% is what actually stops it pushing the page wide — a block table sizes to its
+     content otherwise, however much overflow-x says. */
+  table { font-size: .74rem; display: block; max-width: 100%; overflow-x: auto; white-space: nowrap; }
+  table td, table th { white-space: nowrap; }
+  #admin-root, .gate-card, .card { max-width: 100%; overflow-x: hidden; }
+  input, select { max-width: 100%; width: 100%; box-sizing: border-box; }
+  .gate-card { padding: .8rem .7rem; }
+  .row { flex-wrap: wrap; }
+}
+
+/* Tier wiring rows: one line per gate, one checkbox per gate it opens. */
+.tier-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  padding: 6px 0;
+  border-top: 1px solid var(--line, rgba(255, 255, 255, 0.08));
+  font-family: var(--mono, monospace);
+  font-size: 12px;
+}
+.tier-check {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  padding: 2px 6px;
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.12));
+  border-radius: 6px;
+  cursor: pointer;
+}

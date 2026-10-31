@@ -1,0 +1,944 @@
+Ghost Gate -- wallet minimum-value-promise patch
+
+Extends tari-ootle v0.42.0 so a wallet transfer output can declare the minimum value promise
+its bulletproof proves. Stock walletd hardcodes this to 0, which makes a threshold access
+proof unreachable: there is no way for a wallet to build the output the proof is about.
+
+Applying:  git apply -p1 wallet-mvp.patch   (from a clean v0.42.0 checkout)
+--- a/crates/wallet/sdk/src/apis/stealth_transfer/params.rs
++++ b/crates/wallet/sdk/src/apis/stealth_transfer/params.rs
+@@ -96,6 +96,20 @@ impl StealthTransferParams {
+                     param: "pay_to",
+                     reason,
+                 })?;
++
++            // A promise above the hidden value is unprovable: the bulletproof attests
++            // value ∈ [mvp, 2^64), so an mvp above the value makes the proof unsatisfiable. Refuse it
++            // here, before any input is locked, so the caller learns why rather than seeing the
++            // transaction rejected by a validator later.
++            if output.minimum_value_promise > output.blinded_amount {
++                return Err(StealthTransferApiError::InvalidParameter {
++                    param: "minimum_value_promise",
++                    reason: format!(
++                        "minimum_value_promise ({}) must not exceed blinded_amount ({})",
++                        output.minimum_value_promise, output.blinded_amount
++                    ),
++                });
++            }
+         }
+ 
+         Ok(())
+@@ -125,6 +139,18 @@ pub struct TransferOutput {
+     /// Optional memo to include a memo in the output. This memo is encrypted and can only be read by the recipient.
+     pub memo: Option<Memo>,
+     pub pay_to: PayTo,
++    /// Public lower bound on the blinded output's hidden value.
++    ///
++    /// The output's bulletproof attests its value lies in `[minimum_value_promise, 2^64)`, so this
++    /// publishes a floor on the amount without revealing it. It defaults to zero, which is what an
++    /// ordinary transfer wants: no public statement about the amount.
++    ///
++    /// Must not exceed `blinded_amount` — a promise above the value cannot be proven, and the
++    /// aggregated bulletproof would be rejected at the validator rather than here.
++    #[serde(default)]
++    #[serde(deserialize_with = "ootle_serde::str_number::deserialize")]
++    #[cfg_attr(feature = "ts", ts(type = "number | bigint | string"))]
++    pub minimum_value_promise: u64,
+ }
+ 
+ impl TransferOutput {
+@@ -172,6 +198,7 @@ impl<'a> TryFrom<&'a TransferOutput> for StealthOutputToCreate<'a> {
+             amount: value.blinded_amount,
+             memo: value.memo.as_ref(),
+             pay_to: value.pay_to.clone(),
++            minimum_value_promise: value.minimum_value_promise,
+         })
+     }
+ }
+@@ -271,6 +298,7 @@ mod tests {
+                 blinded_amount,
+                 memo: None,
+                 pay_to,
++                minimum_value_promise: 0,
+             }],
+             badge_usage: BadgeUsage::None,
+             resource_address: STEALTH_TARI_RESOURCE_ADDRESS,
+@@ -340,3 +368,13 @@ mod tests {
+             .expect("distinct condition leaves form a tree");
+     }
+ }
++
++/// Tests for the caller-requested minimum value promise, kept in their own file because they reach
++/// past parameter validation into the built statement and the engine's range-proof validator.
++///
++/// The explicit path is required so that this resolves to `minimum_value_promise_tests.rs` beside
++/// `params.rs`. Without it, a `mod` declared inside an inline module is looked for in a directory
++/// named after the enclosing inline module chain, which does not exist here.
++#[cfg(test)]
++#[path = "minimum_value_promise_tests.rs"]
++mod minimum_value_promise_tests;
+--- a/crates/wallet/sdk/src/apis/stealth_transfer/types.rs
++++ b/crates/wallet/sdk/src/apis/stealth_transfer/types.rs
+@@ -83,6 +83,11 @@ pub struct StealthOutputToCreate<'a> {
+     pub pay_to: PayTo,
+     pub amount: u64,
+     pub memo: Option<&'a Memo>,
++    /// Public lower bound on this output's hidden value, covered by its bulletproof.
++    ///
++    /// Zero publishes nothing, which is what an ordinary transfer wants. A non-zero value commits, in
++    /// zero knowledge, to holding at least that much.
++    pub minimum_value_promise: u64,
+ }
+ 
+ #[derive(Debug)]
+--- a/crates/wallet/sdk/src/apis/stealth_transfer/api.rs
++++ b/crates/wallet/sdk/src/apis/stealth_transfer/api.rs
+@@ -404,6 +404,7 @@ impl<'a, TSpec: WalletSdkSpec> StealthTransferApi<'a, TSpec> {
+                 amount: amt,
+                 memo: None,
+                 pay_to: PayTo::StealthPublicKey,
++                minimum_value_promise: 0,
+             });
+ 
+         // Figure out which signing key to use - if there are revealed funds, we need to use an account
+@@ -718,6 +719,9 @@ impl<'a, TSpec: WalletSdkSpec> StealthTransferApi<'a, TSpec> {
+                     })?,
+                 memo: None,
+                 pay_to: PayTo::StealthPublicKey,
++                // Change carries no public lower bound: it is the remainder, and publishing one
++                // would leak a bound on how much the sender was holding.
++                minimum_value_promise: 0,
+             });
+ 
+             // Merged, the fee is drawn from this statement's revealed remainder alongside any revealed
+--- a/crates/wallet/sdk/src/apis/stealth_outputs.rs
++++ b/crates/wallet/sdk/src/apis/stealth_outputs.rs
+@@ -934,7 +934,19 @@ impl<'a, TSpec: WalletSdkSpec> StealthOutputsApi<'a, TSpec> {
+         resource_view_key: Option<RistrettoPublicKey>,
+         memo: Option<&Memo>,
+         pay_to: PayTo,
++        minimum_value_promise: u64,
+     ) -> Result<StealthOutputWitness, StealthOutputsApiError> {
++        // The bulletproof attests value ∈ [mvp, 2^64), so a promise above the value leaves the
++        // statement unsatisfiable. Rejecting here reports the caller's mistake against the field
++        // they set, rather than letting the transaction be refused by a validator with no
++        // indication of which output was at fault.
++        if minimum_value_promise > amount {
++            return Err(StealthOutputsApiError::InvalidParameter {
++                param: "minimum_value_promise",
++                reason: format!("minimum_value_promise ({minimum_value_promise}) must not exceed amount ({amount})"),
++            });
++        }
++
+         let mask = self.key_manager_api.next_key(KeyBranch::StealthMask)?;
+ 
+         let (nonce_secret, public_nonce) = RistrettoPublicKey::random_keypair(&mut rand::rng());
+@@ -953,14 +965,14 @@ impl<'a, TSpec: WalletSdkSpec> StealthOutputsApi<'a, TSpec> {
+                 .to_byte_type()
+         })?;
+ 
+-        let witness = OutputWitness {
++let witness = OutputWitness {
+             amount,
+             mask: mask.key,
+             sender_public_nonce: public_nonce,
++            minimum_value_promise,
+             encrypted_data,
+-            minimum_value_promise: 0,
+             resource_view_key,
+-        };
++        };
+ 
+         let derived_tag = self.crypto_api.derive_stealth_output_tag(
+             destination.network(),
+@@ -995,6 +1007,7 @@ impl<'a, TSpec: WalletSdkSpec> StealthOutputsApi<'a, TSpec> {
+                     params.resource_view_key.clone(),
+                     output.memo,
+                     output.pay_to,
++                    output.minimum_value_promise,
+                 )
+             })
+             .collect::<Result<Vec<_>, _>>()?;
+--- /dev/null
++++ b/crates/wallet/sdk/src/apis/stealth_transfer/minimum_value_promise_tests.rs
+@@ -0,0 +1,373 @@
++//   Copyright 2026 The Tari Project
++//   SPDX-License-Identifier: BSD-3-Clause
++
++//! Tests for the caller-requested `minimum_value_promise` on a wallet transfer output.
++//!
++//! The promise is a public lower bound on a blinded output's hidden value, covered by that output's
++//! bulletproof. Zero publishes nothing and is what an ordinary transfer wants. A non-zero value lets
++//! a caller commit, in zero knowledge, to holding at least that much — which is what a threshold
++//! access proof needs and what an ordinary transfer cannot express.
++
++use ootle_byte_type::ToByteType;
++use tari_crypto::{
++    keys::{PublicKey as _, SecretKey as _},
++    ristretto::{RistrettoPublicKey, RistrettoSecretKey},
++};
++use tari_engine_types::stealth::validate_stealth_outputs_statement;
++use tari_ootle_wallet_crypto::{stealth, MaskAndValue, OutputWitness, StealthInputWitness, StealthOutputWitness};
++use tari_template_lib::types::{
++    constants::STEALTH_TARI_RESOURCE_ADDRESS,
++    crypto::UtxoTag,
++    stealth::{SpendAuthorization, StealthTransferStatement},
++    Amount,
++    EncryptedData,
++};
++
++use super::*;
++
++const NETWORK: Network = Network::LocalNet;
++
++fn address() -> OotleAddress {
++    let (_, view_only) = RistrettoPublicKey::random_keypair(&mut rand::rng());
++    let (_, account) = RistrettoPublicKey::random_keypair(&mut rand::rng());
++    OotleAddress::new(NETWORK, view_only.to_byte_type(), account.to_byte_type())
++}
++
++fn output(blinded_amount: u64, minimum_value_promise: u64) -> TransferOutput {
++    TransferOutput {
++        address: address(),
++        revealed_amount: Amount::zero(),
++        blinded_amount,
++        memo: None,
++        pay_to: PayTo::StealthPublicKey,
++        minimum_value_promise,
++    }
++}
++
++fn params_with(blinded_amount: u64, minimum_value_promise: u64) -> StealthTransferParams {
++    StealthTransferParams {
++        max_epoch: Epoch(1),
++        fee_params: TransferFeeParams::new(UtxoInputSelection::PreferConfidential),
++        input_selection: UtxoInputSelection::PreferConfidential,
++        outputs: vec![output(blinded_amount, minimum_value_promise)],
++        badge_usage: BadgeUsage::None,
++        resource_address: STEALTH_TARI_RESOURCE_ADDRESS,
++        max_fee: 1000,
++        is_dry_run: false,
++    }
++}
++
++// --------------------------------------------------------------------------------------------
++// Backward compatibility
++// --------------------------------------------------------------------------------------------
++
++/// A caller that does not mention the field at all still gets zero: the promise is opt-in, so
++/// existing RPC clients keep working and keep publishing nothing.
++#[test]
++fn an_omitted_promise_defaults_to_zero() {
++    let json = serde_json::json!({
++        "address": address().to_string(),
++        "revealed_amount": "0",
++        "blinded_amount": "100",
++        "memo": null,
++        "pay_to": { "StealthPublicKey": null },
++    });
++    let parsed: TransferOutput = serde_json::from_value(json).expect("a caller omitting the field must still parse");
++    assert_eq!(parsed.minimum_value_promise, 0);
++}
++
++/// A promise as a JSON string must parse, matching how every other u64 in this type is carried.
++#[test]
++fn a_string_encoded_promise_parses() {
++    let json = serde_json::json!({
++        "address": address().to_string(),
++        "revealed_amount": "0",
++        "blinded_amount": "100",
++        "minimum_value_promise": "10000",
++        "memo": null,
++        "pay_to": { "StealthPublicKey": null },
++    });
++    let parsed: TransferOutput = serde_json::from_value(json).expect("a string-encoded u64 must parse");
++    assert_eq!(parsed.minimum_value_promise, 10_000);
++}
++
++// --------------------------------------------------------------------------------------------
++// Validation
++// --------------------------------------------------------------------------------------------
++
++/// Zero leaves existing behaviour untouched: this is the field every current caller gets.
++#[test]
++fn a_zero_promise_is_accepted() {
++    params_with(100, 0)
++        .validate(NETWORK)
++        .expect("zero promises no lower bound and cannot be unsatisfiable");
++}
++
++/// A promise below the value is exactly the intended use.
++#[test]
++fn a_promise_below_the_amount_is_accepted() {
++    params_with(30_000, 10_000)
++        .validate(NETWORK)
++        .expect("a promise below the value is provable");
++}
++
++/// A promise equal to the value is the tightest satisfiable bound.
++#[test]
++fn a_promise_equal_to_the_amount_is_accepted() {
++    params_with(10_000, 10_000)
++        .validate(NETWORK)
++        .expect("value ∈ [mvp, 2^64) is satisfied at the boundary");
++}
++
++/// A promise above the value cannot be proven: the bulletproof would attest value ∈ [mvp, 2^64)
++/// with no value satisfying it, so no validator could ever accept it. Rejected here, before any
++/// input is locked, and reported against the field the caller set.
++#[test]
++fn a_promise_above_the_amount_is_rejected_before_submission() {
++    let err = params_with(10_000, 10_001)
++        .validate(NETWORK)
++        .expect_err("an unsatisfiable promise must be rejected");
++    match err {
++        StealthTransferApiError::InvalidParameter { param, reason } => {
++            assert_eq!(param, "minimum_value_promise");
++            assert!(reason.contains("10001"), "{reason}");
++            assert!(reason.contains("10000"), "{reason}");
++        },
++        other => panic!("expected InvalidParameter naming minimum_value_promise, got: {other}"),
++    }
++}
++
++/// The bound is against the blinded amount alone: a revealed amount is already public, so allowing
++/// it to carry the promise would let a caller inflate a bound about hidden funds with money that
++/// is not hidden.
++#[test]
++fn a_promise_is_bounded_by_the_blinded_amount_not_the_total() {
++    let params = StealthTransferParams {
++        outputs: vec![TransferOutput {
++            revealed_amount: Amount::from(1_000_000u64),
++            ..output(100, 500)
++        }],
++        ..params_with(100, 0)
++    };
++    let err = params
++        .validate(NETWORK)
++        .expect_err("a revealed amount must not be able to carry the promise");
++    assert!(matches!(err, StealthTransferApiError::InvalidParameter {
++        param: "minimum_value_promise",
++        ..
++    }));
++}
++
++/// The largest promise is still just a `u64` comparison — no arithmetic, so no overflow path.
++#[test]
++fn the_largest_promise_is_bounded_by_the_amount() {
++    let err = params_with(10_000, u64::MAX)
++        .validate(NETWORK)
++        .expect_err("u64::MAX cannot be bounded by 10_000");
++    assert!(matches!(err, StealthTransferApiError::InvalidParameter {
++        param: "minimum_value_promise",
++        ..
++    }));
++}
++
++/// A revealed-only output carries no hidden value, so a promise on one is meaningless and the
++/// blinded-amount bound of zero is what applies.
++#[test]
++fn a_promise_on_a_revealed_only_output_is_rejected() {
++    let params = StealthTransferParams {
++        outputs: vec![TransferOutput {
++            revealed_amount: Amount::from(100u64),
++            blinded_amount: 0,
++            ..output(0, 1)
++        }],
++        ..params_with(0, 0)
++    };
++    assert!(params.validate(NETWORK).is_err());
++}
++
++// --------------------------------------------------------------------------------------------
++// The promise reaches the statement
++// --------------------------------------------------------------------------------------------
++
++/// A key-path output witness worth `amount` promising at least `promise`.
++fn promised_output(amount: u64, promise: u64) -> StealthOutputWitness {
++    let mask = RistrettoSecretKey::random(&mut rand::rng());
++    StealthOutputWitness {
++        witness: OutputWitness {
++            amount,
++            mask: mask.clone(),
++            sender_public_nonce: RistrettoPublicKey::random_keypair(&mut rand::rng()).1,
++            minimum_value_promise: promise,
++            encrypted_data: EncryptedData::try_from(vec![0u8; EncryptedData::min_size()]).unwrap(),
++            resource_view_key: None,
++        },
++        auth: SpendAuthorization::Key(RistrettoPublicKey::from_secret_key(&mask).to_byte_type()),
++        tag: UtxoTag::new(0),
++    }
++}
++
++/// A single-input statement whose output promises `promise`, built the way
++/// `create_output_witness` builds one.
++fn promised_statement(amount: u64, promise: u64) -> StealthTransferStatement {
++    promised_statement_from_inputs(amount, promise, &[amount])
++}
++
++/// The same, funded by several fragmented inputs.
++fn promised_statement_from_inputs(amount: u64, promise: u64, input_values: &[u64]) -> StealthTransferStatement {
++    let out = promised_output(amount, promise);
++    let inputs: Vec<StealthInputWitness> = input_values
++        .iter()
++        .map(|value| {
++            StealthInputWitness::new(MaskAndValue {
++                mask: RistrettoSecretKey::random(&mut rand::rng()),
++                value: *value,
++            })
++        })
++        .collect();
++    stealth::create_transfer_statement(inputs, Amount::zero(), [&out], None)
++        .expect("the promise is below the value, so the statement builds")
++}
++
++/// The promise must reach both the statement's public field and the bulletproof. A witness that
++/// carried the value but a statement that dropped it would publish a bound nothing backs.
++#[test]
++fn the_generated_statement_carries_the_requested_promise() {
++    let statement = promised_statement(30_000, 10_000);
++    assert_eq!(statement.outputs_statement.outputs.len(), 1);
++    assert_eq!(
++        statement.outputs_statement.outputs[0].output.minimum_value_promise, 10_000,
++        "the caller-requested promise must reach the statement's public field"
++    );
++}
++
++/// A promised statement must pass the engine's own range-proof validation, or the promise is
++/// decorative.
++#[test]
++fn a_promised_statement_validates_against_the_engine() {
++    let statement = promised_statement(30_000, 10_000);
++    validate_stealth_outputs_statement(&statement.outputs_statement, None)
++        .expect("the engine must accept a proof that covers the promised bound");
++}
++
++/// The promise is bound into the bulletproof. Changing it after generation must invalidate the
++/// proof in both directions: lowering would let a sub-threshold holder pass, raising would be a
++/// forgery.
++#[test]
++fn mutating_the_promise_after_generation_invalidates_the_proof() {
++    let mut statement = promised_statement(30_000, 10_000);
++
++    statement.outputs_statement.outputs[0].output.minimum_value_promise = 9_999;
++    assert!(
++        validate_stealth_outputs_statement(&statement.outputs_statement, None).is_err(),
++        "lowering the promise must invalidate the range proof"
++    );
++
++    statement.outputs_statement.outputs[0].output.minimum_value_promise = 40_000;
++    assert!(
++        validate_stealth_outputs_statement(&statement.outputs_statement, None).is_err(),
++        "raising the promise must invalidate the range proof"
++    );
++}
++
++/// The promised value stays hidden. The output body exposes a commitment and the promise, never the
++/// amount, so two holders clearing the same bound produce indistinguishable public data.
++#[test]
++fn a_promised_statement_reveals_no_amount() {
++    let small = promised_statement(10_000, 10_000);
++    let large = promised_statement(9_000_000, 10_000);
++
++    for statement in [&small, &large] {
++        assert!(statement.outputs_statement.revealed_output.is_none());
++        assert!(statement.inputs_statement.revealed_amount.is_zero());
++    }
++
++    // A 900x difference in hidden value, identical public bound.
++    assert_eq!(
++        small.outputs_statement.outputs[0].output.minimum_value_promise,
++        large.outputs_statement.outputs[0].output.minimum_value_promise
++    );
++    assert_ne!(
++        small.outputs_statement.outputs[0].output.commitment, large.outputs_statement.outputs[0].output.commitment,
++        "the commitments differ, so the amounts are not equal"
++    );
++}
++
++/// Fragmented inputs are unaffected: the promise is a property of the output, not of how many
++/// inputs funded it.
++#[test]
++fn fragmented_inputs_carry_the_promise_unchanged() {
++    let statement = promised_statement_from_inputs(12_300, 10_000, &[3_100, 2_900, 4_800, 1_500]);
++    assert_eq!(statement.inputs_statement.inputs.len(), 4);
++    assert_eq!(statement.outputs_statement.outputs.len(), 1);
++    assert_eq!(
++        statement.outputs_statement.outputs[0].output.minimum_value_promise, 10_000,
++        "one promise, four inputs"
++    );
++    validate_stealth_outputs_statement(&statement.outputs_statement, None)
++        .expect("a promised output from fragmented inputs must still validate");
++}
++
++/// `TryFrom<&TransferOutput>` must carry the field, or the RPC path would silently drop it.
++#[test]
++fn the_rpc_conversion_carries_the_promise() {
++    // The conversion borrows (`StealthOutputToCreate<'a>` holds `memo: Option<&'a Memo>`), so the
++    // source has to outlive it — binding the temporary to a local first.
++    let requested = output(30_000, 10_000);
++    let converted = StealthOutputToCreate::try_from(&requested).expect("conversion");
++    assert_eq!(converted.minimum_value_promise, 10_000);
++    assert_eq!(converted.amount, 30_000);
++}
++
++/// Nothing on this path returns key material. The promise is a public field on a witness whose
++/// secret parts (mask, and the spend key the owner holds) never appear in the statement the caller
++/// receives, so the caller can request a bound without being able to spend the output.
++#[test]
++fn the_statement_carries_no_secret_material() {
++    let statement = promised_statement(30_000, 10_000);
++    let encoded = tari_bor::encode(&statement).expect("statement encodes");
++    let decoded: StealthTransferStatement = tari_bor::decode(&encoded).expect("round trip");
++
++    assert_eq!(decoded, statement);
++    for output in &decoded.outputs_statement.outputs {
++        // Only public forms are present. A mask would let anyone decrypt the output; a spend secret
++        // would let anyone spend it.
++        let _: &tari_template_lib::types::crypto::PedersenCommitmentBytes = &output.output.commitment;
++        let _: &tari_template_lib::types::crypto::RistrettoPublicKeyBytes = &output.output.sender_public_nonce;
++        let _: &EncryptedData = &output.output.encrypted_data;
++        assert!(
++            matches!(output.auth, SpendAuthorization::Key(_)),
++            "a key-path output's auth is the public spend key, never its secret half"
++        );
++    }
++}
++
++/// Two outputs may carry different promises, so a caller could split funds across bounds. Asserted
++/// so that a future single-value shortcut cannot silently collapse them.
++#[test]
++fn per_output_promises_are_independent() {
++    let a = promised_output(20_000, 5_000);
++    let b = promised_output(10_000, 10_000);
++    assert_eq!(a.witness.minimum_value_promise, 5_000);
++    assert_eq!(b.witness.minimum_value_promise, 10_000);
++
++    let statement = stealth::create_transfer_statement(
++        [StealthInputWitness::new(MaskAndValue {
++            mask: RistrettoSecretKey::random(&mut rand::rng()),
++            value: 30_000,
++        })],
++        Amount::zero(),
++        [&a, &b],
++        None,
++    )
++    .expect("statement builds");
++
++    let promises: Vec<u64> = statement
++        .outputs_statement
++        .outputs
++        .iter()
++        .map(|o| o.output.minimum_value_promise)
++        .collect();
++    assert_eq!(promises, vec![5_000, 10_000]);
++    validate_stealth_outputs_statement(&statement.outputs_statement, None)
++        .expect("both promises are covered by the aggregated proof");
++}
+--- a/applications/tari_walletd/src/handlers/accounts.rs
++++ b/applications/tari_walletd/src/handlers/accounts.rs
+@@ -660,6 +660,8 @@ pub(crate) async fn execute_claim_burn(
+             amount: final_amount,
+             mask: mask.key,
+             sender_public_nonce: output_public_nonce.clone(),
++            // Free test coins carry no promise: the claim's value is already public, so a bound
++            // would add nothing.
+             minimum_value_promise: 0,
+             encrypted_data,
+             resource_view_key: None,
+@@ -1313,6 +1315,7 @@ pub async fn handle_stealth_transfer(
+                     revealed_amount: transfer.revealed_output_amount,
+                     memo: Some(memo),
+                     pay_to: transfer.pay_to,
++                    minimum_value_promise: 0,
+                 });
+             }
+ 
+@@ -1341,6 +1344,7 @@ pub async fn handle_stealth_transfer(
+                         revealed_amount: transfer.revealed_output_amount,
+                         memo: Some(memo),
+                         pay_to: transfer.pay_to,
++                        minimum_value_promise: 0,
+                     })
+                 },
+                 None => Ok(TransferOutput {
+@@ -1349,6 +1353,7 @@ pub async fn handle_stealth_transfer(
+                     revealed_amount: transfer.revealed_output_amount,
+                     memo: transfer.output_memo,
+                     pay_to: transfer.pay_to,
++                    minimum_value_promise: 0,
+                 }),
+             }
+         })
+@@ -1684,6 +1689,19 @@ pub async fn handle_create_stealth_transfer_statement(
+             output
+                 .validate_pay_to()
+                 .map_err(|reason| invalid_params("pay_to", Some(reason)))?;
++
++            // A promise above the output's value leaves the bulletproof unsatisfiable, so the
++            // statement could never be accepted by a validator. Reject the request before locking
++            // anything, naming the field the caller set.
++            if output.minimum_value_promise > output.blinded_amount {
++                return Err(invalid_params(
++                    "minimum_value_promise",
++                    Some(format!(
++                        "minimum_value_promise ({}) must not exceed blinded_amount ({})",
++                        output.minimum_value_promise, output.blinded_amount
++                    )),
++                ));
++            }
+         }
+ 
+         let amount_to_spend = req.total_output_amount();
+@@ -2191,6 +2209,11 @@ mod fee_estimate_step_tests {
+ 
+ #[cfg(test)]
+ mod create_stealth_transfer_statement_handler_tests {
++    // Reaches past parameter validation into the statement the handler actually builds, so it lives
++    // in its own file rather than growing an already long module. Resolved relative to this file's
++    // directory extended by this inline module, hence the matching subdirectory.
++    mod mvp_integration_tests;
++
+     use std::str::FromStr;
+ 
+     use axum_extra::headers::{Authorization, authorization::Bearer};
+@@ -2387,6 +2410,7 @@ mod create_stealth_transfer_statement_handler_tests {
+                 None,
+                 None,
+                 PayTo::StealthPublicKey,
++                0,
+             )
+             .unwrap();
+         let model = StealthOutputModel {
+@@ -2534,6 +2558,7 @@ mod create_stealth_transfer_statement_handler_tests {
+                     blinded_amount: 300,
+                     memo: None,
+                     pay_to: PayTo::StealthPublicKey,
++                    minimum_value_promise: 0,
+                 }],
+             }],
+         };
+@@ -2589,6 +2614,7 @@ mod create_stealth_transfer_statement_handler_tests {
+                     blinded_amount: 40,
+                     memo: None,
+                     pay_to: PayTo::StealthPublicKey,
++                    minimum_value_promise: 0,
+                 }],
+             }],
+         };
+@@ -2694,6 +2720,7 @@ mod create_stealth_transfer_statement_handler_tests {
+                     blinded_amount: 250,
+                     memo: None,
+                     pay_to: PayTo::Conditions(conditions),
++                    minimum_value_promise: 0,
+                 }],
+             }],
+         };
+@@ -2798,6 +2825,7 @@ mod create_stealth_transfer_statement_handler_tests {
+                     blinded_amount: 100,
+                     memo: None,
+                     pay_to: PayTo::Conditions(conditions),
++                    minimum_value_promise: 0,
+                 }],
+             }],
+         }
+--- /dev/null
++++ b/applications/tari_walletd/src/handlers/accounts/create_stealth_transfer_statement_handler_tests/mvp_integration_tests.rs
+@@ -0,0 +1,275 @@
++//   Copyright 2026 The Tari Project
++//   SPDX-License-Identifier: BSD-3-Clause
++
++//! Wallet-level tests for a minimum-value-promise-bearing output requested through the normal
++//! statement RPC.
++//!
++//! The question is whether a relying site can get the output a threshold access proof needs out of an
++//! unmodified request/response cycle. Everything runs against a real wallet — a real SQLite store, a
++//! real key manager, a real cipher seed, a real account with an owner key — with only the indexer
++//! network interface offline, because the handler resolves its inputs locally.
++//!
++//! What is established here:
++//! - the caller-requested promise reaches the statement the wallet hands back;
++//! - the resulting statement is one the engine's own transfer validator accepts;
++//! - the inputs are selected, locked and left locked under the returned lock;
++//! - the wallet returns signer metadata and no key material;
++//! - an unsatisfiable promise is refused before any lock is taken.
++//!
++//! Acceptance by a live validator is a separate question, and is not answered here.
++
++use tari_template_lib_types::stealth::SpendWitness;
++
++use super::*;
++
++/// The point of the feature: a caller names a promise and the wallet honours it.
++///
++/// Deliberately fragmented across three wallet-owned, key-path stealth UTXOs rather than funded as a
++/// single coin, because a fragmented UTXO set is the normal case for a real wallet.
++#[tokio::test]
++async fn requested_promise_reaches_the_wallet_built_statement() {
++    const THRESHOLD: u64 = 10_000;
++
++    let test = setup().await;
++    let bearer = test.bearer(&test.transfer_and_read_scopes());
++
++    let inputs: Vec<_> = (0u64..3).map(|i| insert_valid_output(&test, 4_000 + i)).collect();
++
++    let request = AccountsCreateStealthTransferStatementRequest {
++        requests: vec![TransferStatementRequest {
++            sender_account: test.account.into(),
++            resource_address: test.stealth_resource,
++            input_selection: InputSelection::Specific {
++                utxo_addresses: inputs.iter().map(|o| o.to_utxo_address()).collect(),
++            },
++            outputs: vec![TransferOutput {
++                address: account_ootle_address(&test),
++                revealed_amount: Amount::zero(),
++                blinded_amount: 12_003,
++                memo: None,
++                pay_to: PayTo::StealthPublicKey,
++                minimum_value_promise: THRESHOLD,
++            }],
++        }],
++    };
++
++    let response = handle_create_stealth_transfer_statement(&test.context, Some(&bearer), request)
++        .await
++        .expect("a valid, balanced request should succeed");
++
++    assert_eq!(response.statements.len(), 1);
++    let statement = &response.statements[0];
++
++    assert_eq!(statement.outputs_statement.outputs.len(), 1);
++    assert_eq!(
++        statement.outputs_statement.outputs[0].output.minimum_value_promise, THRESHOLD,
++        "the caller-requested promise must reach the statement the wallet returns"
++    );
++
++    // The engine's own validator accepts it. A promise above the hidden value could not have been
++    // proven at all, so reaching this point is itself evidence the bound is real.
++    tari_engine_types::stealth::validate_transfer(statement, None)
++        .expect("the engine's transfer validator must accept the promised statement");
++
++    // All three fragmented inputs fund the one statement.
++    assert_eq!(statement.inputs_statement.inputs.len(), 3);
++    assert!(statement.balance_proof.is_some(), "value conservation must be proven");
++
++    // Nothing was revealed: a promise publishes a bound, not an amount.
++    assert!(statement.outputs_statement.revealed_output.is_none());
++    assert!(statement.inputs_statement.revealed_amount.is_zero());
++}
++
++/// A caller that never heard of the field still gets a zero promise, so every existing wallet client
++/// keeps working and keeps publishing nothing.
++#[tokio::test]
++async fn a_caller_that_omits_the_promise_gets_zero() {
++    let test = setup().await;
++    let bearer = test.bearer(&test.transfer_and_read_scopes());
++    let input = insert_valid_output(&test, 300);
++
++    let request = AccountsCreateStealthTransferStatementRequest {
++        requests: vec![TransferStatementRequest {
++            sender_account: test.account.into(),
++            resource_address: test.stealth_resource,
++            input_selection: InputSelection::Specific {
++                utxo_addresses: vec![input.to_utxo_address()],
++            },
++            outputs: vec![TransferOutput {
++                address: account_ootle_address(&test),
++                revealed_amount: Amount::zero(),
++                blinded_amount: 300,
++                memo: None,
++                pay_to: PayTo::StealthPublicKey,
++                minimum_value_promise: 0,
++            }],
++        }],
++    };
++
++    let response = handle_create_stealth_transfer_statement(&test.context, Some(&bearer), request)
++        .await
++        .expect("unchanged behaviour for a caller that asks for no promise");
++
++    assert_eq!(
++        response.statements[0].outputs_statement.outputs[0]
++            .output
++            .minimum_value_promise,
++        0
++    );
++}
++
++/// A promise larger than the output's value cannot be proven: the bulletproof would attest
++/// `value ∈ [mvp, 2^64)` with no value satisfying it, so no validator could accept the transaction.
++///
++/// The handler must refuse it *before* locking, or the caller would end up with inputs locked
++/// against a statement that can never be used.
++#[tokio::test]
++async fn an_unsatisfiable_promise_is_refused_without_locking() {
++    let test = setup().await;
++    let bearer = test.bearer(&test.transfer_and_read_scopes());
++    let input = insert_valid_output(&test, 300);
++
++    let request = AccountsCreateStealthTransferStatementRequest {
++        requests: vec![TransferStatementRequest {
++            sender_account: test.account.into(),
++            resource_address: test.stealth_resource,
++            input_selection: InputSelection::Specific {
++                utxo_addresses: vec![input.to_utxo_address()],
++            },
++            outputs: vec![TransferOutput {
++                address: account_ootle_address(&test),
++                revealed_amount: Amount::zero(),
++                blinded_amount: 300,
++                memo: None,
++                pay_to: PayTo::StealthPublicKey,
++                minimum_value_promise: 301,
++            }],
++        }],
++    };
++
++    let err = handle_create_stealth_transfer_statement(&test.context, Some(&bearer), request)
++        .await
++        .expect_err("an unsatisfiable promise must be refused");
++
++    let text = err.to_string();
++    assert!(
++        text.contains("minimum_value_promise"),
++        "the error must name the field the caller set, got: {text}"
++    );
++
++    // The input is untouched: no lock was taken for a request that can never succeed.
++    let stored = stored_output(&test, &input.commitment);
++    assert!(
++        matches!(stored.status, OutputStatus::Unspent),
++        "a refused request must leave the input spendable, got {:?}",
++        stored.status
++    );
++    assert_eq!(stored.lock_id, None);
++}
++
++/// The response carries the metadata the wallet needs to sign later, and no key material.
++///
++/// This is the property the whole design rests on: a caller assembles bytes, the wallet supplies
++/// authority. `utxo_signers` names each spent output's public nonce so the wallet can derive the
++/// matching per-UTXO spend key on the caller's behalf; neither that nor a `KeyId` is a secret.
++#[tokio::test]
++async fn the_response_carries_signer_metadata_and_no_secrets() {
++    let test = setup().await;
++    let bearer = test.bearer(&test.transfer_and_read_scopes());
++    let inputs: Vec<_> = (0u64..2).map(|i| insert_valid_output(&test, 5_000 + i)).collect();
++
++    let request = AccountsCreateStealthTransferStatementRequest {
++        requests: vec![TransferStatementRequest {
++            sender_account: test.account.into(),
++            resource_address: test.stealth_resource,
++            input_selection: InputSelection::Specific {
++                utxo_addresses: inputs.iter().map(|o| o.to_utxo_address()).collect(),
++            },
++            outputs: vec![TransferOutput {
++                address: account_ootle_address(&test),
++                revealed_amount: Amount::zero(),
++                blinded_amount: 10_001,
++                memo: None,
++                pay_to: PayTo::StealthPublicKey,
++                minimum_value_promise: 10_000,
++            }],
++        }],
++    };
++
++    let response = handle_create_stealth_transfer_statement(&test.context, Some(&bearer), request)
++        .await
++        .expect("valid request");
++
++    // One signer per spent output, in the order requested, each naming only public data.
++    assert_eq!(response.utxo_signers.len(), 2);
++    for (signer, output) in response.utxo_signers.iter().zip(&inputs) {
++        assert_eq!(signer.public_nonce, output.sender_public_nonce);
++    }
++
++    // The wallet names its own signing key; the private half never leaves the keyring.
++    assert!(
++        !response.signing_keys.is_empty(),
++        "the wallet must name the signing key it will use"
++    );
++
++    // The spent inputs are locked under the returned lock, ready for `transactions.submit`.
++    for output in &inputs {
++        let stored = stored_output(&test, &output.commitment);
++        assert!(matches!(stored.status, OutputStatus::LockedForSpend));
++        assert_eq!(stored.lock_id, Some(response.lock_id));
++    }
++}
++
++/// The statement a wallet produces for a threshold request is shaped the way the engine and a
++/// threshold gate require: exactly one key-spendable stealth output, no revealed amounts, a balance
++/// proof, and every input spent on the key path.
++#[tokio::test]
++async fn a_promised_statement_has_the_shape_a_gate_requires() {
++    let test = setup().await;
++    let bearer = test.bearer(&test.transfer_and_read_scopes());
++    let input = insert_valid_output(&test, 20_000);
++
++    let request = AccountsCreateStealthTransferStatementRequest {
++        requests: vec![TransferStatementRequest {
++            sender_account: test.account.into(),
++            resource_address: test.stealth_resource,
++            input_selection: InputSelection::Specific {
++                utxo_addresses: vec![input.to_utxo_address()],
++            },
++            outputs: vec![TransferOutput {
++                address: account_ootle_address(&test),
++                revealed_amount: Amount::zero(),
++                blinded_amount: 20_000,
++                memo: None,
++                pay_to: PayTo::StealthPublicKey,
++                minimum_value_promise: 10_000,
++            }],
++        }],
++    };
++
++    let response = handle_create_stealth_transfer_statement(&test.context, Some(&bearer), request)
++        .await
++        .expect("valid request");
++    let statement = &response.statements[0];
++
++    assert_eq!(statement.outputs_statement.outputs.len(), 1);
++    assert!(statement.outputs_statement.revealed_output.is_none());
++    assert!(statement.inputs_statement.revealed_amount.is_zero());
++    assert!(statement.balance_proof.is_some());
++    assert!(
++        statement
++            .inputs_statement
++            .inputs
++            .iter()
++            .all(|i| i.witness == SpendWitness::KeyPath),
++        "ordinary wallet funds spend on the key path"
++    );
++    assert!(
++        statement.outputs_statement.outputs[0].auth.spend_key().is_some(),
++        "the qualifying output must be key-spendable so the funds stay under the owner's control"
++    );
++    assert!(
++        statement.outputs_statement.outputs[0].output.minimum_value_promise >= 10_000,
++        "the promised bound must clear the gate threshold"
++    );
++}
+--- a/utilities/traffic-sim/src/sim.rs
++++ b/utilities/traffic-sim/src/sim.rs
+@@ -247,9 +247,9 @@ impl TrafficSim {
+                     destination_address: receiver_address.address().clone(),
+                     blinded_output_amount: amount_to_send,
+                     revealed_output_amount: Default::default(),
+-                    output_memo: Some(Memo::new_message(format!("Transfer {id}: {amount_to_send}")).unwrap()),
++output_memo: Some(Memo::new_message(format!("Transfer {id}: {amount_to_send}")).unwrap()),
+                     pay_to: PayTo::StealthPublicKey,
+-                    attach_sender_address: false,
++                    attach_sender_address: false,
+                     pay_ref: None,
+                 }],
+                 max_fee: crate::MAX_FEE,
+@@ -493,6 +493,7 @@ impl TrafficSim {
+                             blinded_amount: fund_amount,
+                             memo: Some(Memo::new_message(format!("Initial Funding: {fund_amount}")).unwrap()),
+                             pay_to: PayTo::StealthPublicKey,
++                            minimum_value_promise: 0,
+                         }],
+                     }],
+                 })
