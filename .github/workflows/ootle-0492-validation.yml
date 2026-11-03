@@ -1,0 +1,159 @@
+---
+name: Ootle 0.49.2 Linux validation
+
+'on':
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - upgrade/ootle-0.49.2
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: '${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}'
+  cancel-in-progress: true
+
+env:
+  RUST_TOOLCHAIN: 1.97.1
+  NIGHTLY_TOOLCHAIN: nightly-2025-12-05
+  OOTLE_TAG: v0.49.2
+  OOTLE_COMMIT: aa7b0c81719e5c3cfaf9bf3b5fb87bd83180cb90
+  CARGO_HTTP_MULTIPLEXING: false
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+  RUSTUP_PERMIT_COPY_RENAME: true
+  TARI_NETWORK: localnet
+  TARI_TARGET_NETWORK: localnet
+  PROTOC: protoc
+
+jobs:
+  linux-validation:
+    name: Linux engine and migration tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout exact Ghost Gate commit
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout Tari Ootle 0.49.2
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: tari-project/tari-ootle
+          ref: ${{ env.OOTLE_TAG }}
+          path: tari-ootle-v0.49.2-reference
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify and patch the exact Ootle cohort
+        shell: bash
+        env:
+          OOTLE_SOURCE: ${{ github.workspace }}/tari-ootle-v0.49.2-reference
+          OOTLE_PATCHED_LINK: ${{ github.workspace }}/../_ootle-v0492-ghost-gate
+        run: |
+          set -euo pipefail
+          actual_commit="$(git -C "$OOTLE_SOURCE" rev-parse HEAD)"
+          test "$actual_commit" = "$OOTLE_COMMIT"
+          git -C "$OOTLE_SOURCE" apply --check --recount -p1 \
+            "$GITHUB_WORKSPACE/docs/wallet-mvp-0492.patch"
+          git -C "$OOTLE_SOURCE" apply --recount -p1 \
+            "$GITHUB_WORKSPACE/docs/wallet-mvp-0492.patch"
+          test ! -e "$OOTLE_PATCHED_LINK"
+          ln -s "$OOTLE_SOURCE" "$OOTLE_PATCHED_LINK"
+
+      - name: Install Ootle Ubuntu dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo bash tari-ootle-v0.49.2-reference/scripts/install_ubuntu_dependencies.sh
+
+      - name: Install Rust 1.97.1 and the WASM target
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2.9.3
+        with:
+          shared-key: ootle-0492-linux
+          save-if: ${{ github.event_name != 'pull_request' }}
+          workspaces: |
+            . -> target
+            tari-ootle-v0.49.2-reference -> target
+            templates/ghost_gate -> target
+            templates/ghost_gate_faucet -> target
+            templates/ghost_gate_other_classes -> target
+
+      - name: Check the Rust workspace
+        run: cargo check --workspace --locked
+
+      - name: Run the offline workspace tests
+        run: cargo test --workspace --exclude ghost-gate-tests --locked
+
+      - name: Run the Linux-only engine tests
+        run: cargo test -p ghost-gate-tests --locked
+
+      - name: Check the Ghost Gate template for WASM
+        working-directory: templates/ghost_gate
+        run: cargo check --target wasm32-unknown-unknown --locked
+
+      - name: Check the faucet fixture for WASM
+        working-directory: templates/ghost_gate_faucet
+        run: cargo check --target wasm32-unknown-unknown --locked
+
+      - name: Check the other resource-class fixtures for WASM
+        working-directory: templates/ghost_gate_other_classes
+        run: cargo check --target wasm32-unknown-unknown --locked
+
+      - name: Test the wallet minimum-value-promise patch
+        run: >-
+          cargo test
+          --manifest-path ../_ootle-v0492-ghost-gate/Cargo.toml
+          -p tari_ootle_wallet_sdk
+          minimum_value_promise
+          --locked
+
+  formatting-diagnostic:
+    name: Ghost Gate formatting diagnostic (non-blocking)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    continue-on-error: true
+
+    steps:
+      - name: Checkout exact Ghost Gate commit
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install the documented nightly formatter
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
+          components: rustfmt
+
+      - name: Check migration-touched Ghost Gate files
+        shell: bash
+        run: |
+          rustfmt +"$NIGHTLY_TOOLCHAIN" --edition 2024 --check \
+            crates/ghost-gate-minotari/src/lib.rs \
+            crates/ghost-gate-minotari/src/wallet_service.rs \
+            crates/ghost-gate-wallet/src/lib.rs \
+            crates/ghost-gate-walletd/src/bin/ghost-gate-bridge.rs \
+            crates/ghost-gate-walletd/src/esmeralda.rs \
+            crates/ghost-gate-walletd/src/indexer.rs \
+            crates/ghost-gate-walletd/src/lib.rs \
+            templates/ghost_gate/src/lib.rs \
+            templates/ghost_gate_faucet/src/lib.rs \
+            templates/ghost_gate_other_classes/src/lib.rs

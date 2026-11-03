@@ -223,6 +223,41 @@ Both distributions are registered against missing VHDX paths and return
 `D:\wsl\Ubuntu-2204\ext4.vhdx`; the second expected
 `D:\from laptop\WSL\Ubuntu\ext4.vhdx`. No WSL state was modified.
 
+## GitHub Actions Linux validation
+
+Linux validation will now run through the `Ootle 0.49.2 Linux validation` GitHub Actions workflow in
+`.github/workflows/ootle-0492-validation.yml`. The workflow is intentionally offline: it needs no
+wallet seed, chain endpoint, Cloudflare/VPS credential, Telegram secret, or production service.
+
+The blocking `Linux engine and migration tests` job checks out the exact Ghost Gate commit selected
+by the event, checks out Ootle tag `v0.49.2`, verifies its pinned commit
+`aa7b0c81719e5c3cfaf9bf3b5fb87bd83180cb90`, applies `docs/wallet-mvp-0492.patch`, and recreates the
+sibling patched-cohort path used by the manifests. On Ubuntu 24.04 with Rust 1.97.1 it runs:
+
+```text
+cargo check --workspace --locked
+cargo test --workspace --exclude ghost-gate-tests --locked
+cargo test -p ghost-gate-tests --locked
+cargo check --target wasm32-unknown-unknown --locked  # in each of the three template workspaces
+cargo test --manifest-path ../_ootle-v0492-ghost-gate/Cargo.toml \
+  -p tari_ootle_wallet_sdk minimum_value_promise --locked
+```
+
+The `ghost-gate-tests` command executes all four previously blocked engine targets: `gate_engine`,
+`adversarial`, `cross_resource`, and `mvp_and_shape`. The workflow uses Ootle's own 0.49.2 Ubuntu
+dependency installer rather than maintaining a guessed package list in Ghost Gate.
+
+Formatting remains a separate `Ghost Gate formatting diagnostic (non-blocking)` job. It runs the
+documented nightly formatter only over the migration-touched Ghost Gate Rust files, does not traverse
+or gate on the external patched Ootle workspace, and does not suppress the existing Ghost Gate
+formatting differences. Its failure is visible but cannot obscure the independent Linux engine-test
+result. Formatting remains a release/bootstrap blocker until its canonical policy and source scope
+are resolved and the focused diagnostic is green.
+
+This local commit only defines the workflow. No GitHub Actions result exists until an operator pushes
+the branch or manually dispatches the workflow, so this report's validation verdict remains blocked
+until the required job completes successfully and the separate formatting blocker is resolved.
+
 ## Ootle 0.49.2 migration assertions
 
 Static searches were run across all Rust sources under `crates/` and `templates/` for:
@@ -305,9 +340,9 @@ red.
 
 Minimum concrete actions required to reach PASS:
 
-1. Restore one registered WSL distribution's missing VHDX, or provide an equivalent Linux runner,
-   then run `cargo test -p ghost-gate-tests` (and preferably `cargo test --workspace`) against this
-   exact dirty worktree and patched Ootle 0.49.2 cohort. All four engine integration targets must pass.
+1. Push the workflow commit to `upgrade/ootle-0.49.2` and require the blocking
+   `Linux engine and migration tests` job to pass for the exact commit. All four engine integration
+   targets must pass; a restored WSL or equivalent Linux runner remains an acceptable local fallback.
 2. Define/pin the canonical rustfmt toolchain and scope so the Ghost Gate formatting gate is
    reproducible without treating the external patched Ootle checkout as vendored Ghost Gate source.
    Format the migration-touched files (and any in-scope pre-existing files) without semantic changes,
