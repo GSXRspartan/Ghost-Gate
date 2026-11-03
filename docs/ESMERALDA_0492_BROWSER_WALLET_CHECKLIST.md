@@ -1,13 +1,15 @@
-# Esmeralda 0.49.2 browser-wallet compatibility checklist
+# Esmeralda live browser-wallet compatibility checklist
 
-Use this checklist to collect the missing real-provider evidence for Sapient and Web Tari Universe.
+Use this checklist to collect the missing real-provider evidence for Sapient and Web Tari Universe
+against the official live Ootle **0.49.1** server cohort with Ghost Gate's reviewed **0.49.2**
+client/source cohort.
 It tests connection and a basic wallet-ownership signature only. It does **not** authorize the final
 Crypt credential flow, a shield/self-transfer request, a faucet claim, or any Ghost Gate deployment
 transaction.
 
-The operator must keep Stage 3B blocked until the network gates in
-`docs/ESMERALDA_0492_READINESS.md` also pass. A browser-wallet pass does not override an indexer
-release mismatch or unresolved genesis identity.
+The operator must keep Stage 3B blocked until every gate in `docs/ESMERALDA_LIVE_READINESS.md`
+passes. A browser-wallet pass does not override unresolved protected-registry identity,
+chain-generation, or patched-wallet-binary provenance.
 
 ## Evidence and safety rules
 
@@ -32,8 +34,9 @@ release mismatch or unresolved genesis identity.
 |---|---|
 | Date/time and timezone | |
 | Ghost Gate URL | `https://ghostgate.boo/` |
-| Ghost Gate commit/reference | `8aab476754ec0a7ecd4a3c16db9abc8f58bd72a5` |
-| Readiness script command | `.\scripts\check-esmeralda-0492-readiness.ps1` |
+| Ghost Gate commit/reference | `78cece3431a40ff9b94ef0877a81c1f0ee7b7efd` plus the reviewed Stage 3A.4 documentation/manifest diff |
+| Live server / tested source | expected `0.49.1` / `0.49.2` |
+| Readiness script command | `.\scripts\check-esmeralda-live-readiness.ps1` |
 | Readiness script result | PASS / BLOCKED |
 | Indexer A reported version | |
 | Indexer B reported version | |
@@ -78,6 +81,21 @@ deployment step follows them until the script and all Stage 3B gates pass.
     routes, and no request for a seed/private key or broad view access.
 
 ### Sapient result record
+
+Concise operator attestation (complete after the detailed rows):
+
+```text
+SAPIENT RESULT: PASS / FAIL
+wallet/provider version:
+network reported to dApp:
+provider connected: PASS / FAIL
+site-scoped signing approval shown: PASS / FAIL
+signature response returned: PASS / FAIL
+unexpected transaction request: YES / NO
+obsolete API/provider error: NONE / <exact redacted error>
+notes:
+operator/test case/date:
+```
 
 | Check | Expected | PASS / FAIL | Evidence or exact error |
 |---|---|---|---|
@@ -137,6 +155,22 @@ Classify the overall outcome as one of:
     infer compatibility from the page merely loading.
 
 ### Web Tari Universe result record
+
+Concise operator attestation (complete after the detailed rows):
+
+```text
+WEB TARI UNIVERSE RESULT: PASS / FAIL
+app/provider version:
+network reported to dApp:
+embedded provider connected: PASS / FAIL
+site-scoped signing approval shown: PASS / FAIL
+signature response returned: PASS / FAIL
+external Telegram link opened outside iframe: PASS / FAIL
+unexpected transaction request: YES / NO
+obsolete API/provider error: NONE / <exact redacted error>
+notes:
+operator/test case/date:
+```
 
 | Check | Expected | PASS / FAIL | Evidence or exact error |
 |---|---|---|---|

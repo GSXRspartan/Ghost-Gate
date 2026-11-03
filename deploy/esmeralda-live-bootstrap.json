@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "status": "BLOCKED_PREDEPLOYMENT",
+  "generatedAt": "2026-11-03",
+  "repository": {
+    "branch": "upgrade/ootle-live-0.49.1",
+    "sourceCommit": "78cece3431a40ff9b94ef0877a81c1f0ee7b7efd",
+    "future0492CheckpointCommit": "821daa6e54526481707251f8e26a663b0bbb98ee"
+  },
+  "ootle": {
+    "liveServerVersion": "0.49.1",
+    "liveUpstreamTagCommit": "b94de26c3ec463b17926a92f2189507a195ac00c",
+    "validatedClientSourceVersion": "0.49.2",
+    "validatedUpstreamCommit": "aa7b0c81719e5c3cfaf9bf3b5fb87bd83180cb90",
+    "compatibilityReview": "docs/OOTLE_0491_LIVE_COMPATIBILITY.md"
+  },
+  "network": {
+    "name": "esmeralda",
+    "byte": 38,
+    "indexers": [
+      "https://esme-indexer-a.ootle.tari.com",
+      "https://esme-indexer-b.ootle.tari.com"
+    ],
+    "ootleSidechainId": null,
+    "apiIdentityStatus": "NOT_EXPOSED"
+  },
+  "identity": {
+    "protectedRegistryGenesisHash": null,
+    "protectedRegistryGenesisStatus": "NOT_VERIFIED",
+    "officialMinotariEsmeraldaGenesisCandidate": "3c3681ad318eb54ca3f3e8aed79d3d207d94a5291aec84ba1a0b628633db3621",
+    "candidateSource": "tari_core 6.3.0-pre.2 src/blocks/genesis_block.rs esmeralda_genesis_sanity_check",
+    "candidateStatus": "VERIFIED_IN_PINNED_SOURCE_NOT_YET_MATCHED_TO_DEPLOYED_REGISTRY",
+    "genesisMismatchHandling": "BLOCKED_REQUIRES_REVIEWED_GENESIS_REBIND_OPERATION",
+    "chainGeneration": {
+      "registryDeclared": null,
+      "durableFloor": null,
+      "selectedNext": null,
+      "selectionRule": "max(registryDeclared, durableFloor) + 1",
+      "status": "NOT_VERIFIED"
+    }
+  },
+  "nativeTari": {
+    "resourceAddress": "resource_0101010101010101010101010101010101010101010101010101010101010101",
+    "builtinFaucetComponent": "component_0102030000000000000000000000000000000000000000000000000000000000",
+    "divisibility": 6
+  },
+  "crypt": {
+    "relyingSite": "https://ghostgate.boo",
+    "resourceAddress": "resource_0101010101010101010101010101010101010101010101010101010101010101",
+    "thresholdRaw": "100000000",
+    "divisibility": 6,
+    "sessionTtlSeconds": 604800,
+    "proofMode": "credential",
+    "trustTier": "operator-trusted-testnet",
+    "useMode": "both",
+    "production": false,
+    "componentAddress": null,
+    "nextPolicyHash": null
+  },
+  "walletMinimumValuePromise": {
+    "baseVersion": "0.49.2",
+    "baseCommit": "aa7b0c81719e5c3cfaf9bf3b5fb87bd83180cb90",
+    "patchPath": "docs/wallet-mvp-0492.patch",
+    "patchSha256": "b627a3d95766968cce30b8cd6dc541adb5d76a759ea22d7932338abfbd63e168",
+    "sourceStatus": "VERIFIED_EXACT_BASE_PLUS_FIVE_FILE_PATCH",
+    "buildWorkflow": ".github/workflows/walletd-mvp-attested-build.yml",
+    "buildWorkflowTrigger": "workflow_dispatch",
+    "buildWorkflowStatus": "PREPARED_NOT_RUN",
+    "buildWorkflowRun": null,
+    "binaryPath": null,
+    "binarySha256": null,
+    "binaryVersion": null,
+    "binaryStatus": "BUILD_AND_ATTEST_REQUIRED"
+  },
+  "stopConditions": [
+    "protected registry genesis hash has not been matched to authoritative provenance",
+    "previous generation and durable generation floor are unknown",
+    "patched walletd binary has not been built and attested",
+    "Sapient basic provider/signing result is not recorded PASS",
+    "Web Tari Universe embedded provider/signing result is not recorded PASS"
+  ]
+}

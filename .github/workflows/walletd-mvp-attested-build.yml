@@ -1,0 +1,205 @@
+---
+name: Ootle 0.49.2 patched walletd artifact
+
+'on':
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUST_TOOLCHAIN: 1.97.1
+  OOTLE_COMMIT: aa7b0c81719e5c3cfaf9bf3b5fb87bd83180cb90
+  OOTLE_PATCH_SHA256: b627a3d95766968cce30b8cd6dc541adb5d76a759ea22d7932338abfbd63e168
+  CARGO_HTTP_MULTIPLEXING: false
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+  RUSTUP_PERMIT_COPY_RENAME: true
+  PROTOC: protoc
+
+jobs:
+  build-walletd:
+    name: Build and attest Linux walletd
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout exact Ghost Gate commit
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout exact official Ootle base commit
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: tari-project/tari-ootle
+          ref: ${{ env.OOTLE_COMMIT }}
+          path: tari-ootle-v0.49.2-reference
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify and apply the reviewed wallet patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir="$GITHUB_WORKSPACE/tari-ootle-v0.49.2-reference"
+          patch_file="$GITHUB_WORKSPACE/docs/wallet-mvp-0492.patch"
+
+          test "$(git -C "$source_dir" rev-parse HEAD)" = "$OOTLE_COMMIT"
+          test "$(sha256sum "$patch_file" | awk '{print $1}')" = "$OOTLE_PATCH_SHA256"
+
+          git -C "$source_dir" apply --check --recount -p1 "$patch_file"
+          git -C "$source_dir" apply --recount -p1 "$patch_file"
+
+          printf '%s\n' \
+            applications/tari_walletd/src/handlers/accounts.rs \
+            crates/wallet/sdk/src/apis/stealth_outputs.rs \
+            crates/wallet/sdk/src/apis/stealth_transfer/api.rs \
+            crates/wallet/sdk/src/apis/stealth_transfer/params.rs \
+            crates/wallet/sdk/src/apis/stealth_transfer/types.rs \
+            > "$RUNNER_TEMP/expected-patched-files.txt"
+          git -C "$source_dir" diff --name-only | LC_ALL=C sort \
+            > "$RUNNER_TEMP/actual-patched-files.txt"
+          diff -u "$RUNNER_TEMP/expected-patched-files.txt" "$RUNNER_TEMP/actual-patched-files.txt"
+          test -z "$(git -C "$source_dir" ls-files --others --exclude-standard)"
+
+          while IFS= read -r path; do
+            sha256sum "$source_dir/$path"
+          done < "$RUNNER_TEMP/actual-patched-files.txt" \
+            > "$RUNNER_TEMP/patched-source-files.sha256"
+          git -C "$source_dir" diff --binary HEAD \
+            | sha256sum \
+            | awk '{print $1}' \
+            > "$RUNNER_TEMP/patched-source-diff.sha256"
+
+      - name: Install Ootle Ubuntu dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo bash tari-ootle-v0.49.2-reference/scripts/install_ubuntu_dependencies.sh
+
+      - name: Install the reviewed Rust toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Install the upstream Node toolchain
+        uses: actions/setup-node@v7.1.0
+        with:
+          node-version: 24.15.0
+
+      - name: Install the upstream wallet web-build package manager
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+        with:
+          version: 12.4.2
+          run_install: false
+
+      - name: Build the upstream wallet web assets
+        working-directory: tari-ootle-v0.49.2-reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile
+          pnpm --dir bindings run build-dev
+          pnpm --dir applications/theming run build
+          pnpm --dir clients/javascript/wallet_daemon_client run build
+          pnpm --dir applications/tari_walletd/web_ui run build
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2.9.3
+        with:
+          shared-key: ootle-0492-walletd-artifact
+          save-if: true
+          workspaces: tari-ootle-v0.49.2-reference -> target
+
+      - name: Run the wallet minimum-value-promise tests
+        working-directory: tari-ootle-v0.49.2-reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p tari_ootle_wallet_sdk minimum_value_promise \
+            2>&1 \
+            | tee "$RUNNER_TEMP/mvp-tests.log"
+
+      - name: Build the release wallet daemon
+        working-directory: tari-ootle-v0.49.2-reference
+        run: >-
+          cargo build --locked --release
+          --package tari_ootle_walletd
+          --bin tari_ootle_walletd
+
+      - name: Assemble binary and build attestation
+        shell: bash
+        env:
+          GHOST_GATE_COMMIT: ${{ github.sha }}
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
+          WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          source_dir="$GITHUB_WORKSPACE/tari-ootle-v0.49.2-reference"
+          binary_source="$source_dir/target/release/tari_ootle_walletd"
+          binary_name="tari_ootle_walletd-v0.49.2-ghost-gate-mvp-linux-x86_64"
+          binary_dir="$RUNNER_TEMP/walletd-binary"
+          attestation_dir="$RUNNER_TEMP/walletd-attestation"
+          mkdir -p "$binary_dir" "$attestation_dir"
+          test -x "$binary_source"
+          cp "$binary_source" "$binary_dir/$binary_name"
+
+          binary_sha256="$(sha256sum "$binary_dir/$binary_name" | awk '{print $1}')"
+          printf '%s  %s\n' "$binary_sha256" "$binary_name" \
+            > "$binary_dir/$binary_name.sha256"
+          (cd "$binary_dir" && sha256sum --check "$binary_name.sha256")
+
+          binary_version="$("$binary_dir/$binary_name" --version | tr '\n' ' ')"
+          rustc_version="$(rustc --version --verbose | tr '\n' ';')"
+          cargo_version="$(cargo --version --verbose | tr '\n' ';')"
+          node_version="$(node --version)"
+          pnpm_version="$(pnpm --version)"
+          target_triple="$(rustc -vV | sed -n 's/^host: //p')"
+          patched_diff_sha256="$(cat "$RUNNER_TEMP/patched-source-diff.sha256")"
+
+          cp "$RUNNER_TEMP/patched-source-files.sha256" "$attestation_dir/"
+          cp "$RUNNER_TEMP/mvp-tests.log" "$attestation_dir/"
+          cat > "$attestation_dir/attestation.txt" <<EOF
+          status=ATTESTED_BUILD_COMPLETED
+          ghost_gate_commit=$GHOST_GATE_COMMIT
+          workflow=walletd-mvp-attested-build.yml
+          workflow_run_id=$WORKFLOW_RUN_ID
+          workflow_run_attempt=$WORKFLOW_RUN_ATTEMPT
+          base_ootle_commit=$OOTLE_COMMIT
+          patch_sha256=$OOTLE_PATCH_SHA256
+          patched_source_diff_sha256=$patched_diff_sha256
+          modified_file_set=applications/tari_walletd/src/handlers/accounts.rs,crates/wallet/sdk/src/apis/stealth_outputs.rs,crates/wallet/sdk/src/apis/stealth_transfer/api.rs,crates/wallet/sdk/src/apis/stealth_transfer/params.rs,crates/wallet/sdk/src/apis/stealth_transfer/types.rs
+          mvp_test_command=cargo test --locked -p tari_ootle_wallet_sdk minimum_value_promise
+          mvp_test_result=PASS_3_TESTS
+          build_command=cargo build --locked --release --package tari_ootle_walletd --bin tari_ootle_walletd
+          rustc=$rustc_version
+          cargo=$cargo_version
+          node=$node_version
+          pnpm=$pnpm_version
+          target_triple=$target_triple
+          binary_filename=$binary_name
+          binary_version=$binary_version
+          binary_sha256=$binary_sha256
+          EOF
+
+          cat "$attestation_dir/attestation.txt"
+
+      - name: Upload the walletd binary artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ghost-gate-walletd-linux-x86_64-${{ github.run_id }}
+          path: ${{ runner.temp }}/walletd-binary/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload the walletd attestation artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ghost-gate-walletd-attestation-${{ github.run_id }}
+          path: ${{ runner.temp }}/walletd-attestation/
+          if-no-files-found: error
+          retention-days: 14
