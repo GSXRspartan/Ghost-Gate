@@ -89,28 +89,6 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
-      - name: Install the upstream Node toolchain
-        uses: actions/setup-node@v7.1.0
-        with:
-          node-version: 24.15.0
-
-      - name: Install the upstream wallet web-build package manager
-        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
-        with:
-          version: 12.4.2
-          run_install: false
-
-      - name: Build the upstream wallet web assets
-        working-directory: tari-ootle-v0.49.2-reference
-        shell: bash
-        run: |
-          set -euo pipefail
-          pnpm install --frozen-lockfile
-          pnpm --dir bindings run build-dev
-          pnpm --dir applications/theming run build
-          pnpm --dir clients/javascript/wallet_daemon_client run build
-          pnpm --dir applications/tari_walletd/web_ui run build
-
       - name: Cache Cargo artifacts
         uses: Swatinem/rust-cache@v2.9.3
         with:
@@ -129,10 +107,21 @@ jobs:
 
       - name: Build the release wallet daemon
         working-directory: tari-ootle-v0.49.2-reference
+        # Upstream defaults to web_ui, whose build.rs invokes pnpm. This attests the JSON-RPC backend only.
         run: >-
           cargo build --locked --release
+          --no-default-features
           --package tari_ootle_walletd
           --bin tari_ootle_walletd
+
+      - name: Re-verify patched source provenance
+        working-directory: tari-ootle-v0.49.2-reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --name-only | LC_ALL=C sort > "$RUNNER_TEMP/actual-patched-files.txt"
+          diff -u "$RUNNER_TEMP/expected-patched-files.txt" "$RUNNER_TEMP/actual-patched-files.txt"
+          test -z "$(git ls-files --others --exclude-standard)"
 
       - name: Assemble binary and build attestation
         shell: bash
@@ -160,8 +149,6 @@ jobs:
           binary_version="$("$binary_dir/$binary_name" --version | tr '\n' ' ')"
           rustc_version="$(rustc --version --verbose | tr '\n' ';')"
           cargo_version="$(cargo --version --verbose | tr '\n' ';')"
-          node_version="$(node --version)"
-          pnpm_version="$(pnpm --version)"
           target_triple="$(rustc -vV | sed -n 's/^host: //p')"
           patched_diff_sha256="$(cat "$RUNNER_TEMP/patched-source-diff.sha256")"
 
@@ -182,11 +169,15 @@ jobs:
           modified_file_set=applications/tari_walletd/src/handlers/accounts.rs,crates/wallet/sdk/src/apis/stealth_outputs.rs,crates/wallet/sdk/src/apis/stealth_transfer/api.rs,crates/wallet/sdk/src/apis/stealth_transfer/params.rs,crates/wallet/sdk/src/apis/stealth_transfer/types.rs
           mvp_test_command=cargo test --locked -p tari_ootle_wallet_sdk minimum_value_promise
           mvp_test_result=PASS_3_TESTS
-          build_command=cargo build --locked --release --package tari_ootle_walletd --bin tari_ootle_walletd
+          walletd_package=tari_ootle_walletd
+          walletd_binary=tari_ootle_walletd
+          walletd_default_features=web_ui
+          walletd_enabled_features=none (--no-default-features)
+          walletd_web_ui_assets=not_embedded
+          walletd_backend_json_rpc=enabled
+          build_command=cargo build --locked --release --no-default-features --package tari_ootle_walletd --bin tari_ootle_walletd
           rustc=$rustc_version
           cargo=$cargo_version
-          node=$node_version
-          pnpm=$pnpm_version
           target_triple=$target_triple
           binary_filename=$binary_name
           binary_version=$binary_version
