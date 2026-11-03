@@ -123,11 +123,10 @@ jobs:
           minimum_value_promise
           --locked
 
-  formatting-diagnostic:
-    name: Ghost Gate formatting diagnostic (non-blocking)
+  formatting:
+    name: Ghost Gate owned-source formatting
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    continue-on-error: true
 
     steps:
       - name: Checkout exact Ghost Gate commit
@@ -143,12 +142,15 @@ jobs:
           toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
           components: rustfmt
 
-      - name: Check migration-touched Ghost Gate files
+      - name: Check migration-touched Ghost Gate-owned files
         shell: bash
         run: |
           rustfmt +"$NIGHTLY_TOOLCHAIN" --edition 2024 --check \
             crates/ghost-gate-minotari/src/lib.rs \
             crates/ghost-gate-minotari/src/wallet_service.rs \
+            crates/ghost-gate-tests/tests/adversarial.rs \
+            crates/ghost-gate-tests/tests/cross_resource.rs \
+            crates/ghost-gate-tests/tests/gate_engine.rs \
             crates/ghost-gate-wallet/src/lib.rs \
             crates/ghost-gate-walletd/src/bin/ghost-gate-bridge.rs \
             crates/ghost-gate-walletd/src/esmeralda.rs \

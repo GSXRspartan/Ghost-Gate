@@ -30,7 +30,11 @@ mod other_classes {
 
     impl GhostGateOtherClasses {
         /// A public fungible resource: balances are visible on chain.
-        pub fn public_fungible(symbol: String, divisibility: u8, supply: Amount) -> Component<Self> {
+        pub fn public_fungible(
+            symbol: String,
+            divisibility: u8,
+            supply: Amount,
+        ) -> Component<Self> {
             let bucket = ResourceBuilder::public_fungible()
                 .with_token_symbol(symbol)
                 .with_divisibility(divisibility)

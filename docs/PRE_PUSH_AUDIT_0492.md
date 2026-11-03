@@ -15,12 +15,12 @@ upgrade branch without leaking the operator's identity or credentials. It does *
 ## Git state and destination
 
 - Branch: `upgrade/ootle-0.49.2`
-- Pre-publication base HEAD: `f960d1575c7175f98625d2ae0015a300980b0b68`
-- Base subject: `Initial public release of Ghost Gate`
+- Pre-publication base HEAD: `279cc662db6bc914a24ac58cb797ae5df89e6262`
+- Base subject: `ci: add Linux validation for Ootle 0.49.2`
 - Remote: `origin`
 - Fetch/push URL: `https://github.com/GSXRspartan/Ghost-Gate.git`
-- Publication HEAD: the single local commit containing this audit, with subject
-  `chore: prepare Ghost Gate for Ootle 0.49.2 validation`
+- Publication HEAD: the single local repair commit containing this refreshed audit, with subject
+  `fix: complete Ootle 0.49.2 test migration`
 
 The exact publication commit hash is reported by the post-commit `git show`/`git rev-parse HEAD`
 handoff. A commit cannot embed its own content-derived hash without changing that hash; the stable
@@ -39,12 +39,14 @@ same repository-local identity for both author and committer.
 
 ## Reachable-history identity audit
 
-The complete history reachable through `--all` contained one pre-existing commit:
+Before the repair commit, the complete history reachable through `--all` contained three commits.
+All three reported the exact same public identity for author and committer:
 
 ```text
+279cc662db6bc914a24ac58cb797ae5df89e6262
+04d638b745f5e93382110c803a03f15712b34271
 f960d1575c7175f98625d2ae0015a300980b0b68
-AUTHOR=GSXRspartan <304655218+GSXRspartan@users.noreply.github.com>
-COMMITTER=GSXRspartan <304655218+GSXRspartan@users.noreply.github.com>
+AUTHOR/COMMITTER=GSXRspartan <304655218+GSXRspartan@users.noreply.github.com>
 ```
 
 No personal email, alternate author, or unexpected committer was found. History was not rewritten.
@@ -80,6 +82,13 @@ Migration source:
 - `templates/ghost_gate/src/lib.rs`
 - `templates/ghost_gate_faucet/src/lib.rs`
 - `templates/ghost_gate_other_classes/src/lib.rs`
+
+Linux validation and engine-test migration:
+
+- `.github/workflows/ootle-0492-validation.yml`
+- `crates/ghost-gate-tests/tests/adversarial.rs`
+- `crates/ghost-gate-tests/tests/cross_resource.rs`
+- `crates/ghost-gate-tests/tests/gate_engine.rs`
 
 Migration evidence and planning:
 
@@ -133,11 +142,16 @@ source is vendored into this repository.
 
 ## Validation result
 
-Publication-preparation reruns:
+Publication-preparation reruns, refreshed after the engine-test migration repair:
 
-- `cargo check --workspace` — **PASS** (warnings only; 40.11s);
-- `cargo test --workspace --exclude ghost-gate-tests` — **PASS**: 397 passed, 0 failed,
+- `cargo check --workspace --locked` — **PASS** (warnings only);
+- `cargo test --workspace --exclude ghost-gate-tests --locked` — **PASS**: 397 passed, 0 failed,
   5 intentionally ignored live-indexer tests;
+- the repository-specific `rustfmt +nightly-2025-12-05 --edition 2024 --check` command used by CI —
+  **PASS** for all 13 Ghost Gate-owned files in scope;
+- all three template `wasm32-unknown-unknown` checks with `--locked` — **PASS**;
+- focused wallet SDK minimum-value-promise tests with `--locked` — **PASS**, 3/3;
+- `.github/workflows/ootle-0492-validation.yml` — **PASS** through PyYAML safe parsing;
 - `git diff --check` — **PASS** before staging (only Git CRLF conversion notices for four lockfiles);
 - staged `git diff --check`, excluding the standalone patch artifact — **PASS**; checking the patch
   artifact itself reports its whitespace-only context-marker lines, which are required unified-diff
@@ -145,31 +159,37 @@ Publication-preparation reruns:
 - `git apply --check --recount -p1` for `docs/wallet-mvp-0492.patch` against the pristine reference —
   **PASS**.
 
-Previously completed against this exact source migration and recorded in
-`docs/OOTLE_0492_RUST_VALIDATION.md`:
+The secret/identity audit was also repeated against the repaired candidate:
 
-- all three template `wasm32-unknown-unknown` checks — **PASS**;
-- wallet SDK minimum-value-promise tests — **PASS**, 3/3;
-- full Windows-compatible workspace validation — **PASS**, 397 tests;
+- all three reachable commits use exactly
+  `GSXRspartan <304655218+GSXRspartan@users.noreply.github.com>` for author and committer;
+- repository-local author configuration matches that identity exactly;
+- origin fetch and push URLs remain `https://github.com/GSXRspartan/Ghost-Gate.git`;
+- no private-key block, AWS key, GitHub token, Slack token, Telegram token, Cloudflare token, bearer
+  value, JWT, or local Windows user path was introduced by the candidate diff;
+- history-wide token-shaped matches remain the documented fake redaction canaries in
+  `crates/ghost-gate-bridge/src/trace.rs`; no value was printed during the audit;
+- `gitleaks` remains unavailable, so the Git-aware pattern scan was used without downloading tools.
+
+Recorded in `docs/OOTLE_0492_RUST_VALIDATION.md`:
+
 - `cargo test --workspace` — **ENVIRONMENT BLOCKED** before engine test execution because upstream
   `wasmer-compiler-cranelift 7.5.0` rejects Windows;
 - WSL engine-test fallback — **ENVIRONMENT BLOCKED** because the registered distributions point to
   missing VHDX files;
-- formatting gate — **BLOCKED**, with both workspace/tooling scope issues and real formatting deltas
-  documented in the Rust validation report.
+- Linux engine tests — pending the blocking GitHub Actions job for the repaired commit.
 
-The publication request explicitly excludes another local Linux-only engine attempt while that
-environment blocker remains. There is no `.github` workflow in this repository, so no workflow syntax
-check applies. `markdownlint` and `lychee` are not installed; no tooling was downloaded merely for this
-audit. The documents' paths, headings, verdicts, and patch application instructions were inspected
-manually.
+No test was weakened or ignored. The GitHub workflow's owned-source formatting job is now blocking,
+and its engine job runs all four Linux-only targets. `markdownlint` and `lychee` are not installed; no
+tooling was downloaded merely for this audit. The documents' paths, headings, verdicts, and patch
+application instructions were inspected manually.
 
 ## Remaining safety boundary
 
 This commit is suitable as an auditable migration checkpoint on the upgrade branch. It must not be
-treated as deployment approval. Before Stage 3 bootstrap or merge-to-release, restore a Linux runner,
-pass the four `ghost-gate-tests` engine suites, and resolve the formatter policy/scope as specified in
-`docs/OOTLE_0492_RUST_VALIDATION.md`.
+treated as deployment approval. Before Stage 3 bootstrap or merge-to-release, the GitHub Linux job
+must pass all four `ghost-gate-tests` engine suites for the exact pushed commit. The formatting
+policy/scope is now pinned and locally green.
 
 ## Manual operator command
 

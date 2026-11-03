@@ -164,7 +164,7 @@ impl WalletDaemonChannel {
             Ok(resp) => {
                 self.client.set_auth_token(resp.token);
                 true
-            },
+            }
             Err(_) => false,
         }
     }
@@ -184,11 +184,7 @@ impl WalletDaemonChannel {
                     name.clone(),
                 ))
                 .await
-                .map_err(|e| {
-                    WalletError::Refused(format!(
-                        "cannot find account {name:?}: {e}"
-                    ))
-                }),
+                .map_err(|e| WalletError::Refused(format!("cannot find account {name:?}: {e}"))),
             None => self
                 .client
                 .accounts_get_default()

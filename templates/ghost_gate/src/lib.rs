@@ -23,8 +23,8 @@
 use tari_template_lib::prelude::*;
 
 use ghost_gate_core::{
-    Challenge, GateContext, GateParams, GatePolicy, MARK, ProofReceipt, ResourceClass, ResourceProfile,
-    qualify,
+    Challenge, GateContext, GateParams, GatePolicy, MARK, ProofReceipt, ResourceClass,
+    ResourceProfile, qualify,
 };
 
 /// The Ghost Gate component.

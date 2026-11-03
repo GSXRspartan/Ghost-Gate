@@ -72,7 +72,11 @@ mod faucet {
         /// resource address does not exist until this faucet has executed. So a wallet-funded asset
         /// needs the resource created first and the outputs minted afterwards, which is `this` then
         /// [`GhostGateFaucet::mint`].
-        pub fn new_resource(symbol: String, divisibility: u8, initial_supply: Amount) -> Component<Self> {
+        pub fn new_resource(
+            symbol: String,
+            divisibility: u8,
+            initial_supply: Amount,
+        ) -> Component<Self> {
             let bucket = ResourceBuilder::stealth()
                 .with_token_symbol(symbol)
                 .with_divisibility(divisibility)
@@ -100,7 +104,9 @@ mod faucet {
         /// The amount comes from the statement's own revealed input, so it cannot disagree with the
         /// outputs the statement creates.
         pub fn mint(&mut self, mint: StealthTransferStatement) {
-            let bucket = self.manager.mint_stealth(mint.inputs_statement.revealed_amount);
+            let bucket = self
+                .manager
+                .mint_stealth(mint.inputs_statement.revealed_amount);
             self.supply_vault.deposit(bucket.stealth_transfer(mint));
         }
 

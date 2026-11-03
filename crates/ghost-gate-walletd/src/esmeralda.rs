@@ -36,9 +36,7 @@ pub struct JsonChainReader {
 }
 
 impl JsonChainReader {
-    pub fn connect(
-        endpoint: &str,
-    ) -> Result<Self, CredentialRefusal> {
+    pub fn connect(endpoint: &str) -> Result<Self, CredentialRefusal> {
         let endpoint = endpoint.trim_end_matches('/').to_string();
         let client = reqwest::Client::builder()
             .user_agent("ghost-gate-verifier/0.1")
@@ -52,7 +50,12 @@ impl JsonChainReader {
     /// The cohort version the indexer reports, for the compatibility matrix in the logs.
     pub async fn health(&self) -> Result<Value, String> {
         let url = format!("{}/health", self.endpoint);
-        let r = self.client.get(&url).send().await.map_err(|e| e.to_string())?;
+        let r = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
         r.json().await.map_err(|e| e.to_string())
     }
 }
@@ -68,7 +71,10 @@ impl ChainReader for JsonChainReader {
             .map_err(|e| format!("indexer unreachable at {url}: {e}"))?;
 
         let status = resp.status();
-        let body: Value = resp.json().await.map_err(|e| format!("unreadable body: {e}"))?;
+        let body: Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("unreadable body: {e}"))?;
 
         // ---- locate the UTXO payload, tolerating both cohort shapes:
         //   0.42: { "substate": { "Utxo": {...} }, "verified": bool }
@@ -90,7 +96,9 @@ impl ChainReader for JsonChainReader {
             // 0.47 answers a SPENT output as 200 with a down proof (changelog #2968); 0.42
             // answered 404. Both are "no longer unspent" and must refuse.
             if down.is_some() {
-                return Err(format!("{address} is DOWN on the indexer (spent or destroyed)"));
+                return Err(format!(
+                    "{address} is DOWN on the indexer (spent or destroyed)"
+                ));
             }
             if status.as_u16() == 404 {
                 return Err(format!("{address} is not known to this indexer"));
@@ -107,7 +115,10 @@ impl ChainReader for JsonChainReader {
 
         // verified: both cohorts carry the indexer's own merkle statement at the top level.
         // Fail closed: absent = unverified = refuses at the verifier.
-        let verified = body.get("verified").and_then(|v| v.as_bool()).unwrap_or(false);
+        let verified = body
+            .get("verified")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         let output = utxo
             .get("output")
@@ -172,8 +183,16 @@ mod tests {
     #[ignore = "needs the public Esmeralda indexer"]
     async fn a_v047_component_substate_parses_through_the_state_shape() {
         let url = "https://ootle-indexer-a.tari.com/substates/component_0102030000000000000000000000000000000000000000000000000000000000";
-        let body: Value = reqwest::get(url).await.expect("fetch").json().await.expect("json");
-        assert!(body.get("state").and_then(|s| s.get("up")).is_some(), "v0.47 shape");
+        let body: Value = reqwest::get(url)
+            .await
+            .expect("fetch")
+            .json()
+            .await
+            .expect("json");
+        assert!(
+            body.get("state").and_then(|s| s.get("up")).is_some(),
+            "v0.47 shape"
+        );
         assert_eq!(body["verified"], true);
         // `proof` is served when the indexer attaches commit/value proofs to this anchor; not
         // every response carries one, so only the shape and the verified flag are asserted.
@@ -190,7 +209,10 @@ mod tests {
         ).expect("utxo id");
         let on_chain = r.utxo(&addr).await.expect("the output is on chain");
         assert!(on_chain.verified);
-        assert_eq!(on_chain.minimum_value_promise, 0, "faucet-minted, no promise");
+        assert_eq!(
+            on_chain.minimum_value_promise, 0,
+            "faucet-minted, no promise"
+        );
         assert!(on_chain.auth_key.is_some());
     }
 }

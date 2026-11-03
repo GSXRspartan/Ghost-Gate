@@ -48,8 +48,6 @@ use tari_template_lib_types::{
     stealth::{RevealedOutput, SpendAuthorization, StealthTransferStatement},
 };
 
-
-
 /// A proof the wallet has been asked to produce, in wallet terms.
 #[derive(Debug, Clone)]
 pub struct ProofRequest {
@@ -92,7 +90,10 @@ impl ProofRequest {
             .iter()
             .fold(0u64, |acc, i| acc.saturating_add(i.value));
         if total < self.output_value {
-            return Err(AssembleError::InsufficientFunds { available: total, required: self.output_value });
+            return Err(AssembleError::InsufficientFunds {
+                available: total,
+                required: self.output_value,
+            });
         }
         if self.output_value < policy.threshold {
             return Err(AssembleError::OutputBelowThreshold {
@@ -242,14 +243,7 @@ pub fn refresh_output_witness(
     owner_view_key: &RistrettoPublicKey,
     mask: &RistrettoSecretKey,
 ) -> Result<StealthOutputWitness, AssembleError> {
-    qualifying_output_witness(
-        amount,
-        0,
-        network,
-        owner_account_key,
-        owner_view_key,
-        mask,
-    )
+    qualifying_output_witness(amount, 0, network, owner_account_key, owner_view_key, mask)
 }
 
 /// A zero-mask output witness for tests and fixtures. Never use this in a wallet: a zero mask
@@ -260,7 +254,9 @@ pub fn test_output_witness(amount: u64, mvp: u64) -> StealthOutputWitness {
         witness: OutputWitness {
             amount,
             mask: mask.clone(),
-            sender_public_nonce: RistrettoPublicKey::from_secret_key(&RistrettoSecretKey::from(11u64)),
+            sender_public_nonce: RistrettoPublicKey::from_secret_key(&RistrettoSecretKey::from(
+                11u64,
+            )),
             minimum_value_promise: mvp,
             encrypted_data: EncryptedData::try_from(vec![0u8; EncryptedData::min_size()]).unwrap(),
             resource_view_key: None,
@@ -281,8 +277,10 @@ mod tests {
     use ghost_gate_core::network;
     use tari_template_lib_types::{ComponentAddress, Hash32, MaxBytes, ObjectKey};
 
-    const RESOURCE: ResourceAddress = ResourceAddress::new(ObjectKey::from_array([7u8; ObjectKey::LENGTH]));
-    const GATE: ComponentAddress = ComponentAddress::new(ObjectKey::from_array([1u8; ObjectKey::LENGTH]));
+    const RESOURCE: ResourceAddress =
+        ResourceAddress::new(ObjectKey::from_array([7u8; ObjectKey::LENGTH]));
+    const GATE: ComponentAddress =
+        ComponentAddress::new(ObjectKey::from_array([1u8; ObjectKey::LENGTH]));
 
     /// The cohort these fixtures pretend to run on.
     const NETWORK: u8 = network::LOCALNET;
@@ -314,8 +312,12 @@ mod tests {
                 mask: RistrettoSecretKey::random(&mut rand::rng()),
                 value: input_value,
             }],
-            owner_view_key: RistrettoPublicKey::from_secret_key(&RistrettoSecretKey::random(&mut rand::rng())),
-            owner_account_key: RistrettoPublicKey::from_secret_key(&RistrettoSecretKey::random(&mut rand::rng())),
+            owner_view_key: RistrettoPublicKey::from_secret_key(&RistrettoSecretKey::random(
+                &mut rand::rng(),
+            )),
+            owner_account_key: RistrettoPublicKey::from_secret_key(&RistrettoSecretKey::random(
+                &mut rand::rng(),
+            )),
             output_mask: RistrettoSecretKey::random(&mut rand::rng()),
             network: ootle_network::Network::LocalNet,
         }
@@ -327,7 +329,9 @@ mod tests {
         let statement = assemble_proof_statement(&request, &policy()).unwrap();
         assert_eq!(statement.outputs_statement.outputs.len(), 1);
         assert_eq!(
-            statement.outputs_statement.outputs[0].output.minimum_value_promise,
+            statement.outputs_statement.outputs[0]
+                .output
+                .minimum_value_promise,
             10_000,
             "the public promise is the gate threshold"
         );
@@ -374,7 +378,10 @@ mod tests {
     fn no_inputs_is_refused() {
         let mut request = request(20_000, 20_000);
         request.inputs.clear();
-        assert_eq!(assemble_proof_statement(&request, &policy()).unwrap_err(), AssembleError::NoInputs);
+        assert_eq!(
+            assemble_proof_statement(&request, &policy()).unwrap_err(),
+            AssembleError::NoInputs
+        );
     }
 
     #[test]
@@ -442,7 +449,10 @@ mod tests {
         assert!(statement.outputs_statement.revealed_output.is_none());
         assert_eq!(statement.outputs_statement.outputs.len(), 1);
         assert!(statement.balance_proof.is_some());
-        assert!(statement.covenant_claims.is_empty(), "key-path inputs join no covenant partition");
+        assert!(
+            statement.covenant_claims.is_empty(),
+            "key-path inputs join no covenant partition"
+        );
     }
 
     // -----------------------------------------------------------------------------------------
@@ -458,7 +468,10 @@ mod tests {
         // Nothing in the assembly path names a resource: the same request shape, pointed at a
         // different gate over a different resource, produces a statement carrying that gate's
         // threshold.
-        let other_policy = GatePolicy { resource: OTHER_RESOURCE, ..policy() };
+        let other_policy = GatePolicy {
+            resource: OTHER_RESOURCE,
+            ..policy()
+        };
         let mut request = request(40_000, 40_000);
         request.resource = OTHER_RESOURCE;
         request.challenge.resource = OTHER_RESOURCE;

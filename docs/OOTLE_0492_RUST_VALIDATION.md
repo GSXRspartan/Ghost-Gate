@@ -1,15 +1,19 @@
 # Ootle 0.49.2 Rust validation
 
-Date: 2026-11-02
+Date: 2026-11-02 (updated after the Linux migration-test repair)
 Repository: canonical Ghost Gate checkout
 HEAD before validation: `f960d1575c7175f98625d2ae0015a300980b0b68`
 
+Follow-up repair base: `279cc662db6bc914a24ac58cb797ae5df89e6262` on
+`upgrade/ootle-0.49.2`.
+
 ## Scope and safety
 
-This stage was local validation only. No template was published, no transaction was submitted, no
-chain address was regenerated, and no Cloudflare, VPS, production configuration, or live service was
-changed. No source fix was made. The only tracked-worktree addition made by this stage is this report.
-Cargo and rustfmt created or reused untracked build artifacts only.
+This stage was local validation and test-migration repair only. No template was published, no
+transaction was submitted, no chain address was regenerated, and no Cloudflare, VPS, production
+configuration, or live service was changed. The follow-up changed only engine test fixtures, their
+formatting scope, this report, and the migration validation workflow. Cargo and rustfmt created or
+reused untracked build artifacts only.
 
 The Tari/Ootle validation instructions were read before performing the checks. The migration audit,
 implementation report, and bootstrap plan were also read before validation.
@@ -101,16 +105,17 @@ rustfmt +nightly --edition 2024 --check `
   templates/ghost_gate_other_classes/src/lib.rs
 ```
 
-Both failed. Nightly avoids the stable-only warning mismatch but still finds real formatting deltas in
+Both failed on the initial run. Nightly avoids the stable-only warning mismatch but still found real formatting deltas in
 the patched wallet SDK and Ghost Gate. The focused check confirms that migration-touched files such as
 `ghost-gate-wallet/src/lib.rs`, walletd sources, and all three templates are among the files with
 formatting deltas. The root command also finds many unrelated, pre-existing formatting deltas (for
 example in `ghost-gate-admin`) because it formats the full workspace.
 
-This is a **SOURCE FAILURE for formatting compliance**, not a compile or behavioral migration defect.
-It was not auto-fixed because doing so would reformat a broad set of pre-existing files and the
-external patched Ootle tree, contrary to this stage's instruction to fix only migration source defects
-and preserve existing work.
+This was a **SOURCE FAILURE for formatting compliance**, not a compile or behavioral migration
+defect. It is resolved by the follow-up described below: the documented nightly formatter was run
+over the migration-touched Ghost Gate-owned files, including the three repaired engine test files,
+and the exact scoped `--check` command now passes. The external patched Ootle checkout and unrelated
+pre-existing Ghost Gate files remain outside this repository-specific formatting gate.
 
 ### Template and migration-specific checks
 
@@ -247,16 +252,16 @@ The `ghost-gate-tests` command executes all four previously blocked engine targe
 `adversarial`, `cross_resource`, and `mvp_and_shape`. The workflow uses Ootle's own 0.49.2 Ubuntu
 dependency installer rather than maintaining a guessed package list in Ghost Gate.
 
-Formatting remains a separate `Ghost Gate formatting diagnostic (non-blocking)` job. It runs the
-documented nightly formatter only over the migration-touched Ghost Gate Rust files, does not traverse
-or gate on the external patched Ootle workspace, and does not suppress the existing Ghost Gate
-formatting differences. Its failure is visible but cannot obscure the independent Linux engine-test
-result. Formatting remains a release/bootstrap blocker until its canonical policy and source scope
-are resolved and the focused diagnostic is green.
+Formatting is a separate, blocking `Ghost Gate owned-source formatting` job. It runs the documented
+`nightly-2025-12-05` formatter over the migration-touched Ghost Gate Rust files plus the three engine
+test files repaired in this follow-up. It does not traverse or gate on the external patched Ootle
+workspace. `continue-on-error` has been removed: any future formatting regression in this owned
+source scope legitimately fails the workflow.
 
-This local commit only defines the workflow. No GitHub Actions result exists until an operator pushes
-the branch or manually dispatches the workflow, so this report's validation verdict remains blocked
-until the required job completes successfully and the separate formatting blocker is resolved.
+No GitHub Actions result for the repaired source exists until an operator pushes the local repair
+commit or manually dispatches the workflow. The local formatting blocker is resolved; the report's
+validation verdict remains blocked only until the required Linux engine job completes successfully
+for the exact repair commit.
 
 ## Ootle 0.49.2 migration assertions
 
@@ -310,45 +315,108 @@ not local source failures.
 
 ### SOURCE FAILURE
 
-1. Formatting compliance is red. Both the required stable root check and the diagnostic nightly/
-   focused checks report formatting differences, including in migration-touched Ghost Gate files.
-   No behavioral or compile failure was found in those files.
+None remains in the locally executable checks. The initial formatting failure and the stale 0.48
+stealth-key test fixtures were repaired without weakening or ignoring a test.
 
 ### ENVIRONMENT FAILURE
 
 1. `ghost-gate-tests` cannot compile on Windows because upstream `wasmer-compiler-cranelift 7.5.0`
    intentionally rejects Windows.
 2. The registered WSL distributions cannot start because their configured VHDX files are missing, so
-   the four required Linux engine suites could not be executed locally.
+   the four required Linux engine suites could not be executed locally. GitHub Actions is the
+   authoritative Linux execution environment for the repaired commit.
 
 ### EXPECTED LIVE-CHAIN SKIP
 
 The five ignored tests listed above intentionally require a public/historical indexer or the shared
 localnet indexer. They are not evidence of a source failure and were not contacted in this stage.
 
-## Source fixes and files changed by this stage
+## Follow-up repair and rerun
 
-No Rust, manifest, test, template, script, configuration, lockfile, or external Ootle source was
-changed. No test was weakened or marked ignored. This report is the only file created by Stage 3A.1.
+The repair began from clean commit `279cc662db6bc914a24ac58cb797ae5df89e6262` on
+`upgrade/ootle-0.49.2`. The pinned Ootle reference remained clean at tag `v0.49.2`, commit
+`aa7b0c81719e5c3cfaf9bf3b5fb87bd83180cb90`.
+
+The Linux compiler errors exposed stale 0.48 test-fixture assumptions. The old fixture API treated
+the account key as the only recipient key and called:
+
+```text
+derive_stealth_owner_public_key(network, account_public, nonce_secret)
+derive_stealth_owner_secret(network, account_secret, public_nonce)
+```
+
+Ootle 0.49.2 separates the account/spend key from the view key:
+
+```text
+derive_stealth_owner_public_key(network, account_public, view_public, nonce_secret)
+derive_stealth_owner_secret(network, account_secret, view_secret, public_nonce)
+```
+
+The sender derives `P = H(r·V)·G + A`; the owner derives `p = H(v·R) + a`. Correctness follows from
+the DH equality `r·V = v·R`. The repaired synthetic fixtures therefore use distinct deterministic
+account, view, and nonce keys, and the nonce used for the authorization key is now the same nonce
+whose public half is stored in the output. The real-wallet fixture reads both the account secret and
+view secret from the SDK key manager. `RistrettoPublicKeyBytes` is explicitly converted to
+`RistrettoPublicKey`; no public nonce is inferred or converted into a secret.
+
+`WalletSdkConfig.indexer_trust` is explicitly `IndexerTrust::Trust` only in the offline LocalNet
+engine fixture. Its network interface is the deliberately inert `127.0.0.1:1`, and the test exercises
+local wallet statement construction rather than indexer proofs or validator anchoring. This matches
+the upstream test default and is not a production indexer trust decision.
+
+Files with semantic test/CI/report changes:
+
+- `.github/workflows/ootle-0492-validation.yml`;
+- `crates/ghost-gate-tests/tests/adversarial.rs`;
+- `crates/ghost-gate-tests/tests/cross_resource.rs`;
+- `crates/ghost-gate-tests/tests/gate_engine.rs`;
+- `docs/OOTLE_0492_RUST_VALIDATION.md`.
+
+The documented formatter also made formatting-only changes in these Ghost Gate-owned files:
+
+- `crates/ghost-gate-wallet/src/lib.rs`;
+- `crates/ghost-gate-walletd/src/bin/ghost-gate-bridge.rs`;
+- `crates/ghost-gate-walletd/src/esmeralda.rs`;
+- `crates/ghost-gate-walletd/src/lib.rs`;
+- `templates/ghost_gate/src/lib.rs`;
+- `templates/ghost_gate_faucet/src/lib.rs`;
+- `templates/ghost_gate_other_classes/src/lib.rs`.
+
+No manifest, lockfile, runtime protocol path, test ignore list, external Ootle source, or deployment
+configuration changed.
+
+Follow-up command results:
+
+| Command | Result | Classification |
+|---|---|---|
+| `cargo check -p ghost-gate-tests --tests --locked` | Stopped in upstream `wasmer-compiler-cranelift 7.5.0` before the test binaries were type-checked. | **ENVIRONMENT FAILURE** on Windows; Linux CI required. |
+| scoped `rustfmt +nightly-2025-12-05 --edition 2024 --check ...` | **PASS** for all 13 files in the workflow scope. | Pass. |
+| `cargo check --workspace --locked` | **PASS**. | Pass. |
+| `cargo test --workspace --exclude ghost-gate-tests --locked` | **PASS**, 397 passed, 0 failed, 5 expected live-chain ignores. | Pass. |
+| three template `cargo check --target wasm32-unknown-unknown --locked` commands | **PASS / PASS / PASS**. | Pass. |
+| patched wallet SDK `minimum_value_promise` tests | **PASS**, 3 passed, 0 failed, 54 filtered out. | Pass. |
+| workflow YAML parse and assertions | **PASS**. | Pass. |
+
+The test/API scan found no other stale three-argument stealth owner derivations and no missing
+`WalletSdkConfig.indexer_trust` initializer in Ghost Gate. The migration assertions above remain
+unchanged: Ghost Gate passes no Tari `Proof` arguments, uses no account `*_with_auth` method, has no
+signer/owner proof-getter dependency, and defines no auth hook. Consequently no
+`AuthorizeProof`/`DropProofAuthorization` instruction or auth-hook input was added.
 
 ## Bootstrap safety
 
-The Windows-compatible source surface is green and the Ootle 0.49.2 APIs compile. Nevertheless, the
-repository is **not yet cleared for Stage 3 live bootstrap** because the required engine-backed
-adversarial/cross-resource/template execution tests have not run and the required formatting gate is
-red.
+The Windows-compatible source surface and owned-source formatting scope are green. Nevertheless, the
+repository is **not yet cleared for Stage 3 live bootstrap** because the repaired engine-backed
+adversarial/cross-resource/template execution tests have not yet completed on Linux for this exact
+commit.
 
 Minimum concrete actions required to reach PASS:
 
-1. Push the workflow commit to `upgrade/ootle-0.49.2` and require the blocking
+1. Push the local repair commit to `upgrade/ootle-0.49.2` and require the blocking
    `Linux engine and migration tests` job to pass for the exact commit. All four engine integration
    targets must pass; a restored WSL or equivalent Linux runner remains an acceptable local fallback.
-2. Define/pin the canonical rustfmt toolchain and scope so the Ghost Gate formatting gate is
-   reproducible without treating the external patched Ootle checkout as vendored Ghost Gate source.
-   Format the migration-touched files (and any in-scope pre-existing files) without semantic changes,
-   then make the agreed `cargo fmt --all -- --check` equivalent green.
-3. Rerun `cargo check --workspace`, the Windows-compatible workspace tests, all three WASM checks,
-   and the focused wallet SDK minimum-value-promise tests after those two actions. Do not bootstrap
-   until the rerun is green.
+2. Require the blocking `Ghost Gate owned-source formatting` job to pass for the exact commit.
+3. Do not bootstrap if either job is red or cancelled. No live-chain skip may substitute for either
+   required job.
 
 RUST VALIDATION VERDICT: BLOCKED

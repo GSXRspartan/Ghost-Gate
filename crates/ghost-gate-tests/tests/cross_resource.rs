@@ -42,9 +42,11 @@ use tari_crypto::{
     ristretto::{RistrettoPublicKey, RistrettoSecretKey},
 };
 use tari_engine_types::substate::SubstateDiff;
-use tari_ootle_wallet_crypto::{MaskAndValue, OutputWitness, StealthInputWitness, StealthOutputWitness};
 use tari_ootle_common_types::substate_type::SubstateType;
 use tari_ootle_transaction::{Epoch, Transaction, args};
+use tari_ootle_wallet_crypto::{
+    MaskAndValue, OutputWitness, StealthInputWitness, StealthOutputWitness,
+};
 use tari_template_lib::types::{
     Amount, ComponentAddress, EncryptedData, Hash32, MaxBytes, ResourceAddress,
     crypto::{RistrettoPublicKeyBytes, UtxoTag},
@@ -78,6 +80,8 @@ const FUNDING: u64 = 30_000;
 const FIRST_SEED: u64 = 1_000_000_000;
 const SECOND_SEED: u64 = 2_000_000_000;
 const THIRD_SEED: u64 = 3_000_000_000;
+const NONCE_OFFSET: u64 = 500;
+const VIEW_KEY_SEED: u64 = 9_000_000_000;
 
 // ---------------------------------------------------------------------------------------------
 // Two assets that disagree about everything except what matters
@@ -118,7 +122,10 @@ fn session_id() -> MaxBytes<64> {
 // ---------------------------------------------------------------------------------------------
 
 fn harness() -> TemplateTest {
-    let mut test = TemplateTest::new(CRATE_PATH, [FAUCET_TEMPLATE, GATE_TEMPLATE, OTHER_CLASSES_TEMPLATE]);
+    let mut test = TemplateTest::new(
+        CRATE_PATH,
+        [FAUCET_TEMPLATE, GATE_TEMPLATE, OTHER_CLASSES_TEMPLATE],
+    );
     test.set_virtual_substate(
         tari_engine_types::virtual_substate::VirtualSubstateId::CurrentEpoch,
         tari_engine_types::virtual_substate::VirtualSubstate::CurrentEpoch(5),
@@ -154,12 +161,14 @@ fn fund(test: &mut TemplateTest, asset: &Asset, amount: u64, seed: u64) -> Funds
         witness: OutputWitness {
             amount,
             mask: mask.clone(),
-            sender_public_nonce: RistrettoPublicKey::from_secret_key(&RistrettoSecretKey::from(seed + 500)),
+            sender_public_nonce: RistrettoPublicKey::from_secret_key(&RistrettoSecretKey::from(
+                seed + NONCE_OFFSET,
+            )),
             minimum_value_promise: 0,
             encrypted_data: EncryptedData::try_from(vec![0u8; EncryptedData::min_size()]).unwrap(),
             resource_view_key: None,
         },
-        auth: SpendAuthorization::Key(stealth_spend_key(&owner_pk, seed)),
+        auth: SpendAuthorization::Key(stealth_spend_key(&owner_pk, seed + NONCE_OFFSET)),
         tag: UtxoTag::new(0),
     };
 
@@ -198,7 +207,12 @@ fn fund(test: &mut TemplateTest, asset: &Asset, amount: u64, seed: u64) -> Funds
 }
 
 /// Deploys a gate over `resource`. Named so repeated deployments in one test do not collide.
-fn deploy_gate(test: &mut TemplateTest, name: &str, resource: ResourceAddress, threshold: u64) -> ComponentAddress {
+fn deploy_gate(
+    test: &mut TemplateTest,
+    name: &str,
+    resource: ResourceAddress,
+    threshold: u64,
+) -> ComponentAddress {
     let template_addr = test.get_template_address(GATE_NAME);
     test.execute_expect_success(
         test.transaction()
@@ -223,7 +237,12 @@ fn deploy_gate(test: &mut TemplateTest, name: &str, resource: ResourceAddress, t
         .unwrap()
 }
 
-fn challenge_for(gate: ComponentAddress, resource: ResourceAddress, threshold: u64, nonce: u8) -> Challenge {
+fn challenge_for(
+    gate: ComponentAddress,
+    resource: ResourceAddress,
+    threshold: u64,
+    nonce: u8,
+) -> Challenge {
     Challenge {
         gate,
         resource,
@@ -240,19 +259,27 @@ fn challenge_for(gate: ComponentAddress, resource: ResourceAddress, threshold: u
 ///
 /// `input_value` must equal the real value of the input being spent: the balance proof is over the
 /// real amounts, so a mismatch is caught by the engine rather than by this file.
-fn proof_statement(input_mask: &RistrettoSecretKey, input_value: u64, output_value: u64, mvp: u64) -> StealthTransferStatement {
+fn proof_statement(
+    input_mask: &RistrettoSecretKey,
+    input_value: u64,
+    output_value: u64,
+    mvp: u64,
+) -> StealthTransferStatement {
     let mask = RistrettoSecretKey::random(&mut rand::rng());
     let out = tari_ootle_wallet_crypto::StealthOutputWitness {
         witness: OutputWitness {
             amount: output_value,
             mask,
-            sender_public_nonce: RistrettoPublicKey::from_secret_key(&RistrettoSecretKey::from(999u64)),
+            sender_public_nonce: RistrettoPublicKey::from_secret_key(&RistrettoSecretKey::from(
+                999u64,
+            )),
             minimum_value_promise: mvp,
             encrypted_data: EncryptedData::try_from(vec![0u8; EncryptedData::min_size()]).unwrap(),
             resource_view_key: None,
         },
         auth: SpendAuthorization::Key(
-            RistrettoPublicKey::from_secret_key(&RistrettoSecretKey::random(&mut rand::rng())).to_byte_type(),
+            RistrettoPublicKey::from_secret_key(&RistrettoSecretKey::random(&mut rand::rng()))
+                .to_byte_type(),
         ),
         tag: UtxoTag::new(0),
     };
@@ -270,8 +297,14 @@ fn proof_statement(input_mask: &RistrettoSecretKey, input_value: u64, output_val
 
 fn stealth_spend_key(account_key: &RistrettoPublicKey, nonce: u64) -> RistrettoPublicKeyBytes {
     use ootle_network::Network;
+    let view_key = RistrettoPublicKey::from_secret_key(&RistrettoSecretKey::from(VIEW_KEY_SEED));
     tari_ootle_wallet_crypto::StealthCryptoApi::new()
-        .derive_stealth_owner_public_key(Network::LocalNet, account_key, &RistrettoSecretKey::from(nonce))
+        .derive_stealth_owner_public_key(
+            Network::LocalNet,
+            account_key,
+            &view_key,
+            &RistrettoSecretKey::from(nonce),
+        )
         .to_byte_type()
 }
 
@@ -280,6 +313,7 @@ fn spend_secret(account_secret: &RistrettoSecretKey, nonce: u64) -> RistrettoSec
     tari_ootle_wallet_crypto::StealthCryptoApi::new().derive_stealth_owner_secret(
         ootle_network::Network::LocalNet,
         account_secret,
+        &RistrettoSecretKey::from(VIEW_KEY_SEED),
         &RistrettoPublicKey::from_secret_key(&RistrettoSecretKey::from(nonce)),
     )
 }
@@ -302,7 +336,7 @@ fn proof_transaction(
     statement: StealthTransferStatement,
     seed: u64,
 ) -> tari_ootle_transaction::Transaction {
-    let sk = spend_secret(test.secret_key(), seed);
+    let sk = spend_secret(test.secret_key(), seed + NONCE_OFFSET);
     Transaction::builder_localnet(Epoch(1))
         .call_method(gate, "prove_access", args![challenge, statement])
         .finish()
@@ -364,7 +398,10 @@ fn holding_only_the_first_asset_cannot_satisfy_a_gate_over_the_second() {
     let mut test = harness();
     let first = fund(&mut test, &FIRST_ASSET, FUNDING, FIRST_SEED);
     let second = fund(&mut test, &SECOND_ASSET, FUNDING, SECOND_SEED);
-    assert_ne!(first.resource, second.resource, "two faucets must yield two resources");
+    assert_ne!(
+        first.resource, second.resource,
+        "two faucets must yield two resources"
+    );
 
     let gate = deploy_gate(&mut test, "gate_under_test", second.resource, THRESHOLD);
     // The challenge is internally consistent with the gate: right resource, right threshold.
@@ -494,8 +531,15 @@ fn the_second_asset_well_above_the_threshold_is_accepted_and_reports_only_the_fl
         .filter_map(|(_, substate)| substate.substate_value().as_utxo())
         .filter_map(|utxo| utxo.output().map(|o| o.output().minimum_value_promise))
         .collect();
-    assert_eq!(promises, vec![THRESHOLD], "the public commitment is the floor, never the real amount");
-    assert_ne!(FUNDING, THRESHOLD, "the real amount and the floor must differ for this to mean anything");
+    assert_eq!(
+        promises,
+        vec![THRESHOLD],
+        "the public commitment is the floor, never the real amount"
+    );
+    assert_ne!(
+        FUNDING, THRESHOLD,
+        "the real amount and the floor must differ for this to mean anything"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -569,12 +613,16 @@ fn a_second_asset_gate_still_binds_gate_site_session_and_threshold() {
         ),
         (
             "site",
-            Box::new(|c: &mut Challenge| c.relying_site = MaxBytes::new_checked(b"evil.example".to_vec()).unwrap()),
+            Box::new(|c: &mut Challenge| {
+                c.relying_site = MaxBytes::new_checked(b"evil.example".to_vec()).unwrap()
+            }),
             "challenge is for a different relying site",
         ),
         (
             "session",
-            Box::new(|c: &mut Challenge| c.session_commitment = MaxBytes::new_checked(b"session-2".to_vec()).unwrap()),
+            Box::new(|c: &mut Challenge| {
+                c.session_commitment = MaxBytes::new_checked(b"session-2".to_vec()).unwrap()
+            }),
             "challenge is for a different browser session",
         ),
         (
@@ -628,20 +676,28 @@ fn a_gate_reports_its_own_resource_and_divisibility() {
         let gate = deploy_gate(&mut test, "gate_under_test", funds.resource, THRESHOLD);
 
         let resource: ResourceAddress = test.call_method(gate, "resource", args![], vec![]);
-        assert_eq!(resource, funds.resource, "the gate must report the address it was given");
+        assert_eq!(
+            resource, funds.resource,
+            "the gate must report the address it was given"
+        );
 
         let divisibility: u8 = test.call_method(gate, "divisibility", args![], vec![]);
         assert_eq!(
-            divisibility,
-            asset.divisibility,
+            divisibility, asset.divisibility,
             "divisibility comes from the resource's own chain record, not from a caller"
         );
 
         let threshold: u64 = test.call_method(gate, "threshold", args![], vec![]);
-        assert_eq!(threshold, THRESHOLD, "the threshold is the raw integer consensus compares");
+        assert_eq!(
+            threshold, THRESHOLD,
+            "the threshold is the raw integer consensus compares"
+        );
 
         let gate_network: u8 = test.call_method(gate, "network", args![], vec![]);
-        assert_eq!(gate_network, NETWORK, "the gate is bound to the cohort it was deployed for");
+        assert_eq!(
+            gate_network, NETWORK,
+            "the gate is bound to the cohort it was deployed for"
+        );
 
         // The same raw threshold renders two different ways, and only one of them is wrong for the
         // asset it belongs to.
@@ -650,7 +706,10 @@ fn a_gate_reports_its_own_resource_and_divisibility() {
             divisibility,
             &ghost_gate_verifier::display::Symbol::Resolved(asset.symbol.to_string()),
         );
-        assert_eq!(rendered.raw, THRESHOLD, "display never moves the number consensus uses");
+        assert_eq!(
+            rendered.raw, THRESHOLD,
+            "display never moves the number consensus uses"
+        );
         assert!(rendered.display.ends_with(asset.symbol));
     }
 }
@@ -683,7 +742,11 @@ fn two_gates_over_two_assets_report_different_resources() {
 /// their proof keeps failing.
 #[test]
 fn a_gate_refuses_every_resource_class_it_cannot_prove() {
-    let cases: Vec<(&str, Box<dyn Fn(&mut TemplateTest) -> ResourceAddress>, &str)> = vec![
+    let cases: Vec<(
+        &str,
+        Box<dyn Fn(&mut TemplateTest) -> ResourceAddress>,
+        &str,
+    )> = vec![
         (
             "public fungible",
             Box::new(|t: &mut TemplateTest| {
@@ -752,7 +815,14 @@ fn a_gate_refuses_every_resource_class_it_cannot_prove() {
                 .call_function(
                     template_addr,
                     "new",
-                    args![Workspace("gate_under_test"), resource, THRESHOLD, site_id(), session_id(), NETWORK],
+                    args![
+                        Workspace("gate_under_test"),
+                        resource,
+                        THRESHOLD,
+                        site_id(),
+                        session_id(),
+                        NETWORK
+                    ],
                 )
                 .build_and_seal(test.secret_key()),
             vec![],
@@ -781,7 +851,14 @@ fn a_gate_refuses_a_zero_threshold() {
             .call_function(
                 template_addr,
                 "new",
-                args![Workspace("gate_under_test"), funds.resource, 0u64, site_id(), session_id(), NETWORK],
+                args![
+                    Workspace("gate_under_test"),
+                    funds.resource,
+                    0u64,
+                    site_id(),
+                    session_id(),
+                    NETWORK
+                ],
             )
             .build_and_seal(test.secret_key()),
         vec![],
@@ -858,12 +935,14 @@ fn a_wallet_can_be_funded_with_a_resource_created_in_a_separate_step() {
         witness: OutputWitness {
             amount: FUNDING,
             mask: mask.clone(),
-            sender_public_nonce: RistrettoPublicKey::from_secret_key(&RistrettoSecretKey::from(FIRST_SEED + 500)),
+            sender_public_nonce: RistrettoPublicKey::from_secret_key(&RistrettoSecretKey::from(
+                FIRST_SEED + NONCE_OFFSET,
+            )),
             minimum_value_promise: 0,
             encrypted_data: EncryptedData::try_from(vec![0u8; EncryptedData::min_size()]).unwrap(),
             resource_view_key: None,
         },
-        auth: SpendAuthorization::Key(stealth_spend_key(&account_pk, FIRST_SEED)),
+        auth: SpendAuthorization::Key(stealth_spend_key(&account_pk, FIRST_SEED + NONCE_OFFSET)),
         tag: UtxoTag::new(0),
     };
     let mint_statement = tari_ootle_wallet_crypto::stealth::create_transfer_statement(
@@ -887,7 +966,10 @@ fn a_wallet_can_be_funded_with_a_resource_created_in_a_separate_step() {
     let statement = proof_statement(&mask, FUNDING, FUNDING, THRESHOLD);
     let transaction = proof_transaction(&test, gate, challenge, statement, FIRST_SEED);
     let result = test.execute_expect_success(transaction, vec![]);
-    assert_eq!(count_new_utxos(&result.finalize.any_accept().expect("accepted")), 1);
+    assert_eq!(
+        count_new_utxos(&result.finalize.any_accept().expect("accepted")),
+        1
+    );
 
     let accepted: u64 = test.extract_component_value(gate, "$.5");
     assert_eq!(accepted, 1);

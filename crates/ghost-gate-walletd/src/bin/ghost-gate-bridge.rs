@@ -34,8 +34,14 @@ fn main() -> ExitCode {
     let registry_dir = std::env::var("GG_BINDINGS_PATH").ok();
     if let Some(result) = ghost_gate_bridge::reset_guard::cli(&args, registry_dir.as_deref()) {
         return match result {
-            Ok(message) => { println!("ghost-gate-bridge: {message}"); ExitCode::SUCCESS }
-            Err(e) => { eprintln!("ghost-gate-bridge: {e}"); ExitCode::FAILURE }
+            Ok(message) => {
+                println!("ghost-gate-bridge: {message}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("ghost-gate-bridge: {e}");
+                ExitCode::FAILURE
+            }
         };
     }
     let config = match Config::from_env() {
@@ -55,7 +61,10 @@ fn main() -> ExitCode {
         // Apply the per-gate scope here too: Config::build() records it on its own throwaway
         // registry, but the bridge's runtime registry is built in this loop, so the scope must
         // land here or the env setting silently never reaches the credential route.
-        if let Ok(mode) = std::env::var(format!("GG_GATE_USE_{}", id.to_uppercase().replace('-', "_"))) {
+        if let Ok(mode) = std::env::var(format!(
+            "GG_GATE_USE_{}",
+            id.to_uppercase().replace('-', "_")
+        )) {
             registry.set_use_mode(id, &mode);
         }
     }
@@ -95,9 +104,14 @@ fn main() -> ExitCode {
     // instantiation, so the bridge must stamp the SAME value into its challenges. Read as a
     // UTF-8 string and held only in this process; the operator sets the identical value when
     // instantiating the component.
-    let component_session = std::env::var("GG_GATE_SESSION").ok().filter(|v| !v.trim().is_empty());
+    let component_session = std::env::var("GG_GATE_SESSION")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
     if let Some(session) = &component_session {
-        println!("  component session: configured ({} bytes) — consensus gates carry the deployment-time identity; per-visitor binding is nonce + origin", session.len());
+        println!(
+            "  component session: configured ({} bytes) — consensus gates carry the deployment-time identity; per-visitor binding is nonce + origin",
+            session.len()
+        );
     }
     let mut wallet = match std::env::var("GG_WALLETD_ENDPOINT") {
         Ok(endpoint) if !endpoint.trim().is_empty() => {
@@ -111,7 +125,9 @@ fn main() -> ExitCode {
                 .filter(|v| !v.trim().is_empty());
             match ghost_gate_walletd::WalletDaemonChannel::connect_with_account(
                 &endpoint,
-                std::env::var("GG_WALLETD_TOKEN").ok().filter(|t| !t.trim().is_empty()),
+                std::env::var("GG_WALLETD_TOKEN")
+                    .ok()
+                    .filter(|t| !t.trim().is_empty()),
                 network,
                 fee_ceiling(),
                 max_epoch(),
@@ -139,7 +155,9 @@ fn main() -> ExitCode {
                         "no token; a daemon requiring auth will refuse account calls"
                     };
                     let acct_note = account_name.as_deref().unwrap_or("default");
-                    println!("  wallet daemon: {endpoint} (network byte {network}, account {acct_note}, {auth_note})");
+                    println!(
+                        "  wallet daemon: {endpoint} (network byte {network}, account {acct_note}, {auth_note})"
+                    );
                     AnyWallet::Live(channel)
                 }
                 Err(e) => {
@@ -218,21 +236,27 @@ fn main() -> ExitCode {
             .build()
             .map_err(|e| format!("runtime: {e}"))
             .and_then(|rt| {
-                rt.block_on(ghost_gate_minotari::chain_reader::BaseNodeXtmReader::connect(&endpoint))
-                    .map_err(|e| e.to_string())
+                rt.block_on(
+                    ghost_gate_minotari::chain_reader::BaseNodeXtmReader::connect(&endpoint),
+                )
+                .map_err(|e| e.to_string())
             }) {
             Ok(reader) => {
                 println!("  minotari base node: {endpoint} (L1 XTM verification enabled)");
                 Some(reader)
-            },
+            }
             Err(e) => {
                 if has_xtm_gate {
-                    eprintln!("ghost-gate-bridge: cannot connect to the Minotari base node at {endpoint}: {e}");
+                    eprintln!(
+                        "ghost-gate-bridge: cannot connect to the Minotari base node at {endpoint}: {e}"
+                    );
                     return ExitCode::FAILURE;
                 }
-                eprintln!("  note: the Minotari base node at {endpoint} is unreachable ({e}); the L1 path is disabled.");
+                eprintln!(
+                    "  note: the Minotari base node at {endpoint} is unreachable ({e}); the L1 path is disabled."
+                );
                 None
-            },
+            }
         },
         None => {
             if has_xtm_gate {
@@ -278,7 +302,9 @@ fn main() -> ExitCode {
                 status.network,
                 status.spend_public_key.as_deref().unwrap_or("-")
             ),
-            Err(e) => eprintln!("  warning: the Minotari wallet did not answer ({e}); XTM proofs will fail."),
+            Err(e) => eprintln!(
+                "  warning: the Minotari wallet did not answer ({e}); XTM proofs will fail."
+            ),
         }
     }
 
@@ -320,29 +346,48 @@ fn main() -> ExitCode {
             // 0.47/0.48 used the transitional JSON value shape. The pinned 0.49 client decodes the
             // current base64-CBOR `Encoded<SubstateValue>` representation itself, so routing 0.49
             // through the legacy JSON field walker would fail closed on every UTXO.
-            let json_reader =
-                std::env::var("GG_INDEXER_JSON").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false)
-                    || (47..49).contains(&minor);
+            let json_reader = std::env::var("GG_INDEXER_JSON")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false)
+                || (47..49).contains(&minor);
             if json_reader {
                 match JsonChainReader::connect(&endpoint) {
                     Ok(reader) => {
                         println!(
                             "  indexer: {endpoint} (credential mode enabled, dual-shape JSON reader{}",
-                            if version.is_empty() { String::new() } else { format!(", indexer {version}") }
+                            if version.is_empty() {
+                                String::new()
+                            } else {
+                                format!(", indexer {version}")
+                            }
                         );
-                        let mut bridge = Bridge::assemble_full(registry, wallet, config.origins, reader, xtm_channel, xtm_chain);
-                        bridge.component_session = component_session.clone().map(String::into_bytes);
+                        let mut bridge = Bridge::assemble_full(
+                            registry,
+                            wallet,
+                            config.origins,
+                            reader,
+                            xtm_channel,
+                            xtm_chain,
+                        );
+                        bridge.component_session =
+                            component_session.clone().map(String::into_bytes);
                         if let Err(e) = attach_access_plane(&mut bridge) {
                             eprintln!("ghost-gate-bridge: {e}");
                             return ExitCode::FAILURE;
                         }
                         configure_tunnel_support(&mut bridge);
                         let recovered = runtime.block_on(bridge.recover_pending_jobs());
-                        if recovered > 0 { println!("  replay recovery: resumed {recovered} durable Ootle finality job(s)"); }
+                        if recovered > 0 {
+                            println!(
+                                "  replay recovery: resumed {recovered} durable Ootle finality job(s)"
+                            );
+                        }
                         runtime.block_on(ghost_gate_bridge::server::serve(&config.bind, bridge))
                     }
                     Err(e) => {
-                        eprintln!("ghost-gate-bridge: cannot connect to the indexer at {endpoint}: {e}");
+                        eprintln!(
+                            "ghost-gate-bridge: cannot connect to the indexer at {endpoint}: {e}"
+                        );
                         return ExitCode::FAILURE;
                     }
                 }
@@ -350,30 +395,51 @@ fn main() -> ExitCode {
                 match IndexerChainReader::connect(&endpoint) {
                     Ok(reader) => {
                         println!("  indexer: {endpoint} (credential mode enabled)");
-                        let mut bridge = Bridge::assemble_full(registry, wallet, config.origins, reader, xtm_channel, xtm_chain);
-                        bridge.component_session = component_session.clone().map(String::into_bytes);
+                        let mut bridge = Bridge::assemble_full(
+                            registry,
+                            wallet,
+                            config.origins,
+                            reader,
+                            xtm_channel,
+                            xtm_chain,
+                        );
+                        bridge.component_session =
+                            component_session.clone().map(String::into_bytes);
                         if let Err(e) = attach_access_plane(&mut bridge) {
                             eprintln!("ghost-gate-bridge: {e}");
                             return ExitCode::FAILURE;
                         }
                         configure_tunnel_support(&mut bridge);
                         let recovered = runtime.block_on(bridge.recover_pending_jobs());
-                        if recovered > 0 { println!("  replay recovery: resumed {recovered} durable Ootle finality job(s)"); }
+                        if recovered > 0 {
+                            println!(
+                                "  replay recovery: resumed {recovered} durable Ootle finality job(s)"
+                            );
+                        }
                         runtime.block_on(ghost_gate_bridge::server::serve(&config.bind, bridge))
                     }
                     Err(e) => {
-                        eprintln!("ghost-gate-bridge: cannot connect to the indexer at {endpoint}: {e}");
+                        eprintln!(
+                            "ghost-gate-bridge: cannot connect to the indexer at {endpoint}: {e}"
+                        );
                         return ExitCode::FAILURE;
                     }
                 }
             }
-        },
+        }
         None => {
             eprintln!(
                 "  note: GG_INDEXER_ENDPOINT is not set, so the credential proof mode (browser \
                  wallets) is disabled; the consensus mode through walletd is unaffected."
             );
-            let mut bridge = Bridge::<AnyWallet, ghost_gate_bridge::credential::NoChainReader, AnyXtm, _>::with_xtm_full(registry, wallet, config.origins, xtm_channel, xtm_chain);
+            let mut bridge = Bridge::<
+                AnyWallet,
+                ghost_gate_bridge::credential::NoChainReader,
+                AnyXtm,
+                _,
+            >::with_xtm_full(
+                registry, wallet, config.origins, xtm_channel, xtm_chain
+            );
             bridge.component_session = component_session.clone().map(String::into_bytes);
             if let Err(e) = attach_access_plane(&mut bridge) {
                 eprintln!("ghost-gate-bridge: {e}");
@@ -381,7 +447,9 @@ fn main() -> ExitCode {
             }
             configure_tunnel_support(&mut bridge);
             let recovered = runtime.block_on(bridge.recover_pending_jobs());
-            if recovered > 0 { println!("  replay recovery: resumed {recovered} durable Ootle finality job(s)"); }
+            if recovered > 0 {
+                println!("  replay recovery: resumed {recovered} durable Ootle finality job(s)");
+            }
             runtime.block_on(ghost_gate_bridge::server::serve(&config.bind, bridge))
         }
     };
@@ -586,7 +654,10 @@ impl Config {
             // Per-gate scope: the credential mode (browser wallets + Telegram) only answers for
             // gates the operator explicitly scopes to it. Env form: GG_GATE_USE_<ID>=telegram.
             // Unset means "website" — the safe default that never grants Telegram membership.
-            if let Ok(mode) = std::env::var(format!("GG_GATE_USE_{}", id.to_uppercase().replace('-', "_"))) {
+            if let Ok(mode) = std::env::var(format!(
+                "GG_GATE_USE_{}",
+                id.to_uppercase().replace('-', "_")
+            )) {
                 registry.set_use_mode(id, &mode);
             }
         }
@@ -657,11 +728,7 @@ fn parse_gate(entry: &str) -> Result<(String, GateBinding), String> {
                 parts[0]
             ));
         }
-        Some(
-            parts[0]
-                .parse()
-                .map_err(|e| format!("gate address: {e}"))?,
-        )
+        Some(parts[0].parse().map_err(|e| format!("gate address: {e}"))?)
     };
     if !parts[1].starts_with("resource_") {
         return Err(format!(
@@ -674,7 +741,9 @@ fn parse_gate(entry: &str) -> Result<(String, GateBinding), String> {
         id.to_string(),
         GateBinding::ootle(
             component,
-            parts[1].parse().map_err(|e| format!("resource address: {e}"))?,
+            parts[1]
+                .parse()
+                .map_err(|e| format!("resource address: {e}"))?,
             parts[2].parse().map_err(|e| format!("threshold: {e}"))?,
             std::env::var("GG_OOTLE_NETWORK")
                 .ok()
@@ -753,9 +822,7 @@ impl XtmChannel for AnyXtm {
 ///
 /// A bridge without GG_BINDINGS_PATH keeps working exactly as before: the env-configured path is
 /// not affected by any of this.
-fn attach_access_plane<W, R, X, XR>(
-    bridge: &mut Bridge<W, R, X, XR>,
-) -> Result<(), String>
+fn attach_access_plane<W, R, X, XR>(bridge: &mut Bridge<W, R, X, XR>) -> Result<(), String>
 where
     W: ghost_gate_bridge::wallet::WalletChannel,
     R: ghost_gate_bridge::credential::ChainReader,
@@ -773,7 +840,9 @@ where
     );
     bridge.set_trust_policy(trust_policy);
     if trust_policy.operator_trusted_indexer {
-        println!("  trust policy: operator vouches for the configured indexer (indexer-asserted evidence may reach operator-trusted-testnet)");
+        println!(
+            "  trust policy: operator vouches for the configured indexer (indexer-asserted evidence may reach operator-trusted-testnet)"
+        );
     }
 
     let Some(dir) = std::env::var("GG_BINDINGS_PATH")
@@ -790,10 +859,11 @@ where
             return Err(format!(
                 "GG_BINDINGS_PATH is set but no bindings file exists at {}",
                 paths.bindings().display()
-            ))
+            ));
         }
     };
-    let (mut handle, count) = ghost_gate_bridge::access::AccessHandle::from_snapshot(&paths, &snapshot);
+    let (mut handle, count) =
+        ghost_gate_bridge::access::AccessHandle::from_snapshot(&paths, &snapshot);
     let mut registry = GateRegistry::new();
     let mut bound = 0usize;
     for snap in &snapshot.gates {
@@ -810,7 +880,9 @@ where
         bound += 1;
     }
     bridge.gates = registry;
-    handle.plane.apply_revocations(&snapshot.revoked_session_prefixes)?;
+    handle
+        .plane
+        .apply_revocations(&snapshot.revoked_session_prefixes)?;
     bridge.access = Some(handle);
     // Registry-backed bridges issue real access sessions. They must also coordinate replay state
     // durably; selecting MemoryReplayStore here would turn a restart into a second authorization.
@@ -828,9 +900,8 @@ where
     Ok(())
 }
 
-fn configure_tunnel_support<W, R, X, XR>(
-    bridge: &mut Bridge<W, R, X, XR>,
-) where
+fn configure_tunnel_support<W, R, X, XR>(bridge: &mut Bridge<W, R, X, XR>)
+where
     W: ghost_gate_bridge::wallet::WalletChannel,
     R: ghost_gate_bridge::credential::ChainReader,
     X: ghost_gate_bridge::xtm::XtmChannel,
@@ -843,9 +914,15 @@ fn configure_tunnel_support<W, R, X, XR>(
         }
     }
 
-    let token = std::env::var("GG_VERIFIER_TOKEN").ok().filter(|v| !v.is_empty());
-    let req_key = std::env::var("GG_VERIFIER_REQUEST_KEY").ok().filter(|v| !v.is_empty());
-    let resp_key = std::env::var("GG_VERIFIER_RESPONSE_KEY").ok().filter(|v| !v.is_empty());
+    let token = std::env::var("GG_VERIFIER_TOKEN")
+        .ok()
+        .filter(|v| !v.is_empty());
+    let req_key = std::env::var("GG_VERIFIER_REQUEST_KEY")
+        .ok()
+        .filter(|v| !v.is_empty());
+    let resp_key = std::env::var("GG_VERIFIER_RESPONSE_KEY")
+        .ok()
+        .filter(|v| !v.is_empty());
     if token.is_some() && req_key.is_some() && resp_key.is_some() {
         bridge.hosted_verifier_token = token;
         bridge.hosted_verifier_request_key = req_key;

@@ -29,8 +29,10 @@ use tari_crypto::{
 };
 use tari_engine_types::substate::SubstateDiff;
 use tari_ootle_common_types::substate_type::SubstateType;
-use tari_ootle_wallet_crypto::{MaskAndValue, OutputWitness, StealthInputWitness, StealthOutputWitness};
 use tari_ootle_transaction::{Epoch, Transaction, args};
+use tari_ootle_wallet_crypto::{
+    MaskAndValue, OutputWitness, StealthInputWitness, StealthOutputWitness,
+};
 use tari_template_lib::types::{
     Amount, ComponentAddress, EncryptedData, Hash32, MaxBytes, ObjectKey, ResourceAddress,
     crypto::{PedersenCommitmentBytes, RistrettoPublicKeyBytes, UtxoTag},
@@ -54,6 +56,7 @@ const TEST_EPOCH: u64 = 5;
 const NETWORK: u8 = network::LOCALNET;
 const MASK_BASE: u64 = 1_000_000_000;
 const NONCE_OFFSET: u64 = 500;
+const VIEW_KEY_SEED: u64 = 9_000_000_000;
 
 const GATE_PROOFS_ACCEPTED_PATH: &str = "$.5";
 const GATE_BURNT_NONCES_PATH: &str = "$.4";
@@ -85,13 +88,19 @@ struct Funds {
 fn stealth_spend_key(account_key: &RistrettoPublicKey, nonce: u64) -> RistrettoPublicKeyBytes {
     use ootle_network::Network;
     let nonce_secret = RistrettoSecretKey::from(nonce);
+    let view_key = RistrettoPublicKey::from_secret_key(&RistrettoSecretKey::from(VIEW_KEY_SEED));
     tari_ootle_wallet_crypto::StealthCryptoApi::new()
-        .derive_stealth_owner_public_key(Network::LocalNet, account_key, &nonce_secret)
+        .derive_stealth_owner_public_key(Network::LocalNet, account_key, &view_key, &nonce_secret)
         .to_byte_type()
 }
 
 /// Funds `amounts` stealth outputs of a fresh resource, exactly as gate_engine.rs does.
-fn fund(test: &mut TemplateTest, owner: &RistrettoSecretKey, amounts: &[u64], mvps: &[u64]) -> Funds {
+fn fund(
+    test: &mut TemplateTest,
+    owner: &RistrettoSecretKey,
+    amounts: &[u64],
+    mvps: &[u64],
+) -> Funds {
     let owner_pk = RistrettoPublicKey::from_secret_key(owner);
     let outputs: Vec<StealthOutputWitness> = amounts
         .iter()
@@ -102,14 +111,20 @@ fn fund(test: &mut TemplateTest, owner: &RistrettoSecretKey, amounts: &[u64], mv
                 witness: OutputWitness {
                     amount: *amount,
                     mask: mask.clone(),
-                    sender_public_nonce: RistrettoPublicKey::from_secret_key(&RistrettoSecretKey::from(
-                        MASK_BASE + u64::try_from(i).unwrap() + NONCE_OFFSET,
-                    )),
+                    sender_public_nonce: RistrettoPublicKey::from_secret_key(
+                        &RistrettoSecretKey::from(
+                            MASK_BASE + u64::try_from(i).unwrap() + NONCE_OFFSET,
+                        ),
+                    ),
                     minimum_value_promise: mvps.get(i).copied().unwrap_or(0),
-                    encrypted_data: EncryptedData::try_from(vec![0u8; EncryptedData::min_size()]).unwrap(),
+                    encrypted_data: EncryptedData::try_from(vec![0u8; EncryptedData::min_size()])
+                        .unwrap(),
                     resource_view_key: None,
                 },
-                auth: SpendAuthorization::Key(stealth_spend_key(&owner_pk, MASK_BASE + u64::try_from(i).unwrap())),
+                auth: SpendAuthorization::Key(stealth_spend_key(
+                    &owner_pk,
+                    MASK_BASE + u64::try_from(i).unwrap() + NONCE_OFFSET,
+                )),
                 tag: UtxoTag::new(0),
             }
         })
@@ -130,8 +145,14 @@ fn fund(test: &mut TemplateTest, owner: &RistrettoSecretKey, amounts: &[u64], mv
     );
 
     Funds {
-        resource: test.get_previous_output_address(SubstateType::Resource).as_resource_address().unwrap(),
-        faucet: test.get_previous_output_address(SubstateType::Component).as_component_address().unwrap(),
+        resource: test
+            .get_previous_output_address(SubstateType::Resource)
+            .as_resource_address()
+            .unwrap(),
+        faucet: test
+            .get_previous_output_address(SubstateType::Component)
+            .as_component_address()
+            .unwrap(),
         masks: amounts
             .iter()
             .enumerate()
@@ -142,13 +163,15 @@ fn fund(test: &mut TemplateTest, owner: &RistrettoSecretKey, amounts: &[u64], mv
             .outputs
             .iter()
             .zip(amounts.iter().copied())
-            .map(|(output, value)| tari_ootle_wallet_sdk::models::InputSpendData {
-                commitment: *output.commitment(),
-                public_nonce: output.output.sender_public_nonce,
-                encrypted_data: output.output.encrypted_data.clone(),
-                value,
-                is_on_chain: true,
-            })
+            .map(
+                |(output, value)| tari_ootle_wallet_sdk::models::InputSpendData {
+                    commitment: *output.commitment(),
+                    public_nonce: output.output.sender_public_nonce,
+                    encrypted_data: output.output.encrypted_data.clone(),
+                    value,
+                    is_on_chain: true,
+                },
+            )
             .collect(),
     }
 }
@@ -166,19 +189,35 @@ fn create_transfer_statement(
     let output_refs: Vec<&StealthOutputWitness> = outputs.iter().collect();
     let input_witnesses: Vec<StealthInputWitness> = inputs
         .iter()
-        .map(|(mask, value)| StealthInputWitness::new(MaskAndValue { mask: mask.clone(), value: *value }))
+        .map(|(mask, value)| {
+            StealthInputWitness::new(MaskAndValue {
+                mask: mask.clone(),
+                value: *value,
+            })
+        })
         .collect();
-    tari_ootle_wallet_crypto::stealth::create_transfer_statement(input_witnesses, revealed_input, output_refs, revealed_output)
-        .expect("test statement")
+    tari_ootle_wallet_crypto::stealth::create_transfer_statement(
+        input_witnesses,
+        revealed_input,
+        output_refs,
+        revealed_output,
+    )
+    .expect("test statement")
 }
 
-fn output_witness(amount: u64, mvp: u64, spend_key: RistrettoPublicKeyBytes) -> StealthOutputWitness {
+fn output_witness(
+    amount: u64,
+    mvp: u64,
+    spend_key: RistrettoPublicKeyBytes,
+) -> StealthOutputWitness {
     let mask = RistrettoSecretKey::random(&mut rand::rng());
     StealthOutputWitness {
         witness: OutputWitness {
             amount,
             mask: mask.clone(),
-            sender_public_nonce: RistrettoPublicKey::from_secret_key(&RistrettoSecretKey::from(999u64)),
+            sender_public_nonce: RistrettoPublicKey::from_secret_key(&RistrettoSecretKey::from(
+                999u64,
+            )),
             minimum_value_promise: mvp,
             encrypted_data: EncryptedData::try_from(vec![0u8; EncryptedData::min_size()]).unwrap(),
             resource_view_key: None,
@@ -189,16 +228,30 @@ fn output_witness(amount: u64, mvp: u64, spend_key: RistrettoPublicKeyBytes) -> 
 }
 
 /// An honest one-input one-output proof statement with real proofs over the given values.
-fn proof_statement(input_mask: &RistrettoSecretKey, output_value: u64, mvp: u64) -> StealthTransferStatement {
+fn proof_statement(
+    input_mask: &RistrettoSecretKey,
+    output_value: u64,
+    mvp: u64,
+) -> StealthTransferStatement {
     let out = output_witness(
         output_value,
         mvp,
-        RistrettoPublicKey::from_secret_key(&RistrettoSecretKey::random(&mut rand::rng())).to_byte_type(),
+        RistrettoPublicKey::from_secret_key(&RistrettoSecretKey::random(&mut rand::rng()))
+            .to_byte_type(),
     );
-    create_transfer_statement(vec![out], &[(input_mask.clone(), output_value)], Amount::zero(), None)
+    create_transfer_statement(
+        vec![out],
+        &[(input_mask.clone(), output_value)],
+        Amount::zero(),
+        None,
+    )
 }
 
-fn deploy_gate(test: &mut TemplateTest, resource: ResourceAddress, threshold: u64) -> ComponentAddress {
+fn deploy_gate(
+    test: &mut TemplateTest,
+    resource: ResourceAddress,
+    threshold: u64,
+) -> ComponentAddress {
     let template_addr = test.get_template_address(GATE_NAME);
     test.execute_expect_success(
         test.transaction()
@@ -206,7 +259,14 @@ fn deploy_gate(test: &mut TemplateTest, resource: ResourceAddress, threshold: u6
             .call_function(
                 template_addr,
                 "new",
-                args![Workspace("ghost_gate"), resource, threshold, site_id(), session_id(), NETWORK],
+                args![
+                    Workspace("ghost_gate"),
+                    resource,
+                    threshold,
+                    site_id(),
+                    session_id(),
+                    NETWORK
+                ],
             )
             .build_and_seal(test.secret_key()),
         vec![],
@@ -230,11 +290,13 @@ fn challenge_for(gate: ComponentAddress, resource: ResourceAddress, threshold: u
 }
 
 fn derive_input_spend_key(account_secret: &RistrettoSecretKey, index: usize) -> RistrettoSecretKey {
-    let nonce_secret = RistrettoSecretKey::from(MASK_BASE + u64::try_from(index).unwrap());
+    let nonce_secret =
+        RistrettoSecretKey::from(MASK_BASE + u64::try_from(index).unwrap() + NONCE_OFFSET);
     let nonce_public = RistrettoPublicKey::from_secret_key(&nonce_secret);
     tari_ootle_wallet_crypto::StealthCryptoApi::new().derive_stealth_owner_secret(
         ootle_network::Network::LocalNet,
         account_secret,
+        &RistrettoSecretKey::from(VIEW_KEY_SEED),
         &nonce_public,
     )
 }
@@ -249,8 +311,12 @@ fn public_of(secret: &RistrettoSecretKey) -> RistrettoPublicKeyBytes {
 /// assertion is about observable consensus state rather than internal encoding details.
 fn gate_state(test: &mut TemplateTest, gate: ComponentAddress) -> (u64, bool) {
     let accepted: u64 = test.extract_component_value(gate, GATE_PROOFS_ACCEPTED_PATH);
-    let nonce_used: bool = test
-        .call_method(gate, "is_nonce_used", args![Hash32::from_array([7u8; 32])], vec![]);
+    let nonce_used: bool = test.call_method(
+        gate,
+        "is_nonce_used",
+        args![Hash32::from_array([7u8; 32])],
+        vec![],
+    );
     (accepted, nonce_used)
 }
 
@@ -281,7 +347,9 @@ fn zero_token_attacker_cannot_raise_their_own_attestation_by_mutating_the_mvp() 
     // An honest statement over the attacker's 1 unit, with a promise of zero: proofs are real.
     let mut statement = proof_statement(&funds.masks[0], 1, 0);
     // The forgery: raise the public claim after the fact.
-    statement.outputs_statement.outputs[0].output.minimum_value_promise = THRESHOLD;
+    statement.outputs_statement.outputs[0]
+        .output
+        .minimum_value_promise = THRESHOLD;
 
     let input_sk = derive_input_spend_key(&account_key, 0);
     let reason = test.execute_expect_failure(
@@ -313,8 +381,12 @@ fn lowering_then_raising_the_mvp_in_one_statement_is_refused() {
     // Honest proof at exactly the threshold; then a a double mutation that leaves the field
     // looking honest while the underlying bulletproof was made for a different bound.
     let mut statement = proof_statement(&funds.masks[0], THRESHOLD, THRESHOLD);
-    statement.outputs_statement.outputs[0].output.minimum_value_promise = 0;
-    statement.outputs_statement.outputs[0].output.minimum_value_promise = THRESHOLD + 1;
+    statement.outputs_statement.outputs[0]
+        .output
+        .minimum_value_promise = 0;
+    statement.outputs_statement.outputs[0]
+        .output
+        .minimum_value_promise = THRESHOLD + 1;
 
     let input_sk = derive_input_spend_key(&account_key, 0);
     let reason = test.execute_expect_failure(
@@ -379,7 +451,9 @@ fn a_balance_proof_from_another_statement_is_refused() {
     let statement_a = proof_statement(&funds.masks[0], THRESHOLD, THRESHOLD);
     // Attacked B: same inputs, output now claims a bigger promise than the proof was made for.
     let mut statement_b = statement_a.clone();
-    statement_b.outputs_statement.outputs[0].output.minimum_value_promise = u32::MAX as u64;
+    statement_b.outputs_statement.outputs[0]
+        .output
+        .minimum_value_promise = u32::MAX as u64;
 
     let input_sk = derive_input_spend_key(&account_key, 0);
     let reason = test.execute_expect_failure(
@@ -410,7 +484,10 @@ fn a_proof_for_resource_a_cannot_spend_an_output_of_resource_b() {
     let gate_funds = fund(&mut test, &account_key, &[1], &[]);
     // A SECOND resource, holding the attacker's real (small) value.
     let other = fund(&mut test, &account_key, &[1], &[]);
-    assert_ne!(gate_funds.resource, other.resource, "the fixture made two distinct resources");
+    assert_ne!(
+        gate_funds.resource, other.resource,
+        "the fixture made two distinct resources"
+    );
 
     let gate = deploy_gate(&mut test, gate_funds.resource, THRESHOLD);
     let challenge = challenge_for(gate, gate_funds.resource, THRESHOLD);
@@ -421,7 +498,10 @@ fn a_proof_for_resource_a_cannot_spend_an_output_of_resource_b() {
     // resource an input belongs to, and the engine must.
     let statement = proof_statement(&other.masks[0], THRESHOLD, THRESHOLD);
     assert_eq!(
-        statement.outputs_statement.outputs[0].output.minimum_value_promise, THRESHOLD,
+        statement.outputs_statement.outputs[0]
+            .output
+            .minimum_value_promise,
+        THRESHOLD,
         "the fixture must pass the template's threshold check before the engine sees it"
     );
 
@@ -468,7 +548,10 @@ fn an_invented_input_commitment_cannot_qualify() {
         vec![],
     );
     let text = format!("{reason}").to_lowercase();
-    assert!(text.contains("not found") || text.contains("substate"), "got: {text}");
+    assert!(
+        text.contains("not found") || text.contains("substate"),
+        "got: {text}"
+    );
     let (accepted, burnt) = gate_state(&mut test, gate);
     assert_eq!((accepted, burnt), (0, false));
 }
@@ -507,7 +590,8 @@ fn someone_elses_output_cannot_be_spent_by_claiming_its_commitment() {
     // incidental is a template-side panic or a fee-only outcome, so the refusal reason is pinned
     // to one of the two and the test fails on anything else, naming what it saw.
     let text = format!("{reason}").to_lowercase();
-    let authorised_refusal = text.contains("sign") || text.contains("auth") || text.contains("scope");
+    let authorised_refusal =
+        text.contains("sign") || text.contains("auth") || text.contains("scope");
     let resolution_refusal = text.contains("not found") || text.contains("substate");
     assert!(
         authorised_refusal ^ resolution_refusal,
@@ -539,7 +623,9 @@ fn a_duplicated_input_commitment_is_refused() {
         .outputs_statement
         .outputs
         .iter()
-        .fold(RistrettoSecretKey::default(), |agg, _o| agg + funds.masks[0].clone());
+        .fold(RistrettoSecretKey::default(), |agg, _o| {
+            agg + funds.masks[0].clone()
+        });
     statement.balance_proof = Some(
         tari_ootle_wallet_crypto::balance_proof::generate_stealth_balance_proof_signature(
             &agg_input_mask,
@@ -587,7 +673,11 @@ fn the_honest_path_still_qualifies_under_the_same_conditions() {
     );
 
     let (accepted, burnt) = gate_state(&mut test, gate);
-    assert_eq!((accepted, burnt), (1, true), "the honest proof counted once and burnt the nonce");
+    assert_eq!(
+        (accepted, burnt),
+        (1, true),
+        "the honest proof counted once and burnt the nonce"
+    );
 }
 
 /// A refused proof must not consume the challenge: after every forgery above, the same challenge
@@ -606,7 +696,9 @@ fn failed_forgery_attempts_leave_the_challenge_answerable() {
     // bulletproof is what refuses. (A 1-unit claim with the same mask would fail earlier, at input
     // resolution — that path is covered by `an_invented_input_commitment_cannot_qualify`.)
     let mut forged = proof_statement(&funds.masks[0], THRESHOLD, THRESHOLD);
-    forged.outputs_statement.outputs[0].output.minimum_value_promise = THRESHOLD + 1;
+    forged.outputs_statement.outputs[0]
+        .output
+        .minimum_value_promise = THRESHOLD + 1;
     let input_sk = derive_input_spend_key(&account_key, 0);
     let reason = test.execute_expect_failure(
         Transaction::builder_localnet(Epoch(TEST_EPOCH))
@@ -629,7 +721,11 @@ fn failed_forgery_attempts_leave_the_challenge_answerable() {
         vec![],
     );
     let (accepted, burnt) = gate_state(&mut test, gate);
-    assert_eq!((accepted, burnt), (1, true), "exactly the honest proof counted");
+    assert_eq!(
+        (accepted, burnt),
+        (1, true),
+        "exactly the honest proof counted"
+    );
 }
 
 /// A rejected transaction must leave the attacker's input unspent: the engine downs inputs only
@@ -646,7 +742,9 @@ fn a_refused_forgery_does_not_burn_the_attackers_input() {
     let challenge = challenge_for(gate, funds.resource, THRESHOLD);
 
     let mut forged = proof_statement(&funds.masks[0], THRESHOLD, THRESHOLD);
-    forged.outputs_statement.outputs[0].output.minimum_value_promise = u32::MAX as u64;
+    forged.outputs_statement.outputs[0]
+        .output
+        .minimum_value_promise = u32::MAX as u64;
     let input_sk = derive_input_spend_key(&account_key, 0);
     let reason = test.execute_expect_failure(
         Transaction::builder_localnet(Epoch(TEST_EPOCH))
@@ -671,5 +769,8 @@ fn a_refused_forgery_does_not_burn_the_attackers_input() {
         vec![],
     );
     let (accepted, _) = gate_state(&mut test, gate2);
-    assert_eq!(accepted, 1, "the input was not destroyed by the failed forgery");
+    assert_eq!(
+        accepted, 1,
+        "the input was not destroyed by the failed forgery"
+    );
 }
