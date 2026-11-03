@@ -2,6 +2,9 @@
 name: Ootle 0.49.2 patched walletd artifact
 
 'on':
+  push:
+    branches:
+      - upgrade/ootle-live-0.49.1
   workflow_dispatch:
 
 permissions:
@@ -134,6 +137,7 @@ jobs:
       - name: Assemble binary and build attestation
         shell: bash
         env:
+          SOURCE_BRANCH: ${{ github.ref_name }}
           GHOST_GATE_COMMIT: ${{ github.sha }}
           WORKFLOW_RUN_ID: ${{ github.run_id }}
           WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
@@ -165,10 +169,13 @@ jobs:
           cp "$RUNNER_TEMP/mvp-tests.log" "$attestation_dir/"
           cat > "$attestation_dir/attestation.txt" <<EOF
           status=ATTESTED_BUILD_COMPLETED
+          source_branch=$SOURCE_BRANCH
+          tested_commit=$GHOST_GATE_COMMIT
           ghost_gate_commit=$GHOST_GATE_COMMIT
           workflow=walletd-mvp-attested-build.yml
           workflow_run_id=$WORKFLOW_RUN_ID
           workflow_run_attempt=$WORKFLOW_RUN_ATTEMPT
+          official_ootle_base_commit=$OOTLE_COMMIT
           base_ootle_commit=$OOTLE_COMMIT
           patch_sha256=$OOTLE_PATCH_SHA256
           patched_source_diff_sha256=$patched_diff_sha256
