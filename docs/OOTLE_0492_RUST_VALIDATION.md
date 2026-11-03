@@ -403,20 +403,35 @@ unchanged: Ghost Gate passes no Tari `Proof` arguments, uses no account `*_with_
 signer/owner proof-getter dependency, and defines no auth hook. Consequently no
 `AuthorizeProof`/`DropProofAuthorization` instruction or auth-hook input was added.
 
+## Authoritative Linux validation
+
+GitHub Actions workflow **Ootle 0.49.2 Linux validation** completed successfully for the exact
+migration commit `8aab476754ec0a7ecd4a3c16db9abc8f58bd72a5` on
+`upgrade/ootle-0.49.2`:
+
+- run: [41568842642](https://github.com/GSXRspartan/Ghost-Gate/actions/runs/41568842642);
+- event: `push`;
+- started: `2026-11-03T02:53:14Z`;
+- completed: `2026-11-03T03:12:32Z`;
+- overall conclusion: **success**.
+
+The `Ghost Gate owned-source formatting` job passed. The `Linux engine and migration tests` job also
+passed every required step: exact Ootle tag/commit verification and patch application,
+`cargo check --workspace --locked`, the offline workspace tests,
+`cargo test -p ghost-gate-tests --locked` (which contains `gate_engine`, `adversarial`,
+`cross_resource`, and `mvp_and_shape`), all three template WASM checks, and the patched wallet SDK
+`minimum_value_promise` tests. No live-chain ignore substituted for an engine target.
+
+This resolves the Windows Cranelift/WSL environment gap recorded above. The earlier failed workflow
+run `41558697294` was for predecessor commit `279cc662db6bc914a24ac58cb797ae5df89e6262` and does not
+override the successful exact-commit result.
+
 ## Bootstrap safety
 
-The Windows-compatible source surface and owned-source formatting scope are green. Nevertheless, the
-repository is **not yet cleared for Stage 3 live bootstrap** because the repaired engine-backed
-adversarial/cross-resource/template execution tests have not yet completed on Linux for this exact
-commit.
+The Ootle 0.49.2 Rust migration and its required owned-source formatting are cleared for Stage 3
+readiness work. This verdict certifies local/CI source compatibility only; it does not certify the
+public Esmeralda release cohort, genesis identity, browser-wallet builds, operator configuration, or
+live deployment state. Those are separate fail-closed readiness gates in
+`docs/ESMERALDA_0492_READINESS.md`.
 
-Minimum concrete actions required to reach PASS:
-
-1. Push the local repair commit to `upgrade/ootle-0.49.2` and require the blocking
-   `Linux engine and migration tests` job to pass for the exact commit. All four engine integration
-   targets must pass; a restored WSL or equivalent Linux runner remains an acceptable local fallback.
-2. Require the blocking `Ghost Gate owned-source formatting` job to pass for the exact commit.
-3. Do not bootstrap if either job is red or cancelled. No live-chain skip may substitute for either
-   required job.
-
-RUST VALIDATION VERDICT: BLOCKED
+RUST VALIDATION VERDICT: PASS
