@@ -9,7 +9,7 @@ authors.workspace = true
 
 [dependencies]
 tari_template_lib_types = { workspace = true, features = ["std"] }
-# Matches the minicbor the v0.42.0 workspace resolves; the derive must be the same major as the
+# Matches the minicbor the v0.49.2 workspace resolves; the derive must be the same major as the
 # one tari_template_lib_types derives its CBOR impls with, or the two disagree on the wire format.
 minicbor = { version = "2.3", default-features = false, features = ["std", "derive"] }
 # Policy records serialise for the registry store and the admin API. default-features = false with

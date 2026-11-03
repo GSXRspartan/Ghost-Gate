@@ -163,7 +163,12 @@ pub fn qualifying_output_witness(
     // Key-path authorisation: the one-time stealth spend key the owner will hold. The funds stay
     // spendable by a key, which is exactly what the gate's shape rule requires and what lets the
     // owner refresh the promise afterwards with an ordinary transfer.
-    let spend_key = crypto.derive_stealth_owner_public_key(network, owner_account_key, &nonce_secret);
+    let spend_key = crypto.derive_stealth_owner_public_key(
+        network,
+        owner_account_key,
+        owner_view_key,
+        &nonce_secret,
+    );
 
     Ok(StealthOutputWitness {
         witness: OutputWitness {

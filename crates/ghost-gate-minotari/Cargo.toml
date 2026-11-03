@@ -11,27 +11,37 @@ description = "Native Minotari L1 XTM threshold proving: the wallet daemon servi
 # A synthetic-only cryptographic feasibility spike. It is off by default and has no wallet, chain,
 # HTTP, bridge, Telegram, or authorization integration.
 experimental-ggbp1 = []
+# The live base-node reader pulls Minotari's full node gRPC schema and its RandomX native build.
+# Keep that deployment-only dependency explicit so the Ootle bridge and proof service remain
+# buildable on hosts without the RandomX C++ toolchain.
+base-node-grpc = [
+    "dep:minotari_node_grpc_client",
+    "dep:minotari_node",
+    "dep:minotari_app_grpc",
+]
 
 [dependencies]
 ghost-gate-core = { path = "../ghost-gate-core" }
 ghost-gate-bridge = { path = "../ghost-gate-bridge" }
 
-# The Minotari 6.0.1-pre.2 stack, the same versions the Ootle v0.42.0 cohort pins, so both
-# proof paths agree on the crypto and the wire formats.
-minotari_wallet = "6.0.1-pre.2"
-minotari_node_grpc_client = "6.0.1-pre.2"
-tari_comms = "6.0.1-pre.2"
-tari_comms_dht = "6.0.1-pre.2"
-tari_p2p = "6.0.1-pre.2"
-tari_common = "6.0.1-pre.2"
-tari_common_sqlite = "6.0.1-pre.2"
-tari_common_types = "6.0.1-pre.2"
-tari_transaction_components = "6.0.1-pre.2"
-tari_transaction_key_manager = "6.0.1-pre.2"
-tari_crypto = "0.23.4"
+# Ootle 0.49.2's matching Minotari cohort. Keeping the L1 reader on the same base-layer release also
+# avoids linking two incompatible sqlite3 native libraries into the bridge process.
+minotari_wallet = "6.3.0-pre.2"
+minotari_node_grpc_client = { version = "6.3.0-pre.2", optional = true }
+minotari_node = { version = "6.3.0-pre.2", optional = true }
+minotari_app_grpc = { version = "6.3.0-pre.2", optional = true }
+tari_comms = "6.3.0-pre.2"
+tari_comms_dht = "6.3.0-pre.2"
+tari_p2p = "6.3.0-pre.2"
+tari_common = "6.3.0-pre.2"
+tari_common_sqlite = "6.3.0-pre.2"
+tari_common_types = "6.3.0-pre.2"
+tari_transaction_components = "6.3.0-pre.2"
+tari_transaction_key_manager = "6.3.0-pre.2"
+tari_crypto = "0.24.1"
 tari_utilities = "0.10"
-tari_script = "6.0.1-pre.2"
-tari_shutdown = "6.0.1-pre.2"
+tari_script = "6.3.0-pre.2"
+tari_shutdown = "6.3.0-pre.2"
 
 anyhow.workspace = true
 async-trait.workspace = true
@@ -46,14 +56,10 @@ hmac = "0.12.1"
 time.workspace = true
 # The proof service's loopback HTTP server and the bridge's client side.
 reqwest = { version = "0.12", features = ["json"] }
-# The same tonic the minotari_app_grpc 6.0.1-pre.2 stack resolves.
+# The same tonic the Minotari 6.3.0-pre.2 stack resolves.
 tonic = "0.13.1"
 
 [dev-dependencies]
-# An in-process base node for the end-to-end tests. It compiles the whole node stack, which is
-# why it is a dev-dependency: the shipped library and binary never pull it in.
-minotari_node = "6.0.1-pre.2"
-minotari_app_grpc = "6.0.1-pre.2"
 tari_template_lib_types = { workspace = true, features = ["std"] }
 env_logger = "0.11"
 log = "0.4"
@@ -65,3 +71,8 @@ path = "src/lib.rs"
 [[bin]]
 name = "ghost-gate-minotari-wallet"
 path = "src/bin/ghost-gate-minotari-wallet.rs"
+
+[[test]]
+name = "l1_e2e"
+path = "tests/l1_e2e.rs"
+required-features = ["base-node-grpc"]

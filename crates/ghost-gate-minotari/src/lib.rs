@@ -15,6 +15,7 @@
 //! The binary `ghost-gate-minotari-wallet` runs the service against a base node.
 
 pub mod artifact;
+#[cfg(feature = "base-node-grpc")]
 pub mod chain_reader;
 #[cfg(feature = "experimental-ggbp1")]
 pub mod ggbp1;

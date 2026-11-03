@@ -7,6 +7,11 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 
+[features]
+# Enables live Minotari base-node verification. This transitively builds RandomX and therefore
+# requires a native C++ toolchain. Without it, configured L1 gates remain fail-closed.
+minotari-base-node = ["ghost-gate-minotari/base-node-grpc"]
+
 [dependencies]
 ghost-gate-core = { path = "../ghost-gate-core" }
 ghost-gate-registry = { path = "../ghost-gate-registry" }

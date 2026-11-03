@@ -1,6 +1,6 @@
 [package]
 name = "ghost-gate-tests"
-description = "Engine-backed and unit tests for Ghost Gate, run against the pinned Tari Ootle v0.42.0 cohort"
+description = "Engine-backed and unit tests for Ghost Gate, run against the pinned Tari Ootle v0.49.2 cohort"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

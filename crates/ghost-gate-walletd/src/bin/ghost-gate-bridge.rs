@@ -211,6 +211,7 @@ fn main() -> ExitCode {
         .any(|(_, b)| b.kind() == ghost_gate_bridge::ProofKind::MinotariXtm);
 
     let mut xtm_channel = AnyXtm::new(xtm_endpoint.clone(), Some(network_byte(&config.gates)));
+    #[cfg(feature = "minotari-base-node")]
     let mut xtm_chain = match l1_endpoint {
         Some(endpoint) => match tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -242,6 +243,23 @@ fn main() -> ExitCode {
             }
             None
         }
+    };
+    #[cfg(not(feature = "minotari-base-node"))]
+    let mut xtm_chain = {
+        if l1_endpoint.is_some() && has_xtm_gate {
+            eprintln!(
+                "ghost-gate-bridge: GG_MINOTARI_BASE_NODE_ENDPOINT is set, but this binary was built without the \
+                 minotari-base-node feature; rebuild with --features minotari-base-node"
+            );
+            return ExitCode::FAILURE;
+        }
+        if has_xtm_gate {
+            eprintln!(
+                "  note: live Minotari verification is not compiled in, so L1 XTM challenges cannot be issued or \
+                 verified; rebuild with --features minotari-base-node."
+            );
+        }
+        None::<ghost_gate_bridge::xtm::NoXtmChainReader>
     };
     if xtm_endpoint.is_none() && has_xtm_gate {
         eprintln!(
@@ -299,9 +317,12 @@ fn main() -> ExitCode {
                 .nth(1)
                 .and_then(|s| s.parse::<u32>().ok())
                 .unwrap_or(0);
+            // 0.47/0.48 used the transitional JSON value shape. The pinned 0.49 client decodes the
+            // current base64-CBOR `Encoded<SubstateValue>` representation itself, so routing 0.49
+            // through the legacy JSON field walker would fail closed on every UTXO.
             let json_reader =
                 std::env::var("GG_INDEXER_JSON").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false)
-                    || minor >= 47;
+                    || (47..49).contains(&minor);
             if json_reader {
                 match JsonChainReader::connect(&endpoint) {
                     Ok(reader) => {

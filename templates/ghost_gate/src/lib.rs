@@ -120,6 +120,9 @@ mod template {
                 proofs_accepted: 0,
             })
             .with_address_allocation(allocation)
+            // Reset components are republished fresh. Keep their code immutable: migration does not
+            // justify introducing an upgrade authority that did not previously exist.
+            .with_upgrade_rule(UpdateRule::Locked)
             .with_access_rules(AccessRules::allow_all())
             .create()
         }

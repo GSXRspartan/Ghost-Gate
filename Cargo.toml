@@ -28,15 +28,14 @@ license = "MIT"
 authors = ["Ghost Gate contributors"]
 
 [workspace.dependencies]
-# The Tari Ootle v0.42.0 cohort (tag v0.42.0, commit
-# a43773e600b9503ed3fadcd3f0048f86131e3644), pinned to a local COPY of that tree rather than the
-# clone itself, because crates/template_builtin/build.rs compiles builtin templates and writes the
-# .wasm output into its own crate tree. Building in place would modify the pinned reference, which
-# this project treats as read-only. See docs/GATE0_RESULTS.md and scripts/prepare_reference.sh.
+# The Tari Ootle v0.49.2 cohort (tag v0.49.2, commit
+# aa7b0c81719e5c3cfaf9bf3b5fb87bd83180cb90), pinned to a writable copy of the exact-tag reference.
+# Ootle build scripts write generated template artifacts into their own tree, so the canonical
+# reference checkout remains read-only.
 #
 # COHORT SWITCH
-#   ../_ootle-v042-build        pristine v0.42.0
-#   ../_ootle-v042-ghost-gate   the same tree plus docs/wallet-mvp.patch (selected)
+#   ../tari-ootle-v0.49.2-reference  pristine exact-tag reference
+#   ../_ootle-v0492-ghost-gate       same source plus docs/wallet-mvp-0492.patch (selected)
 #
 # The patched cohort is selected because Gate 3 has to put a statement built by the *wallet* in front
 # of the *engine*, and the two must be the same compilation of the same crates: cargo treats
@@ -47,41 +46,39 @@ authors = ["Ghost Gate contributors"]
 #
 # Nothing outside the wallet changes between the two, so running the engine-backed suite against the
 # patched cohort is also a check that the patch does not perturb consensus. See
-# docs/GATE3_RESULTS.md.
+# docs/GATE3_RESULTS.md and docs/OOTLE_0492_IMPLEMENTATION.md.
 #
-# Each pin also carries the crates.io version the v0.42.0 workspace declares, so a reader can see the
+# Each pin also carries the crates.io version the v0.49.2 workspace declares, so a reader can see the
 # cohort without reading the reference.
-tari_template_lib = { path = "../_ootle-v042-ghost-gate/crates/template_lib", version = "0.33.0" }
-tari_template_lib_types = { path = "../_ootle-v042-ghost-gate/crates/template_lib_types", version = "0.33.0", default-features = false }
-tari_template_abi = { path = "../_ootle-v042-ghost-gate/crates/template_abi", version = "0.20.1", default-features = false }
-tari_template_test_tooling = { path = "../_ootle-v042-ghost-gate/crates/template_test_tooling", version = "0.42.0" }
-tari_engine = { path = "../_ootle-v042-ghost-gate/crates/engine", version = "0.42.0" }
-tari_engine_types = { path = "../_ootle-v042-ghost-gate/crates/engine_types", version = "0.42.0" }
-tari_ootle_transaction = { path = "../_ootle-v042-ghost-gate/crates/transaction", version = "0.42.0", features = ["serde"] }
-tari_ootle_wallet_crypto = { path = "../_ootle-v042-ghost-gate/crates/wallet/crypto", version = "0.44" }
-tari_ootle_wallet_sdk = { path = "../_ootle-v042-ghost-gate/crates/wallet/sdk", version = "0.44.0" }
-tari_ootle_wallet_storage_sqlite = { path = "../_ootle-v042-ghost-gate/crates/wallet/storage_sqlite", version = "0.44.0" }
-tari_ootle_walletd_client = { path = "../_ootle-v042-ghost-gate/clients/wallet_daemon_client", version = "0.44.0" }
-tari_ootle_common_types = { path = "../_ootle-v042-ghost-gate/crates/common_types", version = "0.42.0" }
-tari_ootle_address = { path = "../_ootle-v042-ghost-gate/crates/ootle_address", version = "0.12" }
-tari_indexer_client = { path = "../_ootle-v042-ghost-gate/clients/tari_indexer_client", version = "0.43", default-features = false }
-tari_consensus_types = { path = "../_ootle-v042-ghost-gate/crates/consensus_types", version = "0.42.0" }
-tari_bor = { path = "../_ootle-v042-ghost-gate/crates/tari_bor", version = "0.16.2", default-features = false }
-ootle_byte_type = { path = "../_ootle-v042-ghost-gate/crates/ootle_byte_type", version = "0.14" }
+tari_template_lib = { path = "../_ootle-v0492-ghost-gate/crates/template_lib", version = "0.37.0" }
+tari_template_lib_types = { path = "../_ootle-v0492-ghost-gate/crates/template_lib_types", version = "0.36.0", default-features = false }
+tari_template_abi = { path = "../_ootle-v0492-ghost-gate/crates/template_abi", version = "0.22.0", default-features = false }
+tari_template_test_tooling = { path = "../_ootle-v0492-ghost-gate/crates/template_test_tooling", version = "0.49.2" }
+tari_engine = { path = "../_ootle-v0492-ghost-gate/crates/engine", version = "0.49.2" }
+tari_engine_types = { path = "../_ootle-v0492-ghost-gate/crates/engine_types", version = "0.49.2" }
+tari_ootle_transaction = { path = "../_ootle-v0492-ghost-gate/crates/transaction", version = "0.49.2", features = ["serde"] }
+tari_ootle_wallet_crypto = { path = "../_ootle-v0492-ghost-gate/crates/wallet/crypto", version = "0.50.0" }
+tari_ootle_wallet_sdk = { path = "../_ootle-v0492-ghost-gate/crates/wallet/sdk", version = "0.51.0" }
+tari_ootle_wallet_storage_sqlite = { path = "../_ootle-v0492-ghost-gate/crates/wallet/storage_sqlite", version = "0.51.0" }
+tari_ootle_walletd_client = { path = "../_ootle-v0492-ghost-gate/clients/wallet_daemon_client", version = "0.51.0" }
+tari_ootle_common_types = { path = "../_ootle-v0492-ghost-gate/crates/common_types", version = "0.49.2" }
+tari_ootle_address = { path = "../_ootle-v0492-ghost-gate/crates/ootle_address", version = "0.15.0" }
+tari_indexer_client = { path = "../_ootle-v0492-ghost-gate/clients/tari_indexer_client", version = "0.50.0", default-features = false }
+tari_consensus_types = { path = "../_ootle-v0492-ghost-gate/crates/consensus_types", version = "0.49.2" }
+tari_bor = { path = "../_ootle-v0492-ghost-gate/crates/tari_bor", version = "0.16.6", default-features = false }
+ootle_byte_type = { path = "../_ootle-v0492-ghost-gate/crates/ootle_byte_type", version = "0.18.0" }
 # Crate is `ootle-network` (hyphenated package name, `ootle_network` lib name).
-ootle-network = { path = "../_ootle-v042-ghost-gate/crates/ootle_network", version = "0.2" }
-ootle_serde = { path = "../_ootle-v042-ghost-gate/crates/ootle_serde", version = "0.6", default-features = false }
+ootle-network = { path = "../_ootle-v0492-ghost-gate/crates/ootle_network", version = "0.2.0" }
+ootle_serde = { path = "../_ootle-v0492-ghost-gate/crates/ootle_serde", version = "0.6.2", default-features = false }
 # Wallet SDK's spec implementations. `tari_ootle_wallet_sdk_services` supplies the default spec's
 # network interface, which the SDK requires at construction; Gate 3 points it at an unused local port
 # because the statement path resolves its inputs from the wallet, not the network.
-tari_ootle_wallet_sdk_services = { path = "../_ootle-v042-ghost-gate/crates/wallet/sdk_services", version = "0.34.2" }
+tari_ootle_wallet_sdk_services = { path = "../_ootle-v0492-ghost-gate/crates/wallet/sdk_services", version = "0.34.2" }
 
-# crates.io, at the versions the v0.42.0 workspace resolves.
-tari_crypto = "0.23.4"
+# crates.io, at the versions the v0.49.2 workspace resolves.
+tari_crypto = "0.24.1"
 tari_utilities = "0.10"
-# crates.io, not the cohort: tari_shutdown lives in the base-layer repo, which is not part of the
-# v0.42.0 tree. Same version the cohort workspace pins, so the SDK and its consumers agree.
-tari_shutdown = "6.0.1-pre.2"
+tari_shutdown = "6.3.0-pre.2"
 # Must match the minicbor the cohort uses; the derive has to agree with the one
 # tari_template_lib_types derives its CBOR impls with or the wire format diverges.
 minicbor = { version = "2.3", default-features = false }

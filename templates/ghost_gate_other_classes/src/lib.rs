@@ -71,6 +71,7 @@ mod other_classes {
                 manager,
                 supply_vault: Vault::from_bucket(bucket),
             })
+            .with_upgrade_rule(UpdateRule::Locked)
             .with_access_rules(AccessRules::allow_all())
             .create()
         }

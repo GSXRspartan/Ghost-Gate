@@ -59,6 +59,7 @@ mod faucet {
                 manager: resource_address.into(),
                 supply_vault: Vault::from_bucket(revealed),
             })
+            .with_upgrade_rule(UpdateRule::Locked)
             .with_access_rules(AccessRules::allow_all())
             .create()
         }
@@ -83,6 +84,7 @@ mod faucet {
                 manager: resource_address.into(),
                 supply_vault: Vault::from_bucket(bucket),
             })
+            .with_upgrade_rule(UpdateRule::Locked)
             .with_access_rules(AccessRules::allow_all())
             .create()
         }

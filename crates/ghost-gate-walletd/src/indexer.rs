@@ -48,12 +48,20 @@ impl ChainReader for IndexerChainReader {
                 tari_indexer_client::types::GetSubstateRequest {
                     version: None,
                     local_search_only: false,
+                    include_proof: false,
                 },
             )
             .await
             .map_err(|e| format!("{e}"))?;
 
-        let SubstateValue::Utxo(utxo) = &response.substate else {
+        let verified = response.verified;
+        let encoded = response
+            .into_substate_value()
+            .ok_or_else(|| format!("{} is no longer an unspent substate", address))?;
+        let substate = encoded
+            .decode()
+            .map_err(|e| format!("{} returned invalid CBOR: {e}", address))?;
+        let SubstateValue::Utxo(utxo) = &substate else {
             return Err(format!("{} is not a UTXO substate", address));
         };
         let Some(output) = &utxo.output else {
@@ -63,7 +71,7 @@ impl ChainReader for IndexerChainReader {
             minimum_value_promise: output.output.minimum_value_promise,
             // The indexer's own merkle-verification statement, carried through untouched. A
             // `false` here refuses at the verifier, by design.
-            verified: response.verified,
+            verified,
             auth_key: output.auth.spend_key().map(|k| {
                 let mut out = [0u8; 32];
                 out.copy_from_slice(k.as_bytes());

@@ -9,8 +9,8 @@ publish = false
 description = "Isolated synthetic-only GGBP-1 cryptographic feasibility harness"
 
 [dependencies]
-tari_crypto = "0.23.4"
-tari_script = "6.0.1-pre.2"
+tari_crypto = "0.24.1"
+tari_script = "6.3.0-pre.2"
 thiserror.workspace = true
 rand.workspace = true
 sha2.workspace = true

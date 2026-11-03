@@ -61,7 +61,7 @@ use ghost_gate_bridge::wallet::{
     CommitOutcome, InputChoice, StatementReply, StatementRequest, WalletChannel, WalletError,
     WalletStatus,
 };
-use tari_ootle_transaction::{Epoch, Network, TransactionBuilder, TransactionId, args};
+use tari_ootle_transaction::{Epoch, MainSigner, Network, TransactionBuilder, TransactionId, args};
 use tari_ootle_wallet_sdk::apis::stealth_transfer::TransferOutput;
 use tari_ootle_wallet_sdk::crypto::pay_to::PayTo;
 use tari_ootle_wallet_sdk::models::{OutputStatus, WalletLockId};
@@ -421,6 +421,9 @@ impl WalletChannel for WalletDaemonChannel {
 
         let transaction = TransactionBuilder::new(network, max_epoch)
             .with_nonce(rand::random())
+            // The daemon seals with the account owner key below. Declare that seal key as the
+            // transaction's authority before the sr25519 signing message is computed.
+            .with_main_signer(MainSigner::SealSigner)
             .pay_fee_from_component(account.account.component_address, self.max_fee)
             .call_method(
                 gate_address,
@@ -535,6 +538,25 @@ fn utxo_address_of(statement: &StealthTransferStatement, resource: ResourceAddre
 }
 
 impl WalletDaemonChannel {
+    /// The gate event is the committed receipt surface in Ootle 0.49. Return values are no longer
+    /// retained in `FinalizeResult`, while events are consensus output and preserve the template's
+    /// typed CBOR payload. Any missing, malformed, or differently named event fails closed.
+    fn proof_receipt_from(
+        waited: &TransactionWaitResultResponse,
+    ) -> Option<ghost_gate_core::ProofReceipt> {
+        waited
+            .result
+            .as_ref()?
+            .events
+            .iter()
+            .rev()
+            .find(|event| event.topic() == ghost_gate_core::MARK)?
+            .payload()
+            .get_as("receipt")
+            .ok()
+            .flatten()
+    }
+
     /// Reads the gate's promised minimum back out of the committed receipt.
     ///
     /// This is decoded from what consensus committed, not echoed from the request. That distinction is
@@ -542,18 +564,7 @@ impl WalletDaemonChannel {
     /// receipt that cannot be decoded yields zero, which every consumer treats as "no attestation" and
     /// which fails closed -- a fabricated floor would not.
     fn attested_minimum_from(waited: &TransactionWaitResultResponse) -> u64 {
-        let Some(result) = &waited.result else {
-            return 0;
-        };
-        // The gate's receipt is the return value of its `prove_access` call, which is the last execution
-        // result in the transaction. `ProofReceipt` is declared in `ghost_gate_core` and derives bor's
-        // `Decode`, so it is nameable here even though the template itself is WASM -- no decoding by
-        // debug format and no untyped scrape, so a template change is a compile error rather than a
-        // silent zero.
-        result
-            .execution_results
-            .last()
-            .and_then(|execution| execution.decode::<ghost_gate_core::ProofReceipt>().ok())
+        Self::proof_receipt_from(waited)
             .map(|receipt| receipt.attested_minimum)
             .unwrap_or(0)
     }
@@ -563,11 +574,7 @@ impl WalletDaemonChannel {
     /// Read from the receipt for the same reason as the floor: it is the gate's own count of what it
     /// qualified, not this crate's guess.
     fn input_count_from(waited: &TransactionWaitResultResponse) -> u32 {
-        waited
-            .result
-            .as_ref()
-            .and_then(|result| result.execution_results.last())
-            .and_then(|execution| execution.decode::<ghost_gate_core::ProofReceipt>().ok())
+        Self::proof_receipt_from(waited)
             .map(|receipt| receipt.input_count)
             .unwrap_or(0)
     }

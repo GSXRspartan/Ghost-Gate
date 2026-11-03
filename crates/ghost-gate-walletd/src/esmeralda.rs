@@ -1,14 +1,16 @@
 //   Copyright 2026 Ghost Gate contributors
 //   SPDX-License-Identifier: MIT
 
-//! Chain reads from indexer cohorts the pinned v0.42 client cannot parse.
+//! Legacy chain reads for transitional 0.47/0.48 indexer cohorts.
 //!
 //! Public Esmeralda runs indexer **0.47.0** (verified live:
 //! `GET https://ootle-indexer-a.tari.com/health` → `version 0.47.0`, epoch 12537+). Its REST
 //! renamed the substate payload: `GET /substates/{id}` now answers `state` where 0.42 answered
 //! `substate`, and a *spent* output answers **200 with a down proof** instead of 404
 //! (changelog #2968/#3002). The pinned `IndexerRestApiClient` (0.42) fails to deserialize that
-//! response, so this module reads the same route as plain JSON and accepts BOTH shapes:
+//! response, so this module reads the same route as plain JSON and accepts both legacy shapes.
+//! Ootle 0.49 serves base64-CBOR values and is decoded by [`crate::IndexerChainReader`] through
+//! the official 0.50 indexer client instead of this field walker:
 //!
 //! ```text
 //! 0.42: { "substate": { "Utxo": { "output": {...}, "auth": ... } }, "verified": bool }
@@ -26,8 +28,8 @@ use ghost_gate_bridge::credential::{ChainReader, CredentialRefusal, UtxoOnChain}
 use serde_json::Value;
 use tari_template_lib_types::UtxoAddress;
 
-/// Reads UTXOs from an indexer over raw REST JSON, accepting both the 0.42 `substate` shape and
-/// the 0.47 `state` shape.
+/// Reads UTXOs from a legacy indexer over raw REST JSON, accepting both the old `substate` shape
+/// and the transitional `state` shape.
 pub struct JsonChainReader {
     endpoint: String,
     client: reqwest::Client,
