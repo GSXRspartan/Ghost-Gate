@@ -661,7 +661,8 @@ function renderSteps() {
     stepList().forEach((s, i) => {
         const li = document.createElement("li");
         li.dataset.step = s.id;
-        li.innerHTML = '<div><div class="step-title"></div><div class="step-note"></div></div>';
+        li.innerHTML = '<span class="step-marker" aria-hidden="true"></span><div><div class="step-title"></div><div class="step-note"></div></div>';
+        li.querySelector(".step-marker").textContent = String(i + 1);
         li.querySelector(".step-title").textContent = s.title;
         li.querySelector(".step-note").textContent = s.note;
         if (s.explain) {
