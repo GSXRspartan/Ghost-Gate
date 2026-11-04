@@ -32,6 +32,33 @@ const REAL_TTARI_UTXO: &str =
 const INDEXER: &str = "http://127.0.0.1:12007";
 const TTARI: &str = "resource_0101010101010101010101010101010101010101010101010101010101010101";
 
+/// Read-only compatibility probe for a current 0.49 indexer response. The operator supplies a
+/// public UTXO id at run time so no wallet-specific output is committed as a fixture.
+#[tokio::test]
+#[ignore = "set GG_LIVE_INDEXER, GG_LIVE_UTXO and GG_LIVE_NETWORK_BYTE for a read-only live check"]
+async fn a_configured_live_049_proof_response_decodes_and_verifies() {
+    let endpoint = std::env::var("GG_LIVE_INDEXER").expect("GG_LIVE_INDEXER");
+    let address = UtxoAddress::from_str(&std::env::var("GG_LIVE_UTXO").expect("GG_LIVE_UTXO"))
+        .expect("GG_LIVE_UTXO is a UTXO address");
+    let network = std::env::var("GG_LIVE_NETWORK_BYTE")
+        .expect("GG_LIVE_NETWORK_BYTE")
+        .parse::<u8>()
+        .expect("GG_LIVE_NETWORK_BYTE is decimal");
+    let reader = IndexerChainReader::connect(&endpoint).expect("the indexer client builds");
+    let on_chain = reader
+        .utxo(network, &address)
+        .await
+        .expect("the current proof envelope verifies");
+    assert!(
+        on_chain.verified,
+        "the indexer's committee assertion is required"
+    );
+    assert!(
+        on_chain.auth_key.is_some(),
+        "credential mode requires a key path"
+    );
+}
+
 /// Read-only: the chain's own record for the real output.
 #[tokio::test]
 #[ignore = "needs the shared localnet's indexer on 127.0.0.1:12007"]
@@ -44,7 +71,10 @@ async fn a_real_finalized_output_with_no_promise_is_refused_below_a_10_ttari_thr
     assert_eq!(address.resource_address(), &resource);
 
     // 2. The output the chain actually holds: unspent, merkle-verified, promise recorded.
-    let on_chain = reader.utxo(&address).await.expect("the output is on chain and unspent");
+    let on_chain = reader
+        .utxo(16, &address)
+        .await
+        .expect("the output is on chain and unspent");
     assert!(on_chain.verified, "the indexer's own merkle statement must hold");
     assert_eq!(
         on_chain.minimum_value_promise, 0,

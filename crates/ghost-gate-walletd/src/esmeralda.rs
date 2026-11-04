@@ -24,7 +24,7 @@
 //! The `verified` flag is carried through untouched and a `false` refuses at the verifier —
 //! this module never disables verification to make a read succeed.
 
-use ghost_gate_bridge::credential::{ChainReader, CredentialRefusal, UtxoOnChain};
+use ghost_gate_bridge::credential::{ChainReadError, ChainReader, CredentialRefusal, UtxoOnChain};
 use serde_json::Value;
 use tari_template_lib_types::UtxoAddress;
 
@@ -61,20 +61,22 @@ impl JsonChainReader {
 }
 
 impl ChainReader for JsonChainReader {
-    async fn utxo(&self, address: &UtxoAddress) -> Result<UtxoOnChain, String> {
+    async fn utxo(
+        &self,
+        _network: u8,
+        address: &UtxoAddress,
+    ) -> Result<UtxoOnChain, ChainReadError> {
         let url = format!("{}/substates/{}", self.endpoint, address);
-        let resp = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| format!("indexer unreachable at {url}: {e}"))?;
+        let resp =
+            self.client.get(&url).send().await.map_err(|e| {
+                ChainReadError::Transport(format!("indexer unreachable at {url}: {e}"))
+            })?;
 
         let status = resp.status();
         let body: Value = resp
             .json()
             .await
-            .map_err(|e| format!("unreadable body: {e}"))?;
+            .map_err(|e| ChainReadError::UnsupportedResponse(format!("unreadable body: {e}")))?;
 
         // ---- locate the UTXO payload, tolerating both cohort shapes:
         //   0.42: { "substate": { "Utxo": {...} }, "verified": bool }
@@ -96,22 +98,27 @@ impl ChainReader for JsonChainReader {
             // 0.47 answers a SPENT output as 200 with a down proof (changelog #2968); 0.42
             // answered 404. Both are "no longer unspent" and must refuse.
             if down.is_some() {
-                return Err(format!(
+                return Err(ChainReadError::SpentOrUnknown(format!(
                     "{address} is DOWN on the indexer (spent or destroyed)"
-                ));
+                )));
             }
             if status.as_u16() == 404 {
-                return Err(format!("{address} is not known to this indexer"));
+                return Err(ChainReadError::SpentOrUnknown(format!(
+                    "{address} is not known to this indexer"
+                )));
             }
-            return Err(format!(
+            return Err(ChainReadError::UnsupportedResponse(format!(
                 "{address}: unexpected indexer response (HTTP {status}): {}",
                 truncated(&body)
-            ));
+            )));
         }
 
-        let utxo = v047_up
-            .or(v042_substate)
-            .ok_or_else(|| format!("{address}: not a UTXO substate: {}", truncated(&body)))?;
+        let utxo = v047_up.or(v042_substate).ok_or_else(|| {
+            ChainReadError::UnsupportedResponse(format!(
+                "{address}: not a UTXO substate: {}",
+                truncated(&body)
+            ))
+        })?;
 
         // verified: both cohorts carry the indexer's own merkle statement at the top level.
         // Fail closed: absent = unverified = refuses at the verifier.
@@ -120,16 +127,20 @@ impl ChainReader for JsonChainReader {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let output = utxo
-            .get("output")
-            .ok_or_else(|| format!("{address}: UTXO has no output body"))?;
+        let output = utxo.get("output").ok_or_else(|| {
+            ChainReadError::UnsupportedResponse(format!("{address}: UTXO has no output body"))
+        })?;
         // The floor lives inside the output's own output body in both cohorts.
         let promise = output
             .get("output")
             .and_then(|o| o.get("minimum_value_promise"))
             .or_else(|| output.get("minimum_value_promise"))
             .and_then(|v| v.as_u64())
-            .ok_or_else(|| format!("{address}: no readable minimum_value_promise"))?;
+            .ok_or_else(|| {
+                ChainReadError::UnsupportedResponse(format!(
+                    "{address}: no readable minimum_value_promise"
+                ))
+            })?;
 
         // The spend-authorisation key: `auth.Key` as a hex string in the JSON shapes.
         let auth_key = output
@@ -207,7 +218,10 @@ mod tests {
         let addr = UtxoAddress::from_str(
             "utxo_0101010101010101010101010101010101010101010101010101010101010101_a66c77cfed68833788b9d91dbece3e506cdbc590953d5c8f75ada7043f54b407",
         ).expect("utxo id");
-        let on_chain = r.utxo(&addr).await.expect("the output is on chain");
+        let on_chain = r
+            .utxo(ghost_gate_core::network::LOCALNET, &addr)
+            .await
+            .expect("the output is on chain");
         assert!(on_chain.verified);
         assert_eq!(
             on_chain.minimum_value_promise, 0,

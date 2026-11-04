@@ -2359,13 +2359,16 @@ mod tests {
     impl crate::credential::ChainReader for FakeChain {
         async fn utxo(
             &self,
+            _network: u8,
             address: &tari_template_lib_types::UtxoAddress,
-        ) -> Result<crate::credential::UtxoOnChain, String> {
+        ) -> Result<crate::credential::UtxoOnChain, crate::credential::ChainReadError> {
             // The production reader looks the UTXO up by its full string form; the fake keys on
             // exactly what the caller will send.
             match self.outputs.get(&address.to_string()) {
                 Some(o) => Ok(o.clone()),
-                None => Err("InputSubstateIsDown".into()),
+                None => Err(crate::credential::ChainReadError::SpentOrUnknown(
+                    "InputSubstateIsDown".into(),
+                )),
             }
         }
     }

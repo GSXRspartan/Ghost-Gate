@@ -57,7 +57,8 @@ pub mod wallet;
 pub mod xtm;
 
 pub use credential::{
-    ChainReader, CredentialProofRequest, CredentialReceipt, CredentialRefusal, CredentialVerifier,
+    ChainReadError, ChainReader, CredentialProofRequest, CredentialReceipt, CredentialRefusal,
+    CredentialVerifier,
     NoChainReader, OwnershipProof, UtxoOnChain, ownership_proof_message,
     reported_key_is_the_auth_key,
 };

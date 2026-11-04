@@ -346,10 +346,18 @@ fn main() -> ExitCode {
             // 0.47/0.48 used the transitional JSON value shape. The pinned 0.49 client decodes the
             // current base64-CBOR `Encoded<SubstateValue>` representation itself, so routing 0.49
             // through the legacy JSON field walker would fail closed on every UTXO.
-            let json_reader = std::env::var("GG_INDEXER_JSON")
+            let force_legacy_json = std::env::var("GG_INDEXER_JSON")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false)
-                || (47..49).contains(&minor);
+                .unwrap_or(false);
+            // The override is a compatibility switch for old cohorts, not permission to feed a
+            // 0.49 base64-CBOR response into the 0.47 JSON field walker. Ignore a stale deployed
+            // override once the indexer identifies itself as 0.49 or newer.
+            if force_legacy_json && minor >= 49 {
+                eprintln!(
+                    "  note: GG_INDEXER_JSON is ignored for indexer {version}; Ootle 0.49+ requires the typed CBOR proof reader"
+                );
+            }
+            let json_reader = (force_legacy_json && minor < 49) || (47..49).contains(&minor);
             if json_reader {
                 match JsonChainReader::connect(&endpoint) {
                     Ok(reader) => {

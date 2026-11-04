@@ -169,17 +169,35 @@ pub struct UtxoOnChain {
     pub verified: bool,
 }
 
+/// A chain read failed before it could produce a current, proven UTXO.
+///
+/// Keeping these cases typed is security-relevant: an unsupported wire response must never be
+/// mistaken for evidence that an output was spent, and a transport failure must never be mistaken
+/// for a threshold decision.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ChainReadError {
+    #[error("{0}")]
+    SpentOrUnknown(String),
+    #[error("{0}")]
+    UnsupportedResponse(String),
+    #[error("{0}")]
+    InvalidProof(String),
+    #[error("{0}")]
+    Transport(String),
+}
+
 /// Reads chain state, so the verifier can be tested without an indexer.
 ///
 /// Native `async fn` in a trait, like [`crate::wallet::WalletChannel`]: never used as a trait
 /// object, and `Bridge` is generic over it for the same reason.
 #[allow(async_fn_in_trait)]
 pub trait ChainReader {
-    /// The current state of one UTXO, or an error when it is spent, unknown, or unreachable.
+    /// The current state of one UTXO on `network`, or a classified read failure.
     ///
     /// The error case is load-bearing: the cohort's indexer answers a lookup for a spent UTXO with
     /// `InputSubstateIsDown`, so "error" is precisely how "no longer unspent" reaches this module.
-    async fn utxo(&self, address: &UtxoAddress) -> Result<UtxoOnChain, String>;
+    async fn utxo(&self, network: u8, address: &UtxoAddress)
+    -> Result<UtxoOnChain, ChainReadError>;
 }
 
 /// The no-reader default. A bridge built without a chain reader refuses credential proofs with an
@@ -187,8 +205,14 @@ pub trait ChainReader {
 pub struct NoChainReader;
 
 impl ChainReader for NoChainReader {
-    async fn utxo(&self, _address: &UtxoAddress) -> Result<UtxoOnChain, String> {
-        Err("no chain reader is configured on this bridge".into())
+    async fn utxo(
+        &self,
+        _network: u8,
+        _address: &UtxoAddress,
+    ) -> Result<UtxoOnChain, ChainReadError> {
+        Err(ChainReadError::Transport(
+            "no chain reader is configured on this bridge".into(),
+        ))
     }
 }
 
@@ -204,6 +228,10 @@ pub enum CredentialRefusal {
     NotAUtxo(String),
     #[error("GG: the proof output is spent or unknown: {0}")]
     Unspent(String),
+    #[error("GG: the indexer returned an unsupported or malformed proof response: {0}")]
+    UnsupportedChainResponse(String),
+    #[error("GG: the indexer's committed-state proof is invalid: {0}")]
+    InvalidChainProof(String),
     #[error("GG: the proof output belongs to {found}, but this gate watches {expected}")]
     WrongResource { expected: String, found: String },
     #[error("GG: the output's on-chain floor is {attested}, below this gate's {required}")]
@@ -220,6 +248,17 @@ pub enum CredentialRefusal {
     Malformed(String),
     #[error("GG: {0}")]
     Chain(String),
+}
+
+impl From<ChainReadError> for CredentialRefusal {
+    fn from(error: ChainReadError) -> Self {
+        match error {
+            ChainReadError::SpentOrUnknown(details) => Self::Unspent(details),
+            ChainReadError::UnsupportedResponse(details) => Self::UnsupportedChainResponse(details),
+            ChainReadError::InvalidProof(details) => Self::InvalidChainProof(details),
+            ChainReadError::Transport(details) => Self::Chain(details),
+        }
+    }
 }
 
 /// What a verified credential proof attests. Deliberately a different type from the consensus
@@ -275,9 +314,9 @@ impl CredentialVerifier<'_> {
         // Chain state, read here. A spent output refuses here: the indexer errors on a DOWN
         // substate, and that error is exactly the "no longer unspent" signal.
         let on_chain = reader
-            .utxo(&address)
+            .utxo(self.network, &address)
             .await
-            .map_err(CredentialRefusal::Unspent)?;
+            .map_err(CredentialRefusal::from)?;
 
         // Indexer trust, stated as a rule: the floor and the key come from a remote service. When
         // that service cannot prove its answer (merkle verification against the committee), the
@@ -379,7 +418,7 @@ mod tests {
     struct FixedReader {
         promise: u64,
         auth_key: Option<[u8; 32]>,
-        error: Option<String>,
+        error: Option<ChainReadError>,
         verified: bool,
     }
 
@@ -395,7 +434,11 @@ mod tests {
     }
 
     impl ChainReader for FixedReader {
-        async fn utxo(&self, _address: &UtxoAddress) -> Result<UtxoOnChain, String> {
+        async fn utxo(
+            &self,
+            _network: u8,
+            _address: &UtxoAddress,
+        ) -> Result<UtxoOnChain, ChainReadError> {
             if let Some(e) = &self.error {
                 return Err(e.clone());
             }
@@ -626,7 +669,7 @@ mod tests {
         let reader = FixedReader {
             promise: 50_000,
             auth_key: Some(key_bytes(&pk)),
-            error: Some("InputSubstateIsDown".into()),
+            error: Some(ChainReadError::SpentOrUnknown("InputSubstateIsDown".into())),
             verified: true,
         };
         let v = verifier(&res, 10_000, "9d69d80b");
@@ -640,6 +683,69 @@ mod tests {
             format!("{err}").contains("spent"),
             "the refusal says what happened: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_schema_failure_is_not_reported_as_spent() {
+        let res = resource(7);
+        let (sk, pk) = keypair();
+        let req = request(&res, "9d69d80b", &sk);
+        let reader = FixedReader {
+            promise: 50_000,
+            auth_key: Some(key_bytes(&pk)),
+            error: Some(ChainReadError::UnsupportedResponse(
+                "state.up.substate was not base64 CBOR".into(),
+            )),
+            verified: true,
+        };
+        let err = verifier(&res, 10_000, "9d69d80b")
+            .verify(&reader, &req)
+            .await
+            .expect_err("an unsupported envelope must refuse");
+        assert!(matches!(
+            err,
+            CredentialRefusal::UnsupportedChainResponse(_)
+        ));
+        assert!(!format!("{err}").contains("spent or unknown"));
+    }
+
+    #[tokio::test]
+    async fn an_invalid_committed_state_proof_is_classified_distinctly() {
+        let res = resource(7);
+        let (sk, pk) = keypair();
+        let req = request(&res, "9d69d80b", &sk);
+        let reader = FixedReader {
+            promise: 50_000,
+            auth_key: Some(key_bytes(&pk)),
+            error: Some(ChainReadError::InvalidProof(
+                "value proof does not match the anchor".into(),
+            )),
+            verified: true,
+        };
+        let err = verifier(&res, 10_000, "9d69d80b")
+            .verify(&reader, &req)
+            .await
+            .expect_err("an invalid state proof must refuse");
+        assert!(matches!(err, CredentialRefusal::InvalidChainProof(_)));
+    }
+
+    #[tokio::test]
+    async fn an_indexer_transport_failure_is_not_reported_as_spent() {
+        let res = resource(7);
+        let (sk, pk) = keypair();
+        let req = request(&res, "9d69d80b", &sk);
+        let reader = FixedReader {
+            promise: 50_000,
+            auth_key: Some(key_bytes(&pk)),
+            error: Some(ChainReadError::Transport("connection refused".into())),
+            verified: true,
+        };
+        let err = verifier(&res, 10_000, "9d69d80b")
+            .verify(&reader, &req)
+            .await
+            .expect_err("transport failure must refuse");
+        assert!(matches!(err, CredentialRefusal::Chain(_)));
+        assert!(!format!("{err}").contains("spent or unknown"));
     }
 
     #[tokio::test]
@@ -733,7 +839,7 @@ mod tests {
             .verify(&reader, &req)
             .await
             .expect_err("no reader, no verdict");
-        assert!(matches!(err, CredentialRefusal::Unspent(_)), "{err}");
+        assert!(matches!(err, CredentialRefusal::Chain(_)), "{err}");
         assert!(format!("{err}").contains("no chain reader"), "{err}");
     }
 

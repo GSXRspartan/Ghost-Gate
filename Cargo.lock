@@ -3113,11 +3113,15 @@ dependencies = [
  "ghost-gate-minotari",
  "ghost-gate-registry",
  "hex",
+ "ootle-network",
  "rand 0.10.3",
  "reqwest 0.12.28",
  "serde_json",
  "tari_engine_types",
  "tari_indexer_client",
+ "tari_ootle_common_types",
+ "tari_ootle_light_client",
+ "tari_ootle_storage",
  "tari_ootle_transaction",
  "tari_ootle_wallet_sdk",
  "tari_ootle_walletd_client",
@@ -8558,9 +8562,12 @@ dependencies = [
 name = "tari_ootle_light_client"
 version = "0.3.0"
 dependencies = [
+ "indexmap 2.14.2",
  "ootle-network",
  "serde",
  "tari_bor",
+ "tari_common_types",
+ "tari_crypto",
  "tari_engine_types",
  "tari_indexer_client",
  "tari_ootle_common_types",
