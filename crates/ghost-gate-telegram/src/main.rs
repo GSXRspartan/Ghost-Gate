@@ -21,18 +21,18 @@
 //!   (page)          ─────▶ POST /claim {token, proof_id}
 //!                         re-reads the receipt from the BRIDGE itself:
 //!                           state accepted, mode credential, gate matches
-//!                         grant = {user → invite(member_limit=1), expires}
+//!                         grant = {user → join-request invite, expires}
 //!   ◀─────  invite link
 //!      … after ACCESS_TTL …
-//!                         ticker: revoke expired grants (ban→unban), invite to re-verify
+//!                         ticker: expire tracked grants without changing membership
 //! ```
 //!
 //! # What is enforced here, and where
 //!
 //! - **Bridge freshness**: the receipt is backed by the bridge's challenge, expiry, policy, and
 //!   replay checks. The bot re-reads that receipt instead of trusting a browser verdict.
-//! - **Limited tracked duration**: grants carry `ACCESS_TTL` and are revoked by the ticker while
-//!   this process retains their user-to-session mapping.
+//! - **Limited tracked duration**: grants carry `ACCESS_TTL` and are expired by the ticker while
+//!   this process retains their user-to-session mapping. Existing membership is never removed.
 //! - **Server-side verification**: the bot trusts only the bridge's own answer for the proof id —
 //!   never the page's claim of what happened. A forged or stale receipt fails the re-read.
 //! - **Join-token identity**: one join token = one Telegram account = one claim; a second claim
@@ -48,8 +48,8 @@
 //!   exists, expiry/revocation cannot be guaranteed across a restart. When the bridge is
 //!   REGISTRY-BACKED, the
 //!   expiry, revocation and policy-hash decisions live in the registry, not here: the bot asks the
-//!   bridge on every decision, a dashboard revocation reaches the chat within one tick, and the
-//!   session is visible (and revocable) next to every other one. On a legacy bridge, the bot's own
+//!   bridge on each tracked decision, and the session is visible (and revocable) next to every
+//!   other one. Revocation does not remove existing members. On a legacy bridge, the bot's own
 //!   TTL applies exactly as before.
 //! - The accepted proof receipt is not yet committed to the bot-minted join token. Someone who
 //!   obtains a still-readable accepted proof id can present it with another valid join token. A
@@ -95,9 +95,6 @@ const MAX_CLAIM_REQUEST_BYTES: usize = 8 * 1024;
 /// deliberately large margin for clock skew and request latency, while bounding the worst case
 /// if the process crashes before it can explicitly unban the member.
 const TEMPORARY_REMOVAL_SECS: u64 = 600;
-/// Recovery is bounded: when a ban/unban request has an ambiguous outcome we retain the user and
-/// retry `unbanChatMember`; never discard that recovery work just to accept unbounded input.
-const MAX_PENDING_UNBANS: usize = 512;
 
 /// The gate a receipt names, as the bridge's `CredentialReceipt` serialises it.
 #[derive(Debug, Clone, Deserialize)]
@@ -527,9 +524,6 @@ pub struct Bot<T: TelegramApi, B: BridgeClient> {
     fixture_authorization: bool,
     tokens: HashMap<String, JoinToken>,
     grants: HashMap<i64, Grant>,
-    /// A `banChatMember` request may have succeeded even when its response was lost. Keep a
-    /// bounded explicit-unban recovery queue rather than risking a permanent exclusion.
-    pending_unbans: std::collections::BTreeSet<i64>,
     /// IDs already acted on, so a replayed update (Telegram resends on offset races) cannot mint a
     /// second grant.
     seen_updates: std::collections::BTreeSet<u64>,
@@ -547,7 +541,6 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
             fixture_authorization: false,
             tokens: HashMap::new(),
             grants: HashMap::new(),
-            pending_unbans: std::collections::BTreeSet::new(),
             seen_updates: std::collections::BTreeSet::new(),
         }
     }
@@ -566,18 +559,14 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
         let existing = self.grants.get(&user).map(|g| (g.server.clone(), g.expires));
         if let Some((server, expires)) = existing {
             let alive = match &server {
-                Some(sg) => {
-                    matches!(
-                        self.bridge
-                            .access_check(&sg.application_id, &self.gate, &sg.token)
-                            .await,
-                        Ok(true)
-                    )
-                }
+                Some(sg) => match self.bridge.access_check(&sg.application_id, &self.gate, &sg.token).await {
+                    Ok(alive) => alive,
+                    Err(_) => return Err("verification service unavailable; existing state retained".into()),
+                },
                 None => expires > Instant::now(),
             };
             if alive {
-                let left = expires.duration_since(Instant::now()).as_secs().max(1);
+                let left = expires.saturating_duration_since(Instant::now()).as_secs().max(1);
                 return Ok(format!(
                     "Your access is already verified for another {} minute(s). I'll ask for a fresh proof when it lapses.",
                     (left + 59) / 60
@@ -633,6 +622,11 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
 
     /// The claim endpoint's logic. Single-use token, TTL, and the bridge's own receipt re-read.
     pub async fn claim(&mut self, token: &str, proof_id: &str) -> Result<String, String> {
+        // A bridge receipt is not yet bound to a Telegram identity. Do not turn it into a real
+        // admission until a durable, single-use identity-bound proof protocol is implemented.
+        if !self.fixture_authorization {
+            return Err("Telegram admission is temporarily unavailable: identity-bound verification is required".into());
+        }
         let flow_id = audit_id(token);
         let record = self
             .tokens
@@ -795,38 +789,16 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
         Ok(link)
     }
 
-    async fn retry_pending_unbans(&mut self) {
-        let pending = self.pending_unbans.iter().copied().collect::<Vec<_>>();
-        for user in pending {
-            if self.telegram.unban_member(self.chat, user).await.is_ok() {
-                self.pending_unbans.remove(&user);
-            }
-        }
-    }
-
-    async fn remove_member(&mut self, user: i64) {
-        // `kick_member` is ban-then-unban. An error is ambiguous: its ban may have reached
-        // Telegram while the response or follow-up unban did not. Queue recovery even for an
-        // apparent ban failure; `only_if_banned` makes the extra unban harmless.
-        if self.telegram.kick_member(self.chat, user).await.is_err() {
-            if self.pending_unbans.contains(&user) || self.pending_unbans.len() < MAX_PENDING_UNBANS {
-                self.pending_unbans.insert(user);
-                self.retry_pending_unbans().await;
-            }
-        }
-    }
-
-    /// The re-verification ticker: revoke expired grants, tell the user how to rejoin.
+    /// Expire tracked grants without modifying existing Telegram membership.
     ///
     /// Runs in one place (the caller's loop) so no two ticks can race the same user's revocation.
     pub async fn tick(&mut self) {
-        self.retry_pending_unbans().await;
         let now = Instant::now();
         // Tokens whose TTL passed — used or not — are state nobody can act on any more.
         self.tokens.retain(|_, t| t.expires > now);
         // Legacy grants (no server session) expire on the bot's clock, as before. Server-backed
         // grants are ASKED: the registry's expiry, revocation and policy-hash checks are the
-        // authority, so a revocation in the dashboard reaches this chat within one tick.
+        // authority for tracked grants; revocation does not change Telegram membership.
         let mut expired: Vec<i64> = self
             .grants
             .iter()
@@ -843,14 +815,11 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
         }
         for user in expired {
             let grant = self.grants.remove(&user).expect("just filtered");
-            // Kick (temporary ban + explicit unban) so the seat frees and re-joining remains
-            // possible after re-verification. Ambiguous failures enter durable-in-process
-            // unban recovery; the temporary ban is itself bounded to ten minutes.
-            self.remove_member(user).await;
+            // Membership is intentionally preserved even when authorization expires.
             self.telegram
                 .send_message(
                     user,
-                    "Your verification expired, so I've let your seat go. No hard feelings — send /join for a fresh proof.",
+                    "Your verification expired. Your existing group membership has not been changed.",
                 )
                 .await
                 .ok();
@@ -913,7 +882,7 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
                 "reason": if grant.is_some() { "candidate" } else { "no_grant" },
             }),
         );
-        let authorized = match grant {
+        let authorized = self.fixture_authorization && match grant {
             Some(grant) => match grant.server {
                 Some(server) => {
                     let check = self
@@ -1164,12 +1133,14 @@ async fn run() -> i32 {
         eprintln!(
             "ghost-gate-telegram: TEST MODE — real Telegram test group only; fixture authorization is not consensus-verified and can never grant production access"
         );
-        let bot = Bot::new_fixture(
+        let mut bot = Bot::new_fixture(
             telegram,
             FixtureBridge { gate: gate.clone(), access_authorized: None },
             test_chat,
             gate.clone(),
         );
+        // Fixture authorization must never approve a real Telegram join request.
+        bot.fixture_authorization = false;
         return serve(bot, &bridge_base, &format!("http://127.0.0.1:{claim_port}"), claim_port, &gate, bridge_public_url.as_deref()).await;
     }
     // Live testnet: real Telegram + real bridge, operator-trusted evidence only. The bridge must
@@ -1471,6 +1442,7 @@ mod tests {
 
     /// Records what the bot would send.
     struct FakeTelegram {
+        members: std::collections::BTreeSet<i64>,
         invites: Vec<i64>,
         invite_fails: bool,
         kicked: Vec<i64>,
@@ -1486,6 +1458,7 @@ mod tests {
     impl FakeTelegram {
         fn new() -> Self {
             Self {
+                members: std::collections::BTreeSet::new(),
                 invites: Vec::new(),
                 invite_fails: false,
                 kicked: Vec::new(),
@@ -1518,7 +1491,9 @@ mod tests {
             Ok(g.next_link.clone())
         }
         async fn approve_join_request(&mut self, chat: i64, user: i64) -> Result<(), String> {
-            self.0.lock().unwrap().approved.push((chat, user));
+            let mut g = self.0.lock().unwrap();
+            g.approved.push((chat, user));
+            g.members.insert(user);
             Ok(())
         }
         async fn decline_join_request(&mut self, chat: i64, user: i64) -> Result<(), String> {
@@ -1530,6 +1505,7 @@ mod tests {
             // both effects so tests assert what actually happens to the member.
             let mut g = self.0.lock().unwrap();
             g.kicked.push(user);
+            g.members.remove(&user);
             if g.kick_ambiguous {
                 return Err("ambiguous Telegram ban result".into());
             }
@@ -1747,8 +1723,63 @@ mod tests {
         let (mut bot, tg) = production_bot(bridge);
         let (token, _) = mint_join(&mut bot, 81).await;
         let err = bot.claim(&token, "proof-live").await.expect_err("no production session");
-        assert!(err.contains("fail-closed"), "{err}");
+        assert!(err.contains("identity-bound verification"), "{err}");
         assert!(tg.lock().unwrap().invites.is_empty());
+    }
+
+    #[tokio::test]
+    async fn real_admission_fails_closed_even_with_an_accepted_unbound_receipt() {
+        let bridge = FakeBridge {
+            answers: HashMap::from([("shared-proof".to_string(), FakeBridge::accepted_with_access("crypt", 7))]),
+            access: Some(Ok(true)),
+        };
+        let (mut bot, tg) = production_bot(bridge);
+        let (first, _) = mint_join(&mut bot, 81).await;
+        let (second, _) = mint_join(&mut bot, 82).await;
+        for token in [&first, &second] {
+            assert!(bot.claim(token, "shared-proof").await.unwrap_err().contains("identity-bound"));
+        }
+        assert_eq!(bot.grant_count(), 0);
+        assert!(tg.lock().unwrap().invites.is_empty());
+    }
+
+    #[tokio::test]
+    async fn restart_and_legacy_grant_do_not_approve_or_remove_members() {
+        let bridge = FakeBridge { answers: HashMap::new(), access: Some(Ok(true)) };
+        let (mut bot, tg) = production_bot(bridge);
+        let original_members = std::collections::BTreeSet::from([81, 82, 83]);
+        tg.lock().unwrap().members = original_members.clone();
+        // Even if legacy in-memory state is present, it has no identity-bound proof.
+        bot.grants.insert(81, Grant {
+            expires: Instant::now() + Duration::from_secs(60),
+            flow_id: "legacy".into(),
+            server: Some(ServerGrant { token: "legacy".into(), application_id: "crypt".into(), expires_unix: now_unix() + 60 }),
+        });
+        bot.handle_join_request(TgJoinRequest { chat: TgChat { id: -1001234 }, from: TgUser { id: 81 } }).await;
+        // Simulate process replacement while retaining Telegram's independent membership state.
+        let bridge = FakeBridge { answers: HashMap::new(), access: None };
+        let mut restarted = Bot::new(Wrap(tg.clone()), bridge, -1001234, "crypt".into());
+        restarted.handle_join_request(TgJoinRequest { chat: TgChat { id: -1001234 }, from: TgUser { id: 82 } }).await;
+        restarted.tick().await;
+        let fake = tg.lock().unwrap();
+        assert_eq!(fake.members, original_members);
+        assert!(fake.approved.is_empty());
+        assert!(fake.kicked.is_empty());
+        assert!(fake.unbanned.is_empty());
+        assert_eq!(fake.declined, vec![(-1001234, 81), (-1001234, 82)]);
+    }
+
+    #[tokio::test]
+    async fn returning_user_bridge_outage_preserves_tracked_grant() {
+        let bridge = FakeBridge { answers: HashMap::new(), access: Some(Err("offline".into())) };
+        let (mut bot, _) = production_bot(bridge);
+        bot.grants.insert(81, Grant {
+            expires: Instant::now() + Duration::from_secs(60),
+            flow_id: "legacy".into(),
+            server: Some(ServerGrant { token: "legacy".into(), application_id: "crypt".into(), expires_unix: now_unix() + 60 }),
+        });
+        assert!(bot.join(81, "http://localhost", "http://localhost", None).await.is_err());
+        assert!(bot.grants.contains_key(&81));
     }
 
     #[test]
@@ -1867,16 +1898,16 @@ mod tests {
         bot.tick().await;
         assert_eq!(bot.grant_count(), 0, "the expired grant is gone");
         let fake = tg.lock().unwrap();
-        assert_eq!(fake.kicked, vec![10], "the seat was freed");
-        assert_eq!(fake.unbanned, vec![10], "the door was left open for re-verification");
+        assert!(fake.kicked.is_empty(), "existing membership is preserved");
+        assert!(fake.unbanned.is_empty(), "membership is not modified");
         assert!(
-            fake.messages.iter().any(|(u, m)| *u == 10 && m.contains("/join")),
-            "the user is told how to re-verify"
+            fake.messages.iter().any(|(u, m)| *u == 10 && m.contains("membership has not been changed")),
+            "the user is told that membership is preserved"
         );
     }
 
     #[tokio::test]
-    async fn ambiguous_member_removal_retries_explicit_unban_without_a_permanent_ban() {
+    async fn expired_authorizations_never_trigger_removal_even_when_removal_would_fail() {
         let bridge = FakeBridge { answers: HashMap::from([("proof-unban".to_string(), FakeBridge::accepted("crypt"))]), access: None };
         let (mut bot, tg) = bot_owned(bridge);
         bot.access_ttl = Duration::from_millis(1);
@@ -1890,15 +1921,10 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(10)).await;
         bot.tick().await;
         assert_eq!(bot.grant_count(), 0, "logical authorization is revoked immediately");
-        assert!(bot.pending_unbans.contains(&24), "ambiguous ban gets explicit recovery");
-        {
-            let mut fake = tg.lock().unwrap();
-            fake.kick_ambiguous = false;
-            fake.unban_fails = false;
-        }
         bot.tick().await;
-        assert!(!bot.pending_unbans.contains(&24), "a later unban clears recovery");
-        assert!(tg.lock().unwrap().unbanned.contains(&24));
+        let fake = tg.lock().unwrap();
+        assert!(fake.kicked.is_empty());
+        assert!(fake.unbanned.is_empty());
     }
 
     #[tokio::test]
@@ -2116,9 +2142,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_server_revocation_kicks_within_one_tick() {
-        // The dashboard revoked the session: the next tick frees the seat, even though the bot's
-        // own TTL would have kept the user for days.
+    async fn a_server_revocation_preserves_membership() {
+        // A dashboard revocation expires the tracked grant without changing membership.
         let bridge = FakeBridge {
             answers: HashMap::from([("proofs2".to_string(), FakeBridge::accepted_with_access("crypt", 7))]),
             access: Some(Ok(false)),
@@ -2129,8 +2154,8 @@ mod tests {
         bot.tick().await;
         assert_eq!(bot.grant_count(), 0, "the revoked grant is gone");
         let fake = tg.lock().unwrap();
-        assert_eq!(fake.kicked, vec![22], "the seat was freed");
-        assert_eq!(fake.unbanned, vec![22], "the door was left open for re-verification");
+        assert!(fake.kicked.is_empty());
+        assert!(fake.unbanned.is_empty());
     }
 
     #[tokio::test]
