@@ -29,26 +29,34 @@
 //!
 //! # What is enforced here, and where
 //!
-//! - **Fresh challenges**: every claim runs a brand-new credential proof; nothing is reusable.
-//! - **Limited duration**: grants carry `ACCESS_TTL` and are revoked by the ticker; the invite
-//!   links are single-seat (`member_limit = 1`), so a forwarded link grants nobody else.
+//! - **Bridge freshness**: the receipt is backed by the bridge's challenge, expiry, policy, and
+//!   replay checks. The bot re-reads that receipt instead of trusting a browser verdict.
+//! - **Limited tracked duration**: grants carry `ACCESS_TTL` and are revoked by the ticker while
+//!   this process retains their user-to-session mapping.
 //! - **Server-side verification**: the bot trusts only the bridge's own answer for the proof id —
 //!   never the page's claim of what happened. A forged or stale receipt fails the re-read.
-//! - **No substitution**: one token = one Telegram account = one claim; a second claim with the
-//!   same token refuses.
+//! - **Join-token identity**: one join token = one Telegram account = one claim; a second claim
+//!   with the same join token refuses, and a forwarded invite is declined for another account.
 //! - **No secrets**: the bot asks for nothing but a proof. Seeds, keys and balances are never
 //!   mentioned, let alone requested; the receipt names a floor, not a balance.
 //! - **Bot token custody**: `GG_TG_BOT_TOKEN` is read once from the environment and never logged.
 //!
 //! # What a POC deliberately does not do
 //!
-//! - Grant state is in-memory: a restart forgets it (safe failure — access simply lapses until
-//!   re-verified, and nothing stale outlives the process). When the bridge is REGISTRY-BACKED, the
+//! - Grant state is in-memory. A restart forgets the user-to-session mapping, but Telegram
+//!   membership already approved by the previous process persists. Until durable reconciliation
+//!   exists, expiry/revocation cannot be guaranteed across a restart. When the bridge is
+//!   REGISTRY-BACKED, the
 //!   expiry, revocation and policy-hash decisions live in the registry, not here: the bot asks the
 //!   bridge on every decision, a dashboard revocation reaches the chat within one tick, and the
-//!   session is visible (and revocable) next to every other one. A restart still forgets the
-//!   user→session mapping — the registry keeps the session, the bot just no longer knows whose it
-//!   was, so the user re-verifies. On a legacy bridge, the bot's own TTL applies exactly as before.
+//!   session is visible (and revocable) next to every other one. On a legacy bridge, the bot's own
+//!   TTL applies exactly as before.
+//! - The accepted proof receipt is not yet committed to the bot-minted join token. Someone who
+//!   obtains a still-readable accepted proof id can present it with another valid join token. A
+//!   production design must bind the join-token commitment into the challenge and receipt.
+//! - The bot does not consume `chat_member` updates. Other administrators, manual adds, or old
+//!   invite links remain Telegram-side admission paths unless operations remove those powers and
+//!   links; code-enforced reconciliation is still required for a production claim.
 //! - Long polling (`getUpdates`), not webhooks: nothing public to spoof.
 //! - Membership checks are *point-in-time*: between two verifications ownership may change. The
 //!   product claim is exactly "held enough at verification time", and the ticker enforces that
