@@ -16,6 +16,7 @@
 //! POST /gate/:id/challenge     mint a fresh, single-use challenge for that gate
 //! POST /gate/:id/prove         ask for a proof; returns a job id immediately
 //! GET  /proof/:id/status       poll the job: accepted, refused, or still working
+//! POST /access/check           check a bearer session without placing it in the URL
 //! ```
 //!
 //! # What the responses may contain
@@ -162,7 +163,7 @@ impl<'a> Route<'a> {
             ("POST", ["gate", id, "prove"]) => Route::Prove(id),
             ("POST", ["gate", id, "credential"]) => Route::Credential(id),
             ("GET", ["proof", id, "status"]) => Route::ProofStatus(id),
-            ("GET", ["access", "check"]) => Route::AccessCheck,
+            ("POST", ["access", "check"]) => Route::AccessCheck,
             ("GET", []) => Route::Asset("index.html"),
             ("GET", ["index.html"]) => Route::Asset("index.html"),
             ("GET", ["app.css"]) => Route::Asset("app.css"),
@@ -202,8 +203,7 @@ pub fn parse_request(raw: &str) -> Option<Request> {
         _ => return None,
     };
 
-    // Query parameters are captured verbatim; no route interprets them unless it needs one, and
-    // /access/check reads them server-side only.
+    // Query parameters are captured verbatim; no route interprets them unless it needs one.
     let (path_raw, query_raw) = match target.split_once('?') {
         Some((p, q)) => (p, q),
         None => (target, ""),
@@ -352,6 +352,8 @@ mod tests {
             Route::resolve("GET", "/proof/p1/status"),
             Route::ProofStatus("p1")
         );
+        assert_eq!(Route::resolve("POST", "/access/check"), Route::AccessCheck);
+        assert_eq!(Route::resolve("GET", "/access/check"), Route::NotFound);
     }
 
     #[test]

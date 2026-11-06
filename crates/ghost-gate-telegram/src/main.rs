@@ -470,14 +470,13 @@ impl BridgeClient for HttpBridge {
     async fn access_check(&self, application_id: &str, gate_id: &str, token: &str) -> Result<bool, String> {
         // Any non-200 is a decision of "no": a missing session, an expired one, a revoked one and a
         // policy mismatch all mean the same thing to a door. Only a transport failure is Err.
-        let url = format!(
-            "{}/access/check?application={}&gate={}&token={}",
-            self.base,
-            urlencode(application_id),
-            urlencode(gate_id),
-            urlencode(token),
-        );
-        let resp = match self.http.get(&url).send().await {
+        let url = format!("{}/access/check", self.base);
+        let body = serde_json::json!({
+            "application": application_id,
+            "gate": gate_id,
+            "token": token,
+        });
+        let resp = match self.http.post(&url).json(&body).send().await {
             Ok(r) => r,
             Err(e) => return Err(e.to_string()),
         };
@@ -2015,6 +2014,52 @@ mod tests {
         // Replay with the same body: the token is consumed, so it refuses now.
         let response2 = handle_claim_http_for_origin(&mut bot, &request, "http://127.0.0.1:7799").await;
         assert!(response2.contains("403"), "{response2}");
+    }
+
+    #[tokio::test]
+    async fn access_checks_keep_the_bearer_out_of_the_request_target() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 1024];
+            loop {
+                let read = socket.read(&mut chunk).await.unwrap();
+                assert!(read > 0, "client closed before sending a complete request");
+                request.extend_from_slice(&chunk[..read]);
+                let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| line.split_once(':').filter(|(name, _)| name.eq_ignore_ascii_case("content-length")))
+                    .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            let body = r#"{"authorized":true}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            String::from_utf8(request).unwrap()
+        });
+
+        let bridge = HttpBridge::new(&format!("http://{address}"));
+        assert!(bridge.access_check("Crypt", "Crypt", "session-secret").await.unwrap());
+        let request = server.await.unwrap();
+        assert_eq!(request.lines().next(), Some("POST /access/check HTTP/1.1"));
+        assert!(!request.lines().next().unwrap().contains("session-secret"));
+        let body = request.split_once("\r\n\r\n").unwrap().1;
+        let json: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(json["application"], "Crypt");
+        assert_eq!(json["gate"], "Crypt");
+        assert_eq!(json["token"], "session-secret");
     }
 
 

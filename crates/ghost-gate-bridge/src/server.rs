@@ -39,6 +39,14 @@ use crate::wallet::{StatementRequest, WalletChannel};
 /// Largest request body accepted. A prove request is three short strings; anything larger is not one.
 pub const MAX_BODY: usize = 8 * 1024;
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccessCheckRequest {
+    application: String,
+    gate: String,
+    token: String,
+}
+
 /// How long one status poll will wait on the wallet while reconciling a submitted job.
 ///
 /// Short on purpose: the caller is polling anyway, so completion is driven by repeated polls rather
@@ -599,14 +607,18 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             Route::AccessCheck => {
                 // The decision is computed from the registry and the session store, server-side.
                 // A client cannot argue it: there is no field to argue with.
-                let token = request.query.get("token").cloned().unwrap_or_default();
-                let gate_id = request.query.get("gate").cloned().unwrap_or_default();
-                if token.is_empty() || gate_id.is_empty() {
-                    return Response::error(400, "GG: access checks need token and gate");
+                let check: AccessCheckRequest = match serde_json::from_str(&request.body) {
+                    Ok(check) => check,
+                    Err(_) => return Response::error(400, "GG: malformed access check"),
+                };
+                if check.token.is_empty() || check.token.len() > 512
+                    || check.application.is_empty() || check.application.len() > 64
+                    || check.gate.is_empty() || check.gate.len() > 64 {
+                    return Response::error(400, "GG: invalid access check");
                 }
                 match self.access.as_mut() {
                     Some(access) => {
-                        let decision = access.check(&token, &gate_id);
+                        let decision = access.check(&check.token, &check.application, &check.gate);
                         Response::json(200, &serde_json::json!({
                             "authorized": decision.authorized,
                             "reason": decision.reason,
@@ -3257,6 +3269,32 @@ mod tests {
         assert_eq!(r.status, 200, "{}", r.body);
         assert!(r.body.contains("\"configured\":false"), "{}", r.body);
         assert!(r.body.contains("\"reachable\":false"), "{}", r.body);
+    }
+
+    #[tokio::test]
+    async fn access_check_bearers_are_accepted_only_in_a_post_body() {
+        let mut b = bridge(FakeWallet::new());
+        let legacy = b
+            .handle(&get("/access/check?application=default&gate=g1&token=secret"))
+            .await;
+        assert_eq!(legacy.status, 404, "bearer query URLs must no longer be routes");
+
+        let malformed = b
+            .handle(&post(
+                "/access/check",
+                serde_json::json!({"application":"default","gate":"g1","token":""}),
+            ))
+            .await;
+        assert_eq!(malformed.status, 400);
+
+        let parsed = b
+            .handle(&post(
+                "/access/check",
+                serde_json::json!({"application":"default","gate":"g1","token":"secret"}),
+            ))
+            .await;
+        assert_eq!(parsed.status, 503, "a valid body reaches the absent access plane");
+        assert!(!parsed.body.contains("secret"), "a response must never echo the bearer");
     }
 
     #[tokio::test]

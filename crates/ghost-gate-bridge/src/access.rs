@@ -162,7 +162,7 @@ impl AccessHandle {
     }
 
     /// The full server-side access decision.
-    pub fn check(&mut self, token: &str, gate_id: &str) -> AccessDecision {
+    pub fn check(&mut self, token: &str, application_id: &str, gate_id: &str) -> AccessDecision {
         let Some(info) = self.index.get(gate_id).cloned() else {
             return AccessDecision {
                 authorized: false,
@@ -174,6 +174,17 @@ impl AccessHandle {
                 required_tier: ghost_gate_registry::TrustTier::Production,
             };
         };
+        if info.application_id != application_id {
+            return AccessDecision {
+                authorized: false,
+                reason: "application and gate do not match".into(),
+                granted: vec![],
+                expires_unix: 0,
+                policy_version: 0,
+                trust_tier: ghost_gate_registry::TrustTier::Development,
+                required_tier: ghost_gate_registry::TrustTier::Production,
+            };
+        }
         match self.plane.check(token, &info.application_id, gate_id) {
             Ok(d) => d,
             Err(e) => AccessDecision {
