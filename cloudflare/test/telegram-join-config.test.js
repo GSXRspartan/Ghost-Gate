@@ -11,6 +11,15 @@ const cryptV3 = {
   relyingSite: "https://ghostgate.boo",
 };
 
+test("paused Telegram page stops before any wallet proof is requested", () => {
+  const source = readFileSync(new URL("../../web/telegram/claim.js", import.meta.url), "utf8");
+  const guard = source.indexOf("const telegramAdmissionAvailable = false;");
+  const stop = source.indexOf("if (!telegramAdmissionAvailable)", guard);
+  const wallet = source.indexOf("await provider.approveAndBuildProof");
+  assert.ok(guard >= 0 && stop > guard && wallet > stop);
+  assert.match(source.slice(stop, wallet), /return fail\(/);
+});
+
 test("Telegram join uses only deployment-configured exact HTTPS bridge and claim endpoints", () => {
   const endpoints = configuredJoinEndpoints({
     bridgeOrigin: "https://bridge.ghostgate.boo",

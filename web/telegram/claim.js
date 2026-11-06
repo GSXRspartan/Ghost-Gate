@@ -74,6 +74,12 @@ async function post(path, body) {
 }
 
 async function main() {
+  // Real bot admission is currently disabled until proof and Telegram identity are bound.
+  // Stop before connecting a wallet or creating an output that could incur a network fee.
+  const telegramAdmissionAvailable = false;
+  if (!telegramAdmissionAvailable) {
+    return fail("Telegram verification is temporarily unavailable. Existing group membership is unchanged.");
+  }
   if (!trustedBridgeOrigin || !claimUrl) {
     return fail(
       "This verification page is not configured for the approved Ghost Gate services. Request a new /join link from the bot.",

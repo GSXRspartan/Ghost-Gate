@@ -809,6 +809,10 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
         let Some(user) = message.from.as_ref().map(|f| f.id) else { return };
         let text = message.text.clone().unwrap_or_default();
         if text.starts_with("/join") {
+            if !self.fixture_authorization {
+                self.telegram.send_message(user, "Telegram verification is temporarily unavailable. Existing group membership is unchanged.").await.ok();
+                return;
+            }
             if let Ok(reply) = self.join(user, base_url, claim_base, bridge_public_url).await {
                 self.telegram.send_message(user, &reply).await.ok();
             } else {
@@ -1594,6 +1598,21 @@ mod tests {
 
         assert_eq!(bot.tokens.len(), 1);
         assert!(tg.lock().unwrap().messages[0].1.contains("token="));
+    }
+
+    #[tokio::test]
+    async fn real_join_command_does_not_issue_an_unusable_link() {
+        let (mut bot, tg) = production_bot(FakeBridge { answers: HashMap::new(), access: None });
+        bot.handle_update(
+            TgUpdate { update_id: 2, message: Some(TgMessage {
+                from: Some(TgUser { id: 42 }), text: Some("/join".into()),
+            }), chat_join_request: None },
+            "https://ghostgate.boo", "https://claim.ghostgate.boo", None,
+        ).await;
+        assert!(bot.tokens.is_empty());
+        let messages = &tg.lock().unwrap().messages;
+        assert!(messages[0].1.contains("temporarily unavailable"));
+        assert!(!messages[0].1.contains("token="));
     }
 
     #[tokio::test]
