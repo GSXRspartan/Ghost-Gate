@@ -91,10 +91,6 @@ const MAX_ANSWERED_SEEN: usize = 1024;
 const TELEGRAM_HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 const CLAIM_HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_CLAIM_REQUEST_BYTES: usize = 8 * 1024;
-/// Telegram interprets an expiry less than 30 seconds away as permanent. Ten minutes leaves a
-/// deliberately large margin for clock skew and request latency, while bounding the worst case
-/// if the process crashes before it can explicitly unban the member.
-const TEMPORARY_REMOVAL_SECS: u64 = 600;
 
 /// The gate a receipt names, as the bridge's `CredentialReceipt` serialises it.
 #[derive(Debug, Clone, Deserialize)]
@@ -170,8 +166,6 @@ pub trait TelegramApi: Send {
     async fn create_join_request_invite(&mut self, chat: i64, expires_unix: u64) -> Result<String, String>;
     async fn approve_join_request(&mut self, chat: i64, user: i64) -> Result<(), String>;
     async fn decline_join_request(&mut self, chat: i64, user: i64) -> Result<(), String>;
-    async fn kick_member(&mut self, chat: i64, user: i64) -> Result<(), String>;
-    async fn unban_member(&mut self, chat: i64, user: i64) -> Result<(), String>;
     async fn get_updates(&mut self, offset: u64) -> Result<Vec<TgUpdate>, String>;
 }
 
@@ -233,14 +227,6 @@ impl TelegramApi for FixtureTelegram {
     }
     async fn decline_join_request(&mut self, chat: i64, user: i64) -> Result<(), String> {
         println!("[fixture] decline join request tg_user {user} for {chat}");
-        Ok(())
-    }
-    async fn kick_member(&mut self, chat: i64, user: i64) -> Result<(), String> {
-        println!("[fixture] kick tg_user {user} from {chat} (ban+unban: seat freed, door open)");
-        Ok(())
-    }
-    async fn unban_member(&mut self, chat: i64, user: i64) -> Result<(), String> {
-        println!("[fixture] unban tg_user {user} from {chat}");
         Ok(())
     }
     async fn get_updates(&mut self, _offset: u64) -> Result<Vec<TgUpdate>, String> {
@@ -320,7 +306,7 @@ impl TelegramBot {
     }
 
     /// Read-only preflight. A production bot must be the administrator of one private
-    /// supergroup and have both invite-approval and temporary-removal authority.
+    /// supergroup and have invite-approval authority. Member removal is not required.
     async fn diagnose_private_supergroup(&self, chat: i64) -> Result<(), String> {
         let me = self.call("getMe", &json!({})).await?;
         let bot_id = me["id"].as_i64().ok_or("telegram getMe returned no bot id")?;
@@ -362,9 +348,8 @@ fn validate_private_supergroup(
         }
         if status != "administrator"
             || membership["can_invite_users"].as_bool() != Some(true)
-            || membership["can_restrict_members"].as_bool() != Some(true)
         {
-            return Err("bot lacks private-supergroup invite approval or member-removal permission".into());
+            return Err("bot lacks private-supergroup invite approval permission".into());
         }
         Ok(())
 }
@@ -391,20 +376,6 @@ impl TelegramApi for TelegramBot {
     }
     async fn decline_join_request(&mut self, chat: i64, user: i64) -> Result<(), String> {
         self.call("declineChatJoinRequest", &json!({ "chat_id": chat, "user_id": user }))
-            .await
-            .map(|_| ())
-    }
-    async fn kick_member(&mut self, chat: i64, user: i64) -> Result<(), String> {
-        // Ban then unban = kick with the door left open for a future re-join.
-        self.call(
-            "banChatMember",
-            &json!({ "chat_id": chat, "user_id": user, "until_date": now_unix() + TEMPORARY_REMOVAL_SECS }),
-        )
-        .await?;
-        self.unban_member(chat, user).await
-    }
-    async fn unban_member(&mut self, chat: i64, user: i64) -> Result<(), String> {
-        self.call("unbanChatMember", &json!({ "chat_id": chat, "user_id": user, "only_if_banned": true }))
             .await
             .map(|_| ())
     }
@@ -1451,8 +1422,6 @@ mod tests {
         declined: Vec<(i64, i64)>,
         messages: Vec<(i64, String)>,
         next_link: String,
-        kick_ambiguous: bool,
-        unban_fails: bool,
     }
 
     impl FakeTelegram {
@@ -1467,8 +1436,6 @@ mod tests {
                 declined: Vec::new(),
                 messages: Vec::new(),
                 next_link: "https://t.me/joinchat/seat1".into(),
-                kick_ambiguous: false,
-                unban_fails: false,
             }
         }
     }
@@ -1498,28 +1465,6 @@ mod tests {
         }
         async fn decline_join_request(&mut self, chat: i64, user: i64) -> Result<(), String> {
             self.0.lock().unwrap().declined.push((chat, user));
-            Ok(())
-        }
-        async fn kick_member(&mut self, chat: i64, user: i64) -> Result<(), String> {
-            // The real client kicks as ban-then-unban (seat freed, door open); the fake mirrors
-            // both effects so tests assert what actually happens to the member.
-            let mut g = self.0.lock().unwrap();
-            g.kicked.push(user);
-            g.members.remove(&user);
-            if g.kick_ambiguous {
-                return Err("ambiguous Telegram ban result".into());
-            }
-            g.unbanned.push(user);
-            let _ = chat;
-            Ok(())
-        }
-        async fn unban_member(&mut self, chat: i64, user: i64) -> Result<(), String> {
-            let mut g = self.0.lock().unwrap();
-            if g.unban_fails {
-                return Err("Telegram unban unavailable".into());
-            }
-            g.unbanned.push(user);
-            let _ = chat;
             Ok(())
         }
         async fn get_updates(&mut self, _offset: u64) -> Result<Vec<TgUpdate>, String> {
@@ -1801,8 +1746,12 @@ mod tests {
             -1001234,
             &private,
             &json!({ "status": "administrator", "can_invite_users": true, "can_restrict_members": false }),
-        )
-        .is_err());
+        ).is_ok());
+        assert!(validate_private_supergroup(
+            -1001234,
+            &private,
+            &json!({ "status": "administrator", "can_invite_users": false }),
+        ).is_err());
     }
 
     #[test]
@@ -1907,15 +1856,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn expired_authorizations_never_trigger_removal_even_when_removal_would_fail() {
+    async fn expired_authorizations_never_trigger_member_removal() {
         let bridge = FakeBridge { answers: HashMap::from([("proof-unban".to_string(), FakeBridge::accepted("crypt"))]), access: None };
         let (mut bot, tg) = bot_owned(bridge);
         bot.access_ttl = Duration::from_millis(1);
-        {
-            let mut fake = tg.lock().unwrap();
-            fake.kick_ambiguous = true;
-            fake.unban_fails = true;
-        }
         let (token, _) = mint_join(&mut bot, 24).await;
         bot.claim(&token, "proof-unban").await.expect("fixture grant");
         tokio::time::sleep(Duration::from_millis(10)).await;
