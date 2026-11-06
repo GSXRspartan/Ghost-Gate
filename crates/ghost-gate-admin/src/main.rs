@@ -13,12 +13,20 @@
 use ghost_gate_admin::server::{serve, AdminState, Response};
 use ghost_gate_registry::{load_registry, StorePaths, StoreLock};
 use std::fs;
+use std::net::SocketAddr;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
 fn main() -> ExitCode {
     let data_dir = std::env::var("GG_ADMIN_DATA").unwrap_or_else(|_| "gg-admin-data".into());
     let bind = std::env::var("GG_ADMIN_BIND").unwrap_or_else(|_| "127.0.0.1:7811".into());
+    let port = match loopback_bind_port(&bind) {
+        Ok(port) => port,
+        Err(error) => {
+            eprintln!("ghost-gate-admin: refusing unsafe GG_ADMIN_BIND {bind:?}: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     // The public hostname, which is NOT always the bind address: a passkey ceremony fails outright
     // on an IP address, because WebAuthn requires a registrable domain as the RP ID. Binding stays
     // on loopback (the admin plane is never exposed), while the origin an operator opens can be
@@ -27,9 +35,15 @@ fn main() -> ExitCode {
         .ok()
         .map(|h| h.trim().to_string())
         .filter(|h| !h.is_empty())
-        .unwrap_or_else(|| bind.split(':').next().unwrap_or("127.0.0.1").to_string());
-    let port = bind.rsplit(':').next().unwrap_or("7811");
-    let origin = format!("http://{}:{}", hostname, port);
+        .unwrap_or_else(|| bind.parse::<SocketAddr>()
+            .map(|address| address.ip().to_string())
+            .unwrap_or_else(|_| "localhost".to_string()));
+    let origin_host = if hostname.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{hostname}]")
+    } else {
+        hostname.clone()
+    };
+    let origin = format!("http://{origin_host}:{port}");
     // rpId for WebAuthn: the host part of the public origin, which must not be an IP literal.
     let rp_id = hostname.clone();
     let ip_literal = hostname.parse::<std::net::IpAddr>().is_ok();
@@ -122,6 +136,23 @@ fn main() -> ExitCode {
     }
 }
 
+fn loopback_bind_port(bind: &str) -> Result<u16, &'static str> {
+    if let Ok(address) = bind.parse::<SocketAddr>() {
+        return if address.ip().is_loopback() {
+            Ok(address.port())
+        } else {
+            Err("the administrator listener must use a loopback IP address")
+        };
+    }
+    let (host, port) = bind.rsplit_once(':').ok_or("expected host:port")?;
+    let port = port.parse::<u16>().map_err(|_| "the port is invalid")?;
+    if host.eq_ignore_ascii_case("localhost") {
+        Ok(port)
+    } else {
+        Err("only 127.0.0.0/8, [::1], or localhost may be used")
+    }
+}
+
 fn write_bootstrap(paths: &StorePaths, token: &str) -> Result<(), String> {
     use std::io::Write;
     let _lock = StoreLock::acquire(paths)?;
@@ -143,4 +174,23 @@ fn write_bootstrap(paths: &StorePaths, token: &str) -> Result<(), String> {
 #[allow(dead_code)]
 fn _type_witness() -> Response {
     Response::error(500, "unreachable")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::loopback_bind_port;
+
+    #[test]
+    fn admin_bind_accepts_only_loopback_addresses() {
+        assert_eq!(loopback_bind_port("127.0.0.1:7811"), Ok(7811));
+        assert_eq!(loopback_bind_port("127.42.0.9:1234"), Ok(1234));
+        assert_eq!(loopback_bind_port("[::1]:7811"), Ok(7811));
+        assert_eq!(loopback_bind_port("localhost:7811"), Ok(7811));
+        assert!(loopback_bind_port("0.0.0.0:7811").is_err());
+        assert!(loopback_bind_port("[::]:7811").is_err());
+        assert!(loopback_bind_port("192.0.2.10:7811").is_err());
+        assert!(loopback_bind_port("admin.example:7811").is_err());
+        assert!(loopback_bind_port("localhost:not-a-port").is_err());
+        assert!(loopback_bind_port("7811").is_err());
+    }
 }
