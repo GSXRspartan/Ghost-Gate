@@ -2,7 +2,13 @@
 
 export function json(status, body, extra = {}) {
   const { cookies, ...headers } = extra;
-  const responseHeaders = new Headers({ "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...headers });
+  const responseHeaders = new Headers({
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "no-store",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    ...headers,
+  });
   for (const value of cookies || []) responseHeaders.append("set-cookie", value);
   return new Response(JSON.stringify(body), {
     status,

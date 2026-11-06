@@ -9,16 +9,24 @@ const MAX_PROOF_BYTES = 8 * 1024;
 const MAX_PROOF_REQUEST_BYTES = MAX_PROOF_BYTES + 8 * 1024;
 const MAX_PROXY_BODY_BYTES = 64 * 1024;
 
+function hardenedAsset(response) {
+  const headers = new Headers(response.headers);
+  headers.set("referrer-policy", "no-referrer");
+  headers.set("x-content-type-options", "nosniff");
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
 // Web Tari Universe deliberately runs its dApp container under
 // Cross-Origin-Embedder-Policy: require-corp. A cross-origin nested document
 // must both permit cross-origin embedding and carry a compatible COEP policy.
 // Keep that opt-in limited to the public Privacy Lab documents; it must never
 // spill over to authenticated bridge, claim, Telegram, or administrator routes.
 function embeddableLabDocument(response) {
-  const headers = new Headers(response.headers);
+  const hardened = hardenedAsset(response);
+  const headers = new Headers(hardened.headers);
   headers.set("cross-origin-resource-policy", "cross-origin");
   headers.set("cross-origin-embedder-policy", "require-corp");
-  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+  return new Response(hardened.body, { status: hardened.status, statusText: hardened.statusText, headers });
 }
 
 function catalog(env) {
@@ -162,7 +170,7 @@ function gateAndOrigin(request, gates, match) {
 }
 
 function bridgeRoute(method, pathname) {
-  if (method === "POST" && /^\/gate\/[^/]+\/(challenge|credential|prove)$/.test(pathname)) return true;
+  if (method === "POST" && /^\/gate\/[^/]+\/(challenge|credential)$/.test(pathname)) return true;
   if (method === "GET" && /^\/gate\/[^/]+$/.test(pathname)) return true;
   if (method === "GET" && /^\/proof\/[^/]+\/status$/.test(pathname)) return true;
   // The Privacy Lab inspector's trace is read-only and scoped to the unguessable attempt id
@@ -170,6 +178,10 @@ function bridgeRoute(method, pathname) {
   // the challenge/proof requests; serving it as a static-asset fallback leaves Technical blank.
   if (method === "GET" && pathname === "/lab/trace") return true;
   return false;
+}
+
+function sameOriginWrite(request) {
+  return request.headers.get("origin") === new URL(request.url).origin;
 }
 
 function telegramBotUrl(env) {
@@ -272,7 +284,12 @@ export default {
     // Cloudflare Access design exists.  Do not let an asset fallback or future bridge route make
     // it accidentally public at the Privacy Lab origin.
     if (parsed.pathname === "/admin" || parsed.pathname.startsWith("/admin/")) return json(404, { error: "GG: administrator is not served from this origin" });
-    if (bridgeRoute(request.method, parsed.pathname)) return bridgeProxy(env, request);
+    if (bridgeRoute(request.method, parsed.pathname)) {
+      if (request.method === "POST" && !sameOriginWrite(request)) {
+        return json(403, { error: "GG: bridge write origin mismatch" });
+      }
+      return bridgeProxy(env, request);
+    }
     if (request.method === "GET" && (parsed.pathname === "/bot" || parsed.pathname === "/bot/")) {
       const bot = telegramBotUrl(env);
       if (bot) return Response.redirect(bot, 302);
@@ -280,7 +297,7 @@ export default {
       // Cloudflare Assets canonicalizes an HTML file to its directory URL. Fetch the
       // canonical directory directly so /bot and /bot/ return the page instead of a
       // redirect loop through this worker.
-      return env.ASSETS.fetch(new Request(new URL("/bot/", request.url), request));
+      return hardenedAsset(await env.ASSETS.fetch(new Request(new URL("/bot/", request.url), request)));
     }
     if (request.method === "GET" && !parsed.pathname.startsWith("/api/") && env.ASSETS) {
       // Cloudflare Assets canonicalizes a directory's `index.html` as a redirect to the
@@ -297,9 +314,9 @@ export default {
       if (parsed.pathname === "/claim" || parsed.pathname === "/claim/" || parsed.pathname === "/telegram/join") {
         // The join page has a canonical directory asset for the same reason as /bot/;
         // direct file fetches are normalized to a redirect by Cloudflare Assets.
-        return env.ASSETS.fetch(new Request(new URL("/telegram/join/", request.url), request));
+        return hardenedAsset(await env.ASSETS.fetch(new Request(new URL("/telegram/join/", request.url), request)));
       }
-      return env.ASSETS.fetch(request);
+      return hardenedAsset(await env.ASSETS.fetch(request));
     }
     const gates = catalog(env);
     if (gates instanceof Error) return failClosed("hosted gate configuration is invalid");

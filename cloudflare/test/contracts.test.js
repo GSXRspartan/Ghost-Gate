@@ -36,6 +36,8 @@ test("hosted Worker sends root to the Privacy Lab entrypoint", async () => {
   assert.equal(response.headers.get("location"), null, "root must not redirect the browser to /lab/");
   assert.equal(response.headers.get("cross-origin-resource-policy"), "cross-origin", "the public dApp document must opt in to a COEP-protected wallet iframe");
   assert.equal(response.headers.get("cross-origin-embedder-policy"), "require-corp", "the nested public dApp document must carry a compatible COEP policy");
+  assert.equal(response.headers.get("referrer-policy"), "no-referrer");
+  assert.equal(response.headers.get("x-content-type-options"), "nosniff");
   assert.equal(await response.text(), "site");
   assert.deepEqual(seen, ["/lab/"]);
 });
@@ -150,7 +152,7 @@ test("bridge proxy rejects methods not in the allowlist", async () => {
 
 test("bridge proxy rejects paths outside the allowlist", async () => {
   const env = { GG_VERIFIER_ORIGIN: "https://bridge.example", ASSETS: { fetch() { return new Response("static"); } } };
-  for (const path of ["/admin", "/admin/api", "/v1/hosted/verify", "/wallet/send", "/gate", "/gate/"]) {
+  for (const path of ["/admin", "/admin/api", "/v1/hosted/verify", "/wallet/send", "/gate", "/gate/", "/gate/crypt/prove"]) {
     const response = await worker.fetch(new Request(`https://edge.example${path}`), env);
     const body = await response.text();
     assert.notEqual(response.status, 503, `GET ${path} must not reach bridgeProxy (got: ${body})`);
@@ -161,18 +163,24 @@ test("bridge proxy rejects an oversized POST body", async () => {
   const env = { GG_VERIFIER_ORIGIN: "https://bridge.example" };
   const oversized = "x".repeat(128 * 1024);
   const response = await worker.fetch(new Request("https://edge.example/gate/crypt/challenge", {
-    method: "POST", headers: { "content-type": "application/json", "content-length": String(oversized.length) }, body: oversized,
+    method: "POST", headers: { origin: "https://edge.example", "content-type": "application/json", "content-length": String(oversized.length) }, body: oversized,
   }), env);
   assert.equal(response.status, 413);
 });
 
-test("bridge proxy does not forward browser cookies, Authorization, or Origin to the bridge", async () => {
+test("bridge proxy rejects cross-origin writes and strips browser authority headers", async () => {
   let captured = null;
   const previousFetch = globalThis.fetch;
   globalThis.fetch = async (_url, init) => { captured = init.headers; return new Response("{}"); };
   try {
-    await worker.fetch(new Request("https://edge.example/gate/crypt/challenge", {
+    const refused = await worker.fetch(new Request("https://edge.example/gate/crypt/challenge", {
       method: "POST", headers: { cookie: "secret=token", authorization: "Bearer steal-me", origin: "https://evil.example", "content-type": "application/json" }, body: "{}",
+    }), { GG_VERIFIER_ORIGIN: "https://bridge.example" });
+    assert.equal(refused.status, 403);
+    assert.equal(captured, null, "a cross-origin write must stop before the bridge");
+
+    await worker.fetch(new Request("https://edge.example/gate/crypt/challenge", {
+      method: "POST", headers: { cookie: "secret=token", authorization: "Bearer steal-me", origin: "https://edge.example", "content-type": "application/json" }, body: "{}",
     }), { GG_VERIFIER_ORIGIN: "https://bridge.example" });
     assert.ok(captured, "bridge request must have been sent");
     assert.equal(captured.cookie, undefined);
@@ -187,7 +195,7 @@ test("bridge proxy locks content-type to application/json for POST", async () =>
   globalThis.fetch = async (_url, init) => { captured = init.headers; return new Response("{}"); };
   try {
     await worker.fetch(new Request("https://edge.example/gate/crypt/challenge", {
-      method: "POST", headers: { "content-type": "text/html" }, body: "{}",
+      method: "POST", headers: { origin: "https://edge.example", "content-type": "text/html" }, body: "{}",
     }), { GG_VERIFIER_ORIGIN: "https://bridge.example" });
     assert.equal(captured["content-type"], "application/json");
   } finally { globalThis.fetch = previousFetch; }
@@ -206,7 +214,7 @@ test("bridge proxy forwards a nonempty credential body from a fresh string", asy
   };
   try {
     await worker.fetch(new Request("https://edge.example/gate/Crypt/credential", {
-      method: "POST", headers: { "content-type": "application/json" }, body,
+      method: "POST", headers: { origin: "https://edge.example", "content-type": "application/json" }, body,
     }), { GG_VERIFIER_ORIGIN: "https://bridge.example" });
     assert.equal(captured.method, "POST");
     assert.equal(captured.contentType, "application/json");
