@@ -81,6 +81,8 @@ const MAX_PENDING_TOKENS: usize = 512;
 const POLL_INTERVAL: u64 = 3; // seconds between getUpdates calls
 const MAX_ANSWERED_SEEN: usize = 1024;
 const TELEGRAM_HTTP_TIMEOUT: Duration = Duration::from_secs(15);
+const CLAIM_HTTP_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_CLAIM_REQUEST_BYTES: usize = 8 * 1024;
 /// Telegram interprets an expiry less than 30 seconds away as permanent. Ten minutes leaves a
 /// deliberately large margin for clock skew and request latency, while bounding the worst case
 /// if the process crashes before it can explicitly unban the member.
@@ -1248,8 +1250,11 @@ pub async fn serve<T: TelegramApi, B: BridgeClient>(
                 let _ = read_one;
                 match pending_accept.as_mut() {
                     Some(socket) => {
-                        let mut buf = vec![0u8; 8 * 1024];
-                        let n: usize = socket.read(&mut buf).await.unwrap_or(0);
+                        let mut buf = vec![0u8; MAX_CLAIM_REQUEST_BYTES + 1];
+                        let n: usize = match tokio::time::timeout(CLAIM_HTTP_TIMEOUT, socket.read(&mut buf)).await {
+                            Ok(Ok(n)) => n,
+                            _ => 0,
+                        };
                         Ok::<(usize, Vec<u8>), std::convert::Infallible>((n, buf))
                     },
                     None => {
@@ -1309,13 +1314,58 @@ async fn handle_claim_http<T: TelegramApi, B: BridgeClient>(bot: &mut Bot<T, B>,
     // Content-Type is a CORS-safelisted type (text/plain etc.) would skip the preflight entirely,
     // so the declared type is enforced and the body's shape re-checked below.
     let allowed_origin = std::env::var("GG_JOIN_BASE_URL").unwrap_or_else(|_| "http://127.0.0.1:7799".into());
-    let cors = format!("Access-Control-Allow-Origin: {allowed_origin}\r\nAccess-Control-Allow-Methods: POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nVary: Origin\r\n");
+    handle_claim_http_for_origin(bot, raw, allowed_origin.trim_end_matches('/')).await
+}
+
+fn claim_http_response(status: &str, body: &str, allowed_origin: &str) -> String {
+    let content_type = if body.is_empty() { "" } else { "Content-Type: application/json\r\n" };
+    format!(
+        "HTTP/1.1 {status}\r\n{content_type}Content-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nAccess-Control-Allow-Origin: {allowed_origin}\r\nAccess-Control-Allow-Methods: POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nVary: Origin\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+fn is_loopback_host(value: &str) -> bool {
+    let value = value.trim().to_ascii_lowercase();
+    if matches!(value.as_str(), "127.0.0.1" | "localhost" | "[::1]" | "::1") {
+        return true;
+    }
+    if let Some(rest) = value.strip_prefix('[') {
+        return rest.split_once(']').is_some_and(|(host, suffix)| {
+            host == "::1"
+                && suffix.strip_prefix(':').is_some_and(|port| {
+                    !port.is_empty() && port.chars().all(|c| c.is_ascii_digit())
+                })
+        });
+    }
+    value.rsplit_once(':').is_some_and(|(host, port)| {
+        matches!(host, "127.0.0.1" | "localhost")
+            && !port.is_empty()
+            && port.chars().all(|c| c.is_ascii_digit())
+    })
+}
+
+async fn handle_claim_http_for_origin<T: TelegramApi, B: BridgeClient>(
+    bot: &mut Bot<T, B>,
+    raw: &str,
+    allowed_origin: &str,
+) -> String {
+    if raw.len() > MAX_CLAIM_REQUEST_BYTES {
+        return claim_http_response(
+            "413 Content Too Large",
+            &json!({ "error": "claim request too large" }).to_string(),
+            allowed_origin,
+        );
+    }
 
     let mut lines = raw.split("\r\n");
     let request_line = lines.next().unwrap_or("");
-    let (method, _target) = request_line.split_once(' ').unwrap_or(("", ""));
+    let mut request_parts = request_line.split_whitespace();
+    let method = request_parts.next().unwrap_or("");
+    let target = request_parts.next().unwrap_or("");
     let mut content_type: Option<String> = None;
     let mut host: Option<String> = None;
+    let mut origin: Option<String> = None;
     for line in lines {
         if line.is_empty() {
             break;
@@ -1326,52 +1376,69 @@ async fn handle_claim_http<T: TelegramApi, B: BridgeClient>(bot: &mut Bot<T, B>,
                 content_type = Some(v.to_string());
             } else if name.eq_ignore_ascii_case("host") {
                 host = Some(v.to_string());
+            } else if name.eq_ignore_ascii_case("origin") {
+                origin = Some(v.to_string());
             }
         }
     }
     // Host: only loopback spellings, like the bridge.
-    if let Some(h) = &host {
-        let name = h.rsplit_once(':').map(|(n, p)| {
-            if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) { n } else { h.as_str() }
-        });
-        if let Some(name) = name {
-            let lname = name.to_ascii_lowercase();
-            if !matches!(lname.as_str(), "127.0.0.1" | "localhost" | "[::1]" | "::1") {
-                return format!(
-                    "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: 67\r\n{cors}\r\n\
-                     {{\"error\":\"this claim endpoint answers only for loopback hosts\"}}"
-                );
-            }
-        }
+    if !host.as_deref().is_some_and(is_loopback_host) {
+        return claim_http_response(
+            "403 Forbidden",
+            &json!({ "error": "this claim endpoint answers only for loopback hosts" }).to_string(),
+            allowed_origin,
+        );
+    }
+    if target.split('?').next() != Some("/claim") {
+        return claim_http_response(
+            "404 Not Found",
+            &json!({ "error": "claim endpoint not found" }).to_string(),
+            allowed_origin,
+        );
+    }
+    if origin.as_deref() != Some(allowed_origin) {
+        return claim_http_response(
+            "403 Forbidden",
+            &json!({ "error": "claim origin not allowed" }).to_string(),
+            allowed_origin,
+        );
     }
 
     if method == "OPTIONS" {
-        return format!("HTTP/1.1 204 No Content\r\n{cors}\r\n");
+        return claim_http_response("204 No Content", "", allowed_origin);
     }
     if method != "POST" {
-        return format!("HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n{cors}\r\n");
+        return claim_http_response("405 Method Not Allowed", "", allowed_origin);
     }
     // The declared media type must be JSON: a safelisted type would have skipped the preflight
     // that this endpoint's CORS otherwise gates.
-    if let Some(ct) = &content_type {
-        let base = ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
-        if base != "application/json" {
-            return format!(
-                "HTTP/1.1 415 Unsupported Media Type\r\nContent-Type: application/json\r\nContent-Length: 45\r\n{cors}\r\n\
-                 {{\"error\":\"claims must be application/json\"}}"
-            );
-        }
+    let json_content_type = content_type.as_deref().is_some_and(|ct| {
+        ct.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("application/json")
+    });
+    if !json_content_type {
+        return claim_http_response(
+            "415 Unsupported Media Type",
+            &json!({ "error": "claims must be application/json" }).to_string(),
+            allowed_origin,
+        );
     }
-    let body = raw.split("\r\n\r
-").nth(1).unwrap_or("");
+    let body = raw.split_once("\r\n\r\n").map(|(_, body)| body).unwrap_or("");
     let parsed: Result<serde_json::Value, _> = serde_json::from_str(body);
     let Some(body) = parsed.ok() else {
-        return format!("HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: 32\r\n{cors}\r\n{{\"error\":\"malformed claim body\"}}");
+        return claim_http_response(
+            "400 Bad Request",
+            &json!({ "error": "malformed claim body" }).to_string(),
+            allowed_origin,
+        );
     };
     let token = body["token"].as_str().unwrap_or("").to_string();
     let proof_id = body["proof_id"].as_str().unwrap_or("").to_string();
     if token.is_empty() || proof_id.is_empty() {
-        return format!("HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: 36\r\n{cors}\r\n{{\"error\":\"token and proof_id required\"}}");
+        return claim_http_response(
+            "400 Bad Request",
+            &json!({ "error": "token and proof_id required" }).to_string(),
+            allowed_origin,
+        );
     }
     match bot.claim(&token, &proof_id).await {
         Ok(link) => {
@@ -1382,11 +1449,11 @@ async fn handle_claim_http<T: TelegramApi, B: BridgeClient>(bot: &mut Bot<T, B>,
                 "at": now_unix(),
             })
             .to_string();
-            format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{cors}\r\n{payload}", payload.len())
+            claim_http_response("200 OK", &payload, allowed_origin)
         },
         Err(e) => {
             let payload = json!({ "state": "refused", "error": e }).to_string();
-            format!("HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{cors}\r\n{payload}", payload.len())
+            claim_http_response("403 Forbidden", &payload, allowed_origin)
         },
     }
 }
@@ -1772,10 +1839,10 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
         let body = serde_json::json!({ "token": token, "proof_id": "proof-expired" }).to_string();
         let request = format!(
-            "POST /claim?expires=4102444800 HTTP/1.1\r\nHost: 127.0.0.1:7808\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            "POST /claim?expires=4102444800 HTTP/1.1\r\nHost: 127.0.0.1:7808\r\nOrigin: http://127.0.0.1:7799\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         );
-        let response = handle_claim_http(&mut bot, &request).await;
+        let response = handle_claim_http_for_origin(&mut bot, &request, "http://127.0.0.1:7799").await;
         assert!(response.contains("403 Forbidden"), "{response}");
         assert!(response.contains("join link expired"), "{response}");
     }
@@ -1856,7 +1923,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_claim_endpoint_enforces_loopback_hosts_and_json_content_type() {
+    async fn the_claim_endpoint_enforces_request_boundaries() {
         // Phase-6 recheck regressions, pre-fixed: (a) a rebound host must not be answered, (b) a
         // CORS-safelisted content type must not bypass the preflight the JSON contract relies on.
         let bridge = FakeBridge { answers: HashMap::from([("fixture_smoke".to_string(), FakeBridge::accepted("crypt"))]), access: None };
@@ -1865,20 +1932,50 @@ mod tests {
         let body = serde_json::json!({ "token": token, "proof_id": "fixture_smoke" }).to_string();
 
         let rebinding = format!(
-            "POST /claim HTTP/1.1\r\nHost: evil.com:7810\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            "POST /claim HTTP/1.1\r\nHost: evil.com\r\nOrigin: http://127.0.0.1:7799\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         );
-        let r = handle_claim_http(&mut bot, &rebinding).await;
+        let r = handle_claim_http_for_origin(&mut bot, &rebinding, "http://127.0.0.1:7799").await;
         assert!(r.contains("403"), "{r}");
         assert!(r.contains("loopback"), "{r}");
 
         let csrf_style = format!(
-            "POST /claim HTTP/1.1\r\nHost: 127.0.0.1:7810\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{body}",
+            "POST /claim HTTP/1.1\r\nHost: 127.0.0.1:7810\r\nOrigin: http://127.0.0.1:7799\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         );
-        let r2 = handle_claim_http(&mut bot, &csrf_style).await;
+        let r2 = handle_claim_http_for_origin(&mut bot, &csrf_style, "http://127.0.0.1:7799").await;
         assert!(r2.contains("415"), "{r2}");
         assert!(r2.contains("application/json"), "{r2}");
+
+        let missing_type = format!(
+            "POST /claim HTTP/1.1\r\nHost: localhost\r\nOrigin: http://127.0.0.1:7799\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let r3 = handle_claim_http_for_origin(&mut bot, &missing_type, "http://127.0.0.1:7799").await;
+        assert!(r3.contains("415"), "{r3}");
+
+        let wrong_origin = format!(
+            "POST /claim HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: https://evil.example\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let r4 = handle_claim_http_for_origin(&mut bot, &wrong_origin, "http://127.0.0.1:7799").await;
+        assert!(r4.contains("403"), "{r4}");
+        assert!(r4.contains("origin"), "{r4}");
+
+        let missing_origin = format!(
+            "POST /claim HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let r5 = handle_claim_http_for_origin(&mut bot, &missing_origin, "http://127.0.0.1:7799").await;
+        assert!(r5.contains("403"), "{r5}");
+        assert!(r5.contains("origin"), "{r5}");
+
+        let wrong_path = format!(
+            "POST /other HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://127.0.0.1:7799\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let r6 = handle_claim_http_for_origin(&mut bot, &wrong_path, "http://127.0.0.1:7799").await;
+        assert!(r6.contains("404"), "{r6}");
     }
 
     #[tokio::test]
@@ -1903,8 +2000,8 @@ mod tests {
         let (mut bot, _tg) = bot_owned(bridge);
         let (token, _) = mint_join(&mut bot, 12).await;
         let body = serde_json::json!({ "token": token, "proof_id": "proof7" }).to_string();
-        let request = format!("POST /claim HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len());
-        let response = handle_claim_http(&mut bot, &request).await;
+        let request = format!("POST /claim HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://127.0.0.1:7799\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+        let response = handle_claim_http_for_origin(&mut bot, &request, "http://127.0.0.1:7799").await;
         assert!(response.contains("200 OK"), "{response}");
         assert!(response.contains("granted"), "{response}");
         assert!(response.contains("test_only"), "fixture responses are never production grants: {response}");
@@ -1912,9 +2009,11 @@ mod tests {
             response.contains("Access-Control-Allow-Origin: http://127.0.0.1:7799"),
             "the preflight names the join page's origin exactly: {response}"
         );
+        assert!(response.contains("Cache-Control: no-store"), "claim responses are not cacheable: {response}");
+        assert!(response.contains("X-Content-Type-Options: nosniff"), "claim responses disable sniffing: {response}");
 
         // Replay with the same body: the token is consumed, so it refuses now.
-        let response2 = handle_claim_http(&mut bot, &request).await;
+        let response2 = handle_claim_http_for_origin(&mut bot, &request, "http://127.0.0.1:7799").await;
         assert!(response2.contains("403"), "{response2}");
     }
 

@@ -19,12 +19,27 @@ ingress:
     originRequest:
       noTLSVerify: false
       connectTimeout: 10s
+  - hostname: bridge.DOMAIN_HERE
+    path: '^/proof/[A-Za-z0-9_-]+/status$'
+    service: http://127.0.0.1:7799
+    originRequest:
+      noTLSVerify: false
+      connectTimeout: 10s
+  - hostname: bridge.DOMAIN_HERE
+    path: '^/lab/trace$'
+    service: http://127.0.0.1:7799
+    originRequest:
+      noTLSVerify: false
+      connectTimeout: 10s
 
   # Telegram claim endpoint
   - hostname: claim.DOMAIN_HERE
     path: '^/claim$'
     service: http://127.0.0.1:7808
     originRequest:
+      # The claim service rejects non-loopback Host values. Preserve that boundary when
+      # cloudflared forwards the public claim hostname to its loopback-only listener.
+      httpHostHeader: 127.0.0.1
       noTLSVerify: false
       connectTimeout: 10s
 
