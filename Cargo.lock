@@ -2920,6 +2920,7 @@ name = "ghost-gate-bridge"
 version = "0.1.0"
 dependencies = [
  "blake2 0.10.6",
+ "diesel",
  "ghost-gate-core",
  "ghost-gate-registry",
  "ghost-gate-verifier",
