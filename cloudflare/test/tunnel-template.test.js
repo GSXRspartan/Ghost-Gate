@@ -19,3 +19,13 @@ test("tunnel template routes only explicitly named bridge and claim paths", () =
   assert.match(template, /hostname: claim\.DOMAIN_HERE[\s\S]*?httpHostHeader: 127\.0\.0\.1/);
   assert.match(template, /- service: http_status:404\s*$/);
 });
+
+test("VPS backups remain root-only and publish atomically", () => {
+  const backup = readFileSync(new URL("../../deploy/backup.sh", import.meta.url), "utf8");
+  const setup = readFileSync(new URL("../../deploy/setup-vps.sh", import.meta.url), "utf8");
+  assert.match(backup, /^umask 077$/m);
+  assert.match(backup, /install -d -o root -g root -m 0700 "\$BACKUP_DIR"/);
+  assert.match(backup, /chmod 0600 "\$TEMP_ARCHIVE"/);
+  assert.match(backup, /mv -f -- "\$TEMP_ARCHIVE" "\$ARCHIVE"/);
+  assert.match(setup, /chown root:root \/opt\/ghost-gate\/data\/backups\s+chmod 700 \/opt\/ghost-gate\/data\/backups/);
+});

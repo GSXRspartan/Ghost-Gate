@@ -52,6 +52,8 @@ chown ghostgate-bridge:ghostgate-bridge /opt/ghost-gate/data/replays
 chmod 700 /opt/ghost-gate/data/replays
 chown ghostgate-admin:ghostgate-registry /opt/ghost-gate/data/registry
 chmod 2770 /opt/ghost-gate/data/registry
+chown root:root /opt/ghost-gate/data/backups
+chmod 700 /opt/ghost-gate/data/backups
 usermod -a -G ghostgate-registry ghostgate-bridge
 usermod -a -G ghostgate-registry ghostgate-admin
 chown root:root /opt/ghost-gate/data
