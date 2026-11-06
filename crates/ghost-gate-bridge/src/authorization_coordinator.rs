@@ -154,6 +154,48 @@ impl AuthorizationCoordinator {
         Ok(Authorization { session_id, context, wallet_output: None, state: AuthorizationState::Created })
     }
 
+    /// Explicit, non-destructive opt-in for bot event replay protection in this same database.
+    /// The caller must stop older writers before migrating; no existing authorization is changed.
+    pub fn initialize_bot_event_store(&mut self) -> Result<()> {
+        self.connection.batch_execute(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE IF NOT EXISTS bot_session_events (
+                update_id INTEGER PRIMARY KEY NOT NULL,
+                created_unix INTEGER NOT NULL,
+                session_id TEXT NOT NULL UNIQUE REFERENCES authorizations(session_id)
+             );
+             COMMIT;"
+        ).map_err(|_| CoordinatorError::Storage)
+    }
+
+    /// A trusted, authenticated bot event creates at most one session across all processes.
+    /// Both the event marker and session insert commit together. Rate limiting is durable.
+    pub(crate) fn issue_bot_event(&mut self, update_id: i64, mut context: AuthorizationContext) -> Result<Authorization> {
+        if update_id < 0 { return Err(CoordinatorError::Refused); }
+        context.challenge_nonce = random_hex();
+        validate_context(&context)?;
+        let now = now_unix()?;
+        if now < context.issued_unix || now >= context.expires_unix || now > i64::MAX as u64 {
+            return Err(CoordinatorError::Refused);
+        }
+        let session_id = random_hex();
+        let encoded = serde_json::to_string(&context).map_err(|_| CoordinatorError::Storage)?;
+        #[derive(QueryableByName)]
+        struct Count { #[diesel(sql_type = diesel::sql_types::BigInt)] count: i64 }
+        self.connection.immediate_transaction::<_, diesel::result::Error, _>(|connection| {
+            let count: Count = diesel::sql_query("SELECT COUNT(*) AS count FROM bot_session_events WHERE created_unix >= ?")
+                .bind::<diesel::sql_types::BigInt, _>((now as i64).saturating_sub(60)).get_result(connection)?;
+            if count.count >= 30 { return Err(diesel::result::Error::RollbackTransaction); }
+            diesel::sql_query("INSERT INTO authorizations (session_id, context, wallet_output, state) VALUES (?, ?, NULL, 'CREATED')")
+                .bind::<Text, _>(&session_id).bind::<Text, _>(&encoded).execute(connection)?;
+            diesel::sql_query("INSERT INTO bot_session_events (update_id, created_unix, session_id) VALUES (?, ?, ?)")
+                .bind::<diesel::sql_types::BigInt, _>(update_id)
+                .bind::<diesel::sql_types::BigInt, _>(now as i64).bind::<Text, _>(&session_id).execute(connection)?;
+            Ok(())
+        }).map_err(|_| CoordinatorError::Storage)?;
+        Ok(Authorization { session_id, context, wallet_output: None, state: AuthorizationState::Created })
+    }
+
     pub fn get(&mut self, session_id: &str) -> Result<Authorization> {
         valid_id(session_id)?;
         let row: Stored = diesel::sql_query("SELECT context, wallet_output, state FROM authorizations WHERE session_id = ?")
@@ -291,6 +333,44 @@ mod tests {
         assert_eq!(saved.state, AuthorizationState::Verified);
         assert_eq!(saved.wallet_output.as_deref(), Some("utxo_test"));
         assert_ne!(auth.session_id, auth.context.challenge_nonce);
+    }
+
+    #[test]
+    fn bot_events_are_durable_and_duplicate_creation_is_atomic() {
+        let dir = TestDb::new();
+        let mut db = AuthorizationCoordinator::create_new(&dir.path()).unwrap();
+        let existing = db.issue(context()).unwrap();
+        assert!(db.issue_bot_event(100, context()).is_err(), "feature is disabled before explicit initialization");
+        db.initialize_bot_event_store().unwrap();
+        let created = db.issue_bot_event(100, context()).unwrap();
+        assert!(db.issue_bot_event(100, context()).is_err());
+        drop(db);
+        let mut reopened = AuthorizationCoordinator::open_existing(&dir.path()).unwrap();
+        assert_eq!(reopened.get(&existing.session_id).unwrap(), existing);
+        assert_eq!(reopened.get(&created.session_id).unwrap(), created);
+        assert!(reopened.issue_bot_event(100, context()).is_err(), "replay remains denied after reopening");
+        #[derive(QueryableByName)]
+        struct Total { #[diesel(sql_type = diesel::sql_types::BigInt)] n: i64 }
+        let total: Total = diesel::sql_query("SELECT COUNT(*) AS n FROM authorizations")
+            .get_result(&mut reopened.connection).unwrap();
+        assert_eq!(total.n, 2, "failed duplicates must not leave orphan sessions");
+    }
+
+    #[test]
+    fn concurrent_duplicate_bot_events_create_only_one_session() {
+        let dir = TestDb::new();
+        AuthorizationCoordinator::create_new(&dir.path()).unwrap().initialize_bot_event_store().unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let path = dir.path(); let barrier = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                let mut db = AuthorizationCoordinator::open_existing(&path).unwrap();
+                barrier.wait();
+                db.issue_bot_event(101, context()).is_ok()
+            }));
+        }
+        assert_eq!(handles.into_iter().map(|h| h.join().unwrap()).filter(|success| *success).count(), 1);
     }
 
     #[test]

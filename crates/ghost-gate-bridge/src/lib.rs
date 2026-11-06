@@ -43,6 +43,7 @@
 
 pub mod access;
 pub mod authorization_coordinator;
+pub mod bot_session_interface;
 
 pub mod credential;
 pub mod gate_registry;
