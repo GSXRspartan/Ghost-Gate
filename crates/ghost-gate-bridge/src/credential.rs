@@ -109,6 +109,82 @@ pub fn ownership_proof_message(
     out
 }
 
+/// Server-owned context for a Telegram-specific ownership challenge.
+///
+/// This primitive is not an admission endpoint: callers must obtain `user_id` and `chat_id`
+/// from the bot, validate the current policy, issue the nonce using a durable coordinator, and
+/// atomically consume it before treating a verified proof as authorization. Never build this
+/// value from browser-supplied identity fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelegramProofContext {
+    pub user_id: i64,
+    pub chat_id: i64,
+    pub gate_id: String,
+    pub policy_hash: [u8; 32],
+    pub network: u8,
+    pub resource: ResourceAddress,
+    pub threshold: u64,
+    pub substate_id: String,
+    pub issued_unix: u64,
+    pub expires_unix: u64,
+    pub nonce: [u8; 32],
+}
+
+impl TelegramProofContext {
+    /// Canonical, domain-separated challenge string for the existing Tari ownership-signing API.
+    /// All integers are fixed-width big-endian; strings are UTF-8 prefixed by a u32 byte length.
+    pub fn signing_challenge(&self, now: u64) -> Result<String, &'static str> {
+        use blake2::Digest;
+        if self.user_id <= 0 || self.chat_id >= 0 || self.gate_id.is_empty()
+            || self.gate_id.len() > 64 || self.substate_id.is_empty() || self.substate_id.len() > 512
+            || self.threshold == 0 || self.nonce == [0; 32] || self.policy_hash == [0; 32]
+            || self.issued_unix > now || self.expires_unix <= now
+            || self.expires_unix <= self.issued_unix
+            || self.expires_unix - self.issued_unix > 600 {
+            return Err("invalid or expired Telegram proof context");
+        }
+        let resource = self.resource.to_string();
+        let mut h = blake2::Blake2b512::new();
+        h.update(b"ghost-gate/telegram-ownership/v1\0");
+        h.update(self.user_id.to_be_bytes());
+        h.update(self.chat_id.to_be_bytes());
+        for value in [self.gate_id.as_str(), resource.as_str(), self.substate_id.as_str()] {
+            h.update((value.len() as u32).to_be_bytes());
+            h.update(value.as_bytes());
+        }
+        h.update(self.policy_hash);
+        h.update([self.network]);
+        h.update(self.threshold.to_be_bytes());
+        h.update(self.issued_unix.to_be_bytes());
+        h.update(self.expires_unix.to_be_bytes());
+        h.update(self.nonce);
+        Ok(hex::encode(h.finalize()))
+    }
+
+    /// Verify the wallet signature and chain-derived output against the server-owned context.
+    /// Replay protection and current-policy checks are mandatory responsibilities of the caller.
+    pub async fn verify(
+        &self,
+        reader: &impl ChainReader,
+        request: &CredentialProofRequest,
+        now: u64,
+    ) -> Result<CredentialReceipt, CredentialRefusal> {
+        let challenge = self.signing_challenge(now)
+            .map_err(|e| CredentialRefusal::Malformed(e.into()))?;
+        if request.gate_id != self.gate_id || request.substate_id != self.substate_id
+            || request.challenge_nonce != hex::encode(self.nonce) {
+            return Err(CredentialRefusal::Malformed("Telegram proof context mismatch".into()));
+        }
+        CredentialVerifier {
+            gate_id: &self.gate_id,
+            network: self.network,
+            threshold: self.threshold,
+            resource: &self.resource,
+            challenge_string: &challenge,
+        }.verify(reader, request).await
+    }
+}
+
 // -------------------------------------------------------------------------------------------
 // What the page may send
 // -------------------------------------------------------------------------------------------
@@ -505,6 +581,40 @@ mod tests {
         assert_eq!(receipt.mode, "credential");
         assert!(receipt.substate_id.contains("utxo_"));
         let _ = sk;
+    }
+
+    #[tokio::test]
+    async fn telegram_context_binds_a_real_wallet_signature_to_every_field() {
+        let res = resource(7);
+        let (sk, pk) = keypair();
+        let ctx = TelegramProofContext {
+            user_id: 42, chat_id: -1001234, gate_id: "g1".into(), policy_hash: [9; 32],
+            network: NETWORK, resource: res, threshold: 10_000, substate_id: substate_id(&res),
+            issued_unix: 1000, expires_unix: 1180, nonce: [7; 32],
+        };
+        let challenge = ctx.signing_challenge(1001).unwrap();
+        let mut req = request(&res, &challenge, &sk);
+        req.challenge_nonce = hex::encode(ctx.nonce);
+        let reader = FixedReader::ok(50_000, key_bytes(&pk));
+        assert!(ctx.verify(&reader, &req, 1001).await.is_ok());
+
+        let mut variants = Vec::new();
+        let mut changed = ctx.clone(); changed.user_id += 1; variants.push(changed);
+        let mut changed = ctx.clone(); changed.chat_id -= 1; variants.push(changed);
+        let mut changed = ctx.clone(); changed.policy_hash = [8; 32]; variants.push(changed);
+        let mut changed = ctx.clone(); changed.network ^= 1; variants.push(changed);
+        let mut changed = ctx.clone(); changed.threshold += 1; variants.push(changed);
+        let mut changed = ctx.clone(); changed.issued_unix -= 1; variants.push(changed);
+        let mut changed = ctx.clone(); changed.expires_unix -= 1; variants.push(changed);
+        let mut changed = ctx.clone(); changed.nonce = [8; 32]; variants.push(changed);
+        let mut changed = ctx.clone(); changed.gate_id = "other".into(); variants.push(changed);
+        let mut changed = ctx.clone(); changed.resource = resource(8); variants.push(changed);
+        let mut changed = ctx.clone(); changed.substate_id = substate_id(&resource(8)); variants.push(changed);
+        for changed in variants {
+            assert!(changed.verify(&reader, &req, 1001).await.is_err(), "substituted context must fail");
+        }
+        assert!(ctx.verify(&reader, &req, 1180).await.is_err(), "expiry is exclusive");
+        assert!(ctx.verify(&FixedReader::ok(9_999, key_bytes(&pk)), &req, 1001).await.is_err(), "chain floor remains authoritative");
     }
 
     #[tokio::test]
