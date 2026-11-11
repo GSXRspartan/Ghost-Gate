@@ -1,17 +1,21 @@
 /**
- * Telegram join-page logic.
+ * Telegram join-page logic — M6+ bot-session Sapient flow.
  *
- * Runs the credential flow for the gate the bot's link named, then claims the join token at the
- * bot's endpoint. The bot re-verifies the receipt against the bridge itself, so this page cannot
- * grant anything by lying — and it doesn't try.
+ * The bot creates a session on the bridge (HMAC-authenticated) and sends a
+ * ?bot_session={id}&gate={gate} URL to this page. The flow:
+ *   1. Build the credential output in the browser wallet (yields substateId);
+ *   2. Obtain a signing challenge from the bridge, bound to that substateId;
+ *   3. Sign the challenge in the wallet;
+ *   4. Submit the proof to the bridge for on-chain verification;
+ *   5. The bot polls the bridge and auto-redeems the Verified session.
  *
- * Query params (all minted by the bot):
- *   token  — the single-use join token
- *   gate   — which registered gate to prove (e.g. "Crypt")
+ * Query params (all set by the bot):
+ *   bot_session — the bridge-issued session id (HMAC-minted, server-side)
+ *   gate        — which gate to prove (selects the published resource + threshold)
  *
- * Claim and bridge destinations are never read from the link. The deployed page carries exact,
- * operator-configured HTTPS origins instead, so a forwarded or edited URL cannot redirect proof
- * material or a claim token to another service.
+ * The bridge origin is never read from the query string. The deployed page carries
+ * the exact trusted bridge origin in a gg-trusted-bridges meta tag, so a forwarded
+ * or edited URL cannot redirect proof material to another service.
  */
 
 import { sapientProvider, universeProvider } from "/js/ghost/provider.js";
@@ -25,10 +29,10 @@ const step = (name, state) => {
 };
 
 const params = new URLSearchParams(window.location.search);
-const token = params.get("token") || "";
+const botSession = params.get("bot_session") || "";
 const gate = params.get("gate") || "";
 const configured = name => document.querySelector(`meta[name="${name}"]`)?.content || "";
-const { claimUrl, bridgeBase: trustedBridgeOrigin } = configuredJoinEndpoints({
+const { bridgeBase: trustedBridgeOrigin } = configuredJoinEndpoints({
   bridgeOrigin: configured("gg-trusted-bridges"),
   claimOrigin: configured("gg-trusted-claims"),
   pageOrigin: location.origin,
@@ -52,18 +56,8 @@ function showRejection(heading, explanation) {
   $("tg-error-heading").textContent = heading;
 }
 
-function showExpiredJoinLink() {
-  fail(
-    "This single-use verification link has expired. Return to the Ghost Gate bot and send /join again to create a new one.",
-    "The bot refused the final claim because this join token is past its server-side expiry.",
-  );
-  $("tg-error-heading").textContent = "Verification link expired";
-  const action = $("tg-error-action");
-  if (action) action.hidden = false;
-}
-
-async function post(path, body) {
-  const res = await fetch(path, {
+async function post(url, body) {
+  const res = await fetch(url, {
     method: "POST", redirect: "error", credentials: "omit",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -74,27 +68,21 @@ async function post(path, body) {
 }
 
 async function main() {
-  // Real bot admission is currently disabled until proof and Telegram identity are bound.
-  // Stop before connecting a wallet or creating an output that could incur a network fee.
-  const telegramAdmissionAvailable = false;
-  if (!telegramAdmissionAvailable) {
-    return fail("Telegram verification is temporarily unavailable. Existing group membership is unchanged.");
-  }
-  if (!trustedBridgeOrigin || !claimUrl) {
+  if (!trustedBridgeOrigin) {
     return fail(
-      "This verification page is not configured for the approved Ghost Gate services. Request a new /join link from the bot.",
-      "Configured bridge or claim endpoint is missing or invalid.",
+      "This verification page is not configured for the approved Ghost Gate bridge. " +
+      "Request a new /join link from the bot.",
+      "Configured bridge origin (gg-trusted-bridges) is missing or invalid.",
     );
   }
-  if (!token) return fail("This page needs a join link from the bot. Send /join there first.");
-  if (!gate) return fail("This join link does not name a gate. Send /join again.");
+  if (!botSession) {
+    return fail("This page needs a bot session link. Send /join to the bot first.");
+  }
+  if (!gate) {
+    return fail("This join link does not name a gate. Send /join again.");
+  }
 
-  // Which wallet? A browser wallet — this flow is the credential mode. The bridge's own walletd
-  // path is not reachable from a Telegram user's browser unless they also run the bridge; if no
-  // browser wallet answers, say exactly that.
-  // window.tari may not exist at parse time: the extension injects at document_start, the
-  // connector on script load. Wait briefly for it (or the tari#initialized event) before probing,
-  // so a slow-injecting wallet isn't mistaken for "no wallet installed".
+  // Wait briefly for the wallet extension to inject before probing.
   if (!window.tari) {
     await new Promise((resolve) => {
       let settled = false;
@@ -113,8 +101,7 @@ async function main() {
         provider = p;
         break;
       }
-      // The extension is present but this site is not authorized yet (4100): a real wallet is
-      // sitting right there, so "no wallet answered" would be a lie. Name the actual state.
+      // Extension present but not authorized for this site (error 4100).
       if (probe.available && !probe.capabilities) detectedButDisconnected = true;
     } catch { /* try the next */ }
   }
@@ -134,10 +121,8 @@ async function main() {
 
   $("tg-line").textContent = `${provider.label} found. Fetching the gate's terms…`;
 
-  // The bot's query parameter selects one exact published gate.  The policy itself
-  // comes from the same Worker catalog as Privacy Lab, not from the query string or
-  // a separately maintained Telegram list.  Browser proof requests stay same-origin
-  // through that Worker; the bridge deliberately does not grant arbitrary browser CORS.
+  // The bot's gate parameter selects one exact published gate. Policy (resource, threshold)
+  // comes from the same catalog the Privacy Lab uses — never from the query string.
   let meta;
   try {
     meta = await resolvePublishedGate(gate);
@@ -145,19 +130,14 @@ async function main() {
   } catch (e) {
     return fail("The requested gate is not available. Send /join again.", "Gate lookup did not return a published gate.");
   }
-  const gateId = meta.gateId;
-  const gatePath = `/gate/${encodeURIComponent(gateId)}`;
   const div = Number(meta.divisibility ?? 0);
   $("tg-line").textContent =
-    `Gate ${gateId}: needs at least ${meta.thresholdRaw} raw units` +
+    `Gate ${meta.gateId}: needs at least ${meta.thresholdRaw} raw units` +
     (formatAmount(meta.thresholdRaw, div) ? ` (${formatAmount(meta.thresholdRaw, div)})` : "") +
-    `. A fresh challenge is being issued…`;
+    `. Approve the proof output in your wallet…`;
 
   try {
-    step("challenge", "active");
-    const ch = await post(`${gatePath}/challenge`, {});
-    step("challenge", "done");
-
+    // Step 1: build the credential output. The substateId is needed to bind the challenge.
     step("output", "active");
     $("tg-line").textContent = "Approve the proof output in your wallet — it is public and permanent.";
     const built = await provider.approveAndBuildProof("credential", {
@@ -166,79 +146,55 @@ async function main() {
       minimumValuePromise: String(BigInt(meta.thresholdRaw)),
       maxFee: "50000",
     });
-
     step("output", "done");
+
+    // Step 2: request a signing challenge bound to the specific output the wallet chose.
+    step("challenge", "active");
+    $("tg-line").textContent = "Requesting a challenge from the bridge…";
+    const ch = await post(
+      `${trustedBridgeOrigin}/v1/bot/sessions/${encodeURIComponent(botSession)}/challenge`,
+      { substate_id: built.substateId },
+    );
+    step("challenge", "done");
+
+    // Step 3: sign the bridge's challenge string in the wallet.
     step("sign", "active");
-    $("tg-line").textContent = "Now sign the gate's challenge in your wallet.";
-    const ownership = await provider.signChallenge(built.substateId, ch.challenge_nonce);
+    $("tg-line").textContent = "Sign the gate's challenge in your wallet.";
+    // ch.challenge is the full domain-separated challenge string from the bridge. Pass it
+    // unchanged — the bridge re-derives the same string when verifying the signature.
+    const ownership = await provider.signChallenge(built.substateId, ch.challenge);
     step("sign", "done");
 
+    // Step 4: submit the proof to the bridge for chain verification.
     step("verify", "active");
-    $("tg-line").textContent = "The bridge is verifying against chain state…";
-    const verdict = await post(`${gatePath}/credential`, {
-      gate_id: gateId,
-      challenge_nonce: ch.challenge_nonce,
-      session_commitment: ch.session_commitment,
-      substate_id: built.substateId,
-      public_key: ownership.publicKey,
-      public_nonce: ownership.publicNonce,
-      signature: ownership.signature,
-    });
-    if (verdict.state !== "accepted") {
-      throw new Error(verdict.refused || "the bridge refused the proof");
+    $("tg-line").textContent = "The bridge is verifying ownership against chain state…";
+    const proofResult = await post(
+      `${trustedBridgeOrigin}/v1/bot/sessions/${encodeURIComponent(botSession)}/proof`,
+      {
+        gate_id: ch.gate_id,
+        challenge_nonce: ch.challenge_nonce,
+        // session_commitment is a required wire field but is not validated in the bot-session
+        // path: the session identity is carried by the session id, not by a per-challenge
+        // commitment. Any 64-char hex value satisfies the wire schema.
+        session_commitment: "00".repeat(32),
+        substate_id: built.substateId,
+        public_key: ownership.publicKey,
+        public_nonce: ownership.publicNonce,
+        signature: ownership.signature,
+      },
+    );
+    if (!proofResult.verified) {
+      throw new Error("the bridge did not verify this proof");
     }
     step("verify", "done");
 
-    step("claim", "active");
-    $("tg-line").textContent = "Claiming your seat with the bot…";
-    const claimRes = await fetch(claimUrl, {
-      method: "POST", redirect: "error", credentials: "omit",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token, proof_id: verdict.proof_id }),
-    });
-    const claim = await claimRes.json();
-    if (claim.state !== "granted") {
-      if (String(claim.error || "").toLowerCase().includes("join link expired")) {
-        return showExpiredJoinLink();
-      }
-      throw new Error(claim.error || "the bot refused the claim");
-    }
+    // The bot polls the bridge and calls redeem once it sees the Verified session.
+    // No separate claim step is needed on this page.
     step("claim", "done");
-    if (claim.admission === "test_only") {
-      $("tg-line").textContent =
-        "TEST AUTHORIZATION ONLY — the local fixture accepted this proof. No Telegram membership " +
-        "and no production access were granted.";
-      return;
-    }
-    const inviteLink = claim.invite_link;
-    if (inviteLink) {
-      $("tg-line").textContent = "Access authorized — your proof was verified on-chain.";
-      const banner = document.createElement("div");
-      banner.style.cssText =
-        "margin:1.5rem auto;padding:1.5rem;text-align:center;border:2px solid #0f0;" +
-        "border-radius:12px;background:rgba(0,255,0,0.08);max-width:400px;";
-      const heading = document.createElement("div");
-      heading.textContent = "You're in.";
-      heading.style.cssText = "font-size:1.4rem;font-weight:700;color:#0f0;margin-bottom:0.75rem;";
-      const a = document.createElement("a");
-      a.href = inviteLink;
-      a.target = "_blank";
-      a.rel = "noopener noreferrer";
-      a.textContent = "Join the group on Telegram";
-      a.style.cssText =
-        "display:inline-block;padding:0.75rem 2rem;background:#0f0;color:#000;font-weight:700;" +
-        "font-size:1.1rem;border-radius:8px;text-decoration:none;";
-      const hint = document.createElement("div");
-      hint.textContent = "This invite is single-use and bound to your Telegram account.";
-      hint.style.cssText = "margin-top:0.75rem;font-size:0.85rem;opacity:0.7;";
-      banner.appendChild(heading);
-      banner.appendChild(a);
-      banner.appendChild(hint);
-      $("tg-line").parentNode.insertBefore(banner, $("tg-line").nextSibling);
-    } else {
-      $("tg-line").textContent =
-        "Access authorized. Check Telegram — the bot approves only the Telegram account bound to this proof.";
-    }
+    $("tg-line").textContent =
+      "Your proof was verified — the bot will approve your Telegram join request shortly. " +
+      "Check Telegram for the bot's confirmation.";
+
   } catch (e) {
     const msg = e && e.message ? e.message : String(e);
     if (e && e.code === 4001) {
@@ -255,14 +211,17 @@ async function main() {
         `Reveal at least ${humanThreshold} in a qualifying output and try again with /join.`,
       );
     }
-    if (lc.includes("the bridge refused") || lc.includes("refused the proof")) {
+    if (lc.includes("the bridge did not verify") || lc.includes("refused the proof") || lc.includes("the bridge refused")) {
       return showRejection(
         "Proof rejected.",
         "The bridge could not verify your proof against the chain. " +
         "Make sure your wallet holds the required balance and try again with /join.",
       );
     }
-    fail("The wallet or verification service could not complete this request. Nothing was authorized.", "The verification flow stopped before a Telegram claim was granted.");
+    fail(
+      "The wallet or verification service could not complete this request. Nothing was authorized.",
+      msg,
+    );
   }
 }
 

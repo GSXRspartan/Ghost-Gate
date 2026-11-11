@@ -120,6 +120,10 @@ struct PendingBotSession {
     bridge_index: usize,
     telegram_user_id: i64,
     expires: Instant,
+    /// Human-readable network label captured at session creation. Stored so the audit
+    /// record on redeem reflects the network the session was opened on, even if the bridge
+    /// array is reconfigured before the session is consumed.
+    network_label: String,
 }
 
 /// Serialisable form of `PendingBotSession` for the restart-safety store.
@@ -129,6 +133,10 @@ struct StoredSession {
     bridge_index: usize,
     telegram_user_id: i64,
     expires_unix: u64,
+    /// Network label stored alongside the session so the audit record survives a restart with a
+    /// differently-ordered bridge array. `default` accepts old store files that lack this field.
+    #[serde(default)]
+    network_label: String,
 }
 
 /// A bridge admission that completed but whose Telegram `approve_join_request` has not yet
@@ -784,6 +792,7 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
                             bridge_index: s.bridge_index,
                             telegram_user_id: s.telegram_user_id,
                             expires: Instant::now() + Duration::from_secs(secs_left),
+                            network_label: s.network_label.clone(),
                         });
                     }
                 }
@@ -814,6 +823,7 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
                     bridge_index: s.bridge_index,
                     telegram_user_id: s.telegram_user_id,
                     expires_unix: now_secs.saturating_add(left.as_secs()),
+                    network_label: s.network_label.clone(),
                 }))
             })
             .collect();
@@ -899,6 +909,7 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
                             bridge_index: idx,
                             telegram_user_id: user,
                             expires,
+                            network_label: network_label.clone(),
                         });
                         self.write_sessions_store();
                         let url = self.admission_bridges[idx].verify_url(&session.session_id, base_url);
@@ -1159,15 +1170,17 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
         }
         let bridge_index = entry.bridge_index;
         let expected_user = entry.telegram_user_id;
+        // Use the label stored in the session (captured at creation), not the current bridge
+        // array position, so audit records are correct after a restart with a different bridge order.
+        let network_label = entry.network_label.clone();
 
-        // Extract what we need from the bridge before the await to avoid holding a borrow on
+        // Extract the bridge result before the await to avoid holding a borrow on
         // self.admission_bridges across the await point.
-        let (result, network_label) = {
+        let result = {
             let bridge = self.admission_bridges.get(bridge_index).ok_or_else(|| {
                 "internal: bridge index out of range".to_string()
             })?;
-            let r = bridge.redeem(session_id).await;
-            (r, bridge.network_label.clone())
+            bridge.redeem(session_id).await
         };
         let admission = result.map_err(|e| {
             audit("BOT_REDEEM_FAILED", json!({ "flow_id": flow_id, "network": network_label, "error_class": error_class(&e) }));

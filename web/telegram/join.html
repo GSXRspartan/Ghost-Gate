@@ -1,20 +1,24 @@
 <!DOCTYPE html>
 <!--
-  Telegram join page — the bridge between the bot's join token and a verified proof.
+  Telegram join page — M6+ bot-session Sapient credential flow.
 
-  The flow: the Telegram bot mints a single-use token; this page walks the CREDENTIAL flow
-  (the same one the audit verified) against the gate the bot named; on an accepted bridge
-  verdict the page claims the token at the bot's endpoint. The bot re-reads the receipt from
-  the bridge itself — this page's word is not what grants membership.
+  The bot creates a session on the bridge (HMAC-authenticated) and sends this page a
+  ?bot_session={id}&gate={id} URL. The page walks the CREDENTIAL flow:
+    1. Browser wallet builds the proof output (public, permanent on-chain);
+    2. Bridge issues a signing challenge bound to that specific output;
+    3. Wallet signs the challenge;
+    4. Bridge verifies ownership and balance against the Esmeralda indexer;
+    5. Bot polls the bridge, finds the Verified session, and calls approveChatJoinRequest.
+  The bot's word — not this page's — is what grants membership.
 -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<!-- Configure exact HTTPS origins before staging; blank values fail closed for cross-origin links. -->
+<!-- Configure the exact bridge HTTPS origin before staging; blank value fails closed. -->
 <!-- <meta name="gg-trusted-bridges" content="https://bridge.your-tunnel-domain.example"> -->
-<!-- <meta name="gg-trusted-claims" content="https://claim.your-tunnel-domain.example"> -->
+<!-- gg-trusted-claims is not used in the M6+ bot-session flow (bot auto-redeems). -->
 <title>Ghost Gate — Telegram verification</title>
 <!-- Same design system as the Privacy Lab, so the verification flow reads as one product. -->
 <link rel="stylesheet" href="/lab/lab.css">
@@ -51,11 +55,11 @@
     <h2 style="letter-spacing:.2em">Telegram verification</h2>
     <p class="hint" id="tg-line">Reading your join link…</p>
     <ol class="proof-steps" id="tg-steps">
-      <li data-step="challenge">The gate issues a fresh, single-use challenge</li>
       <li data-step="output">Your wallet creates the proof output — public and permanent (approval in your wallet)</li>
+      <li data-step="challenge">The bridge issues a signing challenge bound to your output</li>
       <li data-step="sign">Your wallet signs the gate's challenge</li>
-      <li data-step="verify">The bridge verifies against chain state</li>
-      <li data-step="claim">A private-group join request is authorized</li>
+      <li data-step="verify">The bridge verifies ownership and balance against chain state</li>
+      <li data-step="claim">The bot approves your Telegram join request</li>
     </ol>
     <section class="status-panel" id="tg-error" role="alert" hidden>
       <h3 id="tg-error-heading">Verification unavailable</h3>
@@ -70,11 +74,11 @@
       Ghost Gate verifies that your wallet meets the required minimum without asking for your seed phrase,
       private keys, or exact balance.
       <br><br>
-      For this test gate, Sapient may ask you to reveal enough testnet tTARI to satisfy the 100 tTARI
+      For this test gate, Sapient may ask you to reveal enough testnet tTARI to satisfy the 10 tTARI
       requirement and then sign the Ghost Gate challenge.
       <br><br>
-      After verification, the Telegram bot independently checks the result before approving the pending
-      join request.
+      After your proof is verified on-chain, the Telegram bot polls the bridge and independently
+      approves the pending join request — no further action is needed on this page.
       <br><br>
       Testnet only.
     </p>
