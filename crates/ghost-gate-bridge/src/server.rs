@@ -21,6 +21,7 @@
 //! it with the wallet's own lock so the wallet derives the stealth signers itself, and returns the
 //! transaction id -- not a signed transaction for the caller to broadcast.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -141,6 +142,18 @@ pub struct Bridge<
     pub hosted_verifier_token: Option<String>,
     pub hosted_verifier_request_key: Option<String>,
     pub hosted_verifier_response_key: Option<String>,
+    /// Durable Telegram authorization state, in its own database.
+    ///
+    /// Deliberately NOT the administrator registry: admitting a Telegram member must not
+    /// require the bridge to hold administrator sessions, CSRF material or credential records.
+    /// `None` means the admission path is unconfigured, and every bot route refuses.
+    pub bot_authorizations: Option<crate::authorization_coordinator::AuthorizationCoordinator>,
+    /// The HMAC key shared with the Telegram bot, distinct from every administrator and
+    /// hosted-verifier credential. No browser-facing route can reach it.
+    pub bot_key: Option<[u8; 32]>,
+    /// The server-sourced gate snapshot a bot session request is checked against. Policy comes
+    /// from here, never from the bot's request body.
+    pub bot_gate_policy: Option<crate::bot_session_interface::BotGatePolicy>,
 }
 
 impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChannel, XR: crate::xtm::XtmChainReader>
@@ -235,6 +248,9 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             hosted_verifier_token: None,
             hosted_verifier_request_key: None,
             hosted_verifier_response_key: None,
+            bot_authorizations: None,
+            bot_key: None,
+            bot_gate_policy: None,
         }
     }
 
@@ -270,6 +286,9 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             hosted_verifier_token: None,
             hosted_verifier_request_key: None,
             hosted_verifier_response_key: None,
+            bot_authorizations: None,
+            bot_key: None,
+            bot_gate_policy: None,
         }
     }
 }
@@ -385,6 +404,9 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R, crate::xt
             hosted_verifier_token: None,
             hosted_verifier_request_key: None,
             hosted_verifier_response_key: None,
+            bot_authorizations: None,
+            bot_key: None,
+            bot_gate_policy: None,
         }
     }
 }
@@ -424,6 +446,9 @@ impl<W: WalletChannel, X: crate::xtm::XtmChannel, XR: crate::xtm::XtmChainReader
             hosted_verifier_token: None,
             hosted_verifier_request_key: None,
             hosted_verifier_response_key: None,
+            bot_authorizations: None,
+            bot_key: None,
+            bot_gate_policy: None,
         }
     }
 }
@@ -462,6 +487,9 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             hosted_verifier_token: None,
             hosted_verifier_request_key: None,
             hosted_verifier_response_key: None,
+            bot_authorizations: None,
+            bot_key: None,
+            bot_gate_policy: None,
         }
     }
 }
@@ -472,8 +500,19 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
 impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChannel, XR: crate::xtm::XtmChainReader>
     Bridge<W, R, X, XR>
 {
-    /// Handles one request. Pure with respect to the process: it returns what to send.
+    /// Handles one request whose peer is unknown.
+    ///
+    /// The Telegram bot routes require a verified loopback peer, so they refuse under this
+    /// entry point. A caller that has the accepted socket's address — the real listener —
+    /// uses [`Bridge::handle_with_peer`] instead. Failing closed here means a future caller
+    /// that forgets to supply the peer cannot accidentally open the admission path.
     pub async fn handle(&mut self, request: &Request) -> Response {
+        self.handle_with_peer(request, None).await
+    }
+
+    /// Handles one request from a known peer. Pure with respect to the process: it returns
+    /// what to send.
+    pub async fn handle_with_peer(&mut self, request: &Request, peer: Option<SocketAddr>) -> Response {
         // Registry-backed bridges re-read the bindings snapshot when it changes, so a publish
         // from the admin plane is live on the next request — and a REVOCATION is live just as
         // fast. Fail-closed: a corrupt snapshot keeps the last-known-good gates and is logged.
@@ -566,6 +605,11 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                 Some(gate) => Response::json(200, &gate),
                 None => Response::error(404, "GG: no such gate"),
             },
+
+            Route::BotCreateSession => self.bot_create_session(request, peer),
+            Route::BotChallenge(id) => self.bot_challenge(id, request),
+            Route::BotProof(id) => self.bot_proof(id, request).await,
+            Route::BotRedeem => self.bot_redeem(request, peer),
 
             Route::LabGates => self.lab_gates(),
             Route::LabTrace => self.lab_trace(request),
@@ -1063,6 +1107,106 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
     /// `no-store` on every asset because a cached `app.js` from a previous run would be a stale client
     /// talking to a current bridge, and a cached challenge response would let a page replay one it never
     /// saw.
+    // ------------------------------------------------------------------ Telegram admission
+    //
+    // Four routes, two trust levels. Creation and redemption require the bot's HMAC key and a
+    // loopback peer; challenge and proof are reachable by the visitor's browser holding only
+    // the opaque session id. Only redemption returns a Telegram identity.
+    //
+    // The signature travels in `Authorization: GG-Bot-HMAC <hex>` rather than a bespoke header
+    // so no new request field is needed, and it covers the raw body, which carries the session
+    // id — a swapped id invalidates the signature.
+
+    /// The bot's HMAC over the body, if this request presents one in the agreed scheme.
+    fn bot_hmac(request: &Request) -> &str {
+        request.authorization.as_deref()
+            .and_then(|value| value.strip_prefix("GG-Bot-HMAC "))
+            .unwrap_or("")
+    }
+
+    /// Uniform refusal. The admission routes never say which check failed.
+    fn bot_refused() -> Response {
+        Response::error(403, "GG: admission request refused")
+    }
+
+    fn bot_unconfigured() -> Response {
+        Response::error(503, "GG: the Telegram admission path is not configured on this bridge")
+    }
+
+    fn bot_create_session(&mut self, request: &Request, peer: Option<SocketAddr>) -> Response {
+        // No peer means the caller could not prove it is local: refuse rather than assume.
+        let Some(peer) = peer else { return Self::bot_refused() };
+        let (Some(key), Some(policy)) = (self.bot_key, self.bot_gate_policy.as_ref()) else {
+            return Self::bot_unconfigured();
+        };
+        let Some(db) = self.bot_authorizations.as_mut() else { return Self::bot_unconfigured() };
+        match crate::bot_session_interface::create_session(
+            db, policy, &key, peer, request.origin.as_deref(),
+            Self::bot_hmac(request), request.body.as_bytes(),
+        ) {
+            Ok(created) => Response::json(201, &created),
+            Err(crate::bot_session_interface::BotSessionError::Unavailable) => Self::bot_unconfigured(),
+            Err(_) => Self::bot_refused(),
+        }
+    }
+
+    fn bot_challenge(&mut self, session_id: &str, request: &Request) -> Response {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Body { substate_id: String }
+        let Ok(body) = serde_json::from_str::<Body>(&request.body) else {
+            return Response::error(400, "GG: malformed challenge request");
+        };
+        let Some(db) = self.bot_authorizations.as_mut() else { return Self::bot_unconfigured() };
+        let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            Ok(value) => value.as_secs(),
+            Err(_) => return Self::bot_unconfigured(),
+        };
+        match crate::bot_admission::challenge_for(db, session_id, &body.substate_id, now) {
+            Ok(issued) => Response::json(200, &issued),
+            Err(crate::bot_admission::AdmissionError::Unavailable) => Self::bot_unconfigured(),
+            Err(_) => Self::bot_refused(),
+        }
+    }
+
+    async fn bot_proof(&mut self, session_id: &str, request: &Request) -> Response {
+        let Ok(proof) = serde_json::from_str::<crate::credential::CredentialProofRequest>(&request.body) else {
+            return Response::error(400, "GG: malformed proof request");
+        };
+        // A bridge with no chain reader cannot verify anything; say so rather than refusing as
+        // though the proof were bad.
+        let Some(chain) = self.chain.as_ref() else {
+            return Response::error(503, "GG: this bridge has no chain reader, so credential proofs cannot be verified");
+        };
+        let Some(db) = self.bot_authorizations.as_mut() else { return Self::bot_unconfigured() };
+        let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            Ok(value) => value.as_secs(),
+            Err(_) => return Self::bot_unconfigured(),
+        };
+        match crate::bot_admission::verify_proof(db, chain, session_id, &proof, now).await {
+            Ok(accepted) => Response::json(200, &accepted),
+            // The visitor is told why their own proof did not stand up; the message names only
+            // public quantities, per `CredentialRefusal`.
+            Err(crate::bot_admission::AdmissionError::ProofRejected(reason)) => Response::error(403, &reason),
+            Err(crate::bot_admission::AdmissionError::Unavailable) => Self::bot_unconfigured(),
+            Err(_) => Self::bot_refused(),
+        }
+    }
+
+    fn bot_redeem(&mut self, request: &Request, peer: Option<SocketAddr>) -> Response {
+        let Some(peer) = peer else { return Self::bot_refused() };
+        let Some(key) = self.bot_key else { return Self::bot_unconfigured() };
+        let Some(db) = self.bot_authorizations.as_mut() else { return Self::bot_unconfigured() };
+        match crate::bot_admission::redeem(
+            db, &key, peer, request.origin.as_deref(),
+            Self::bot_hmac(request), request.body.as_bytes(),
+        ) {
+            Ok(admission) => Response::json(200, &admission),
+            Err(crate::bot_admission::AdmissionError::Unavailable) => Self::bot_unconfigured(),
+            Err(_) => Self::bot_refused(),
+        }
+    }
+
     fn serve_asset(&self, name: &str) -> Response {
         // Belt and braces: `Route::resolve` already restricts this to three names, and the check below
         // means a future route cannot widen it by accident.
@@ -2123,7 +2267,9 @@ where
     let listener = TcpListener::bind(addr).await?;
     let bridge = Arc::new(tokio::sync::Mutex::new(bridge));
     loop {
-        let (mut socket, _peer) = match listener.accept().await {
+        // The peer address is kept, not discarded: the Telegram admission routes require a
+        // verified loopback peer, and a header can be set by anyone.
+        let (mut socket, peer) = match listener.accept().await {
             Ok(pair) => pair,
             Err(_) => continue,
         };
@@ -2143,7 +2289,7 @@ where
         let response = match parse_request(&raw) {
             Some(request) => {
                 let mut bridge = bridge.lock().await;
-                (*bridge).handle(&request).await
+                (*bridge).handle_with_peer(&request, Some(peer)).await
             }
             None => Response::error(400, "GG: malformed request"),
         };
@@ -2479,6 +2625,287 @@ mod tests {
             attempt: None,
             authorization: None,
             verifier_request_signature: None,
+        }
+    }
+
+    // ----------------------------------------------------- Telegram admission over HTTP
+    //
+    // The module tests in `bot_admission` prove the state machine. These prove the wiring:
+    // that the mounted routes reach it, that the peer check is enforced by the server rather
+    // than assumed, and that a caller with no verified peer cannot open the path at all.
+
+    const TEST_BOT_KEY: [u8; 32] = [3; 32];
+    const TEST_CHAT: i64 = -1009876;
+    const TEST_USER: i64 = 7781;
+
+    struct BotDb(std::path::PathBuf);
+    impl BotDb {
+        fn new() -> Self {
+            let mut n = [0u8; 16];
+            rand::fill(&mut n);
+            let p = std::env::temp_dir().join(format!("gg-http-admission-{}", hex::encode(n)));
+            std::fs::create_dir(&p).unwrap();
+            Self(p)
+        }
+        fn file(&self) -> std::path::PathBuf { self.0.join("authorization.sqlite") }
+    }
+    impl Drop for BotDb {
+        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    }
+
+    fn loopback() -> SocketAddr { "127.0.0.1:55001".parse().unwrap() }
+
+    /// A bot request: no Origin, and the HMAC in the agreed Authorization scheme.
+    fn bot_post(path: &str, body: &str, signature: &str) -> Request {
+        Request {
+            method: "POST",
+            path: path.into(),
+            origin: None,
+            host: Some("127.0.0.1:7799".into()),
+            query: Default::default(),
+            body: body.to_string(),
+            attempt: None,
+            authorization: Some(format!("GG-Bot-HMAC {signature}")),
+            verifier_request_signature: None,
+        }
+    }
+
+    /// A visitor request: same-origin from the bridge's own page, no bot credential.
+    fn visitor_post(path: &str, body: serde_json::Value) -> Request {
+        Request {
+            method: "POST",
+            path: path.into(),
+            origin: Some("https://vip.example".into()),
+            host: Some("127.0.0.1:7799".into()),
+            query: Default::default(),
+            body: body.to_string(),
+            attempt: None,
+            authorization: None,
+            verifier_request_signature: None,
+        }
+    }
+
+    fn sign_create(body: &[u8]) -> String {
+        use hmac::Mac;
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&TEST_BOT_KEY).unwrap();
+        mac.update(b"ghost-gate/bot-session/v1\0POST\0/v1/bot/sessions\0");
+        mac.update(body);
+        hex::encode(mac.finalize().into_bytes())
+    }
+
+    fn now_secs() -> u64 {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+    }
+
+    /// A bridge wired for admission, plus the output the chain will vouch for.
+    fn admission_bridge(
+        db: &BotDb,
+        promise: u64,
+    ) -> (Bridge<FakeWallet, FakeChain>, RistrettoSecretKey, String, tari_template_lib_types::ResourceAddress) {
+        let secret = RistrettoSecretKey::random(&mut rng());
+        let public = RistrettoPublicKey::from_secret_key(&secret);
+        let mut key_bytes = [0u8; 32];
+        key_bytes.copy_from_slice(public.as_bytes());
+        let res = tari_template_lib_types::ResourceAddress::new(
+            tari_template_lib_types::ObjectKey::from_array([7u8; 32]),
+        );
+        let substate = format!(
+            "utxo_{}_2c713522a4aaf79f2b219d869b5033d3d71d63c0537e5e0bbed2d717d8b2a67e",
+            hex::encode([7u8; 32])
+        );
+        let mut bridge = credential_bridge(
+            FakeWallet::new(),
+            FakeChain::with(substate.clone(), promise, key_bytes),
+        );
+        let mut coordinator =
+            crate::authorization_coordinator::AuthorizationCoordinator::create_new(&db.file()).unwrap();
+        coordinator.initialize_bot_event_store().unwrap();
+        bridge.bot_authorizations = Some(coordinator);
+        bridge.bot_key = Some(TEST_BOT_KEY);
+        bridge.bot_gate_policy = Some(crate::bot_session_interface::BotGatePolicy {
+            gate_id: "g1".into(),
+            policy_hash: "ab".repeat(32),
+            network: ghost_gate_core::network::LOCALNET,
+            resource: res.to_string(),
+            threshold: 10_000,
+            telegram_chat_id: TEST_CHAT,
+        });
+        (bridge, secret, substate, res)
+    }
+
+    fn create_body(update_id: i64) -> String {
+        serde_json::json!({
+            "update_id": update_id, "telegram_user_id": TEST_USER, "telegram_chat_id": TEST_CHAT,
+            "gate_id": "g1", "policy_hash": "ab".repeat(32), "sent_unix": now_secs(),
+        }).to_string()
+    }
+
+    #[tokio::test]
+    async fn the_mounted_admission_routes_admit_one_qualifying_visitor() {
+        let db = BotDb::new();
+        let (mut b, secret, substate, res) = admission_bridge(&db, 50_000);
+
+        // 1. The bot opens a session over loopback with its key.
+        let body = create_body(101);
+        let created = b.handle_with_peer(
+            &bot_post("/v1/bot/sessions", &body, &sign_create(body.as_bytes())),
+            Some(loopback()),
+        ).await;
+        assert_eq!(created.status, 201, "{}", created.body);
+        let created: serde_json::Value = serde_json::from_str(&created.body).unwrap();
+        let session = created["session_id"].as_str().unwrap().to_string();
+        assert!(created.get("telegram_user_id").is_none(), "creation must not echo identity");
+
+        // 2. The visitor's browser asks what to sign. No bot credential, and no identity back.
+        let challenge = b.handle_with_peer(
+            &visitor_post(&format!("/v1/bot/sessions/{session}/challenge"),
+                serde_json::json!({ "substate_id": substate })),
+            Some(loopback()),
+        ).await;
+        assert_eq!(challenge.status, 200, "{}", challenge.body);
+        let challenge: serde_json::Value = serde_json::from_str(&challenge.body).unwrap();
+        assert!(challenge.get("telegram_user_id").is_none());
+        assert!(challenge.get("telegram_chat_id").is_none());
+        let to_sign = challenge["challenge"].as_str().unwrap();
+        let nonce = challenge["challenge_nonce"].as_str().unwrap();
+        let network = challenge["network"].as_u64().unwrap() as u8;
+
+        // 3. The wallet signs it for real.
+        let message = crate::credential::ownership_proof_message(network, &res, &substate, to_sign);
+        let signature = SchnorrSignature::<RistrettoPublicKey, RistrettoSecretKey, SchnorrSigChallenge>
+            ::sign(&secret, &message, &mut rng()).unwrap();
+        let public = RistrettoPublicKey::from_secret_key(&secret);
+        let proof = serde_json::json!({
+            "gate_id": "g1", "challenge_nonce": nonce,
+            "session_commitment": "11".repeat(32), "substate_id": substate,
+            "public_key": hex::encode(public.as_bytes()),
+            "public_nonce": hex::encode(signature.get_public_nonce().as_bytes()),
+            "signature": hex::encode(signature.get_signature().as_bytes()),
+        });
+        let verified = b.handle_with_peer(
+            &visitor_post(&format!("/v1/bot/sessions/{session}/proof"), proof),
+            Some(loopback()),
+        ).await;
+        assert_eq!(verified.status, 200, "{}", verified.body);
+        let verified: serde_json::Value = serde_json::from_str(&verified.body).unwrap();
+        assert_eq!(verified["verified"], true);
+        assert_eq!(verified["attested_minimum"], 50_000);
+        assert!(verified.get("telegram_user_id").is_none(), "the visitor must not learn the identity");
+
+        // 4. Only the bot can redeem, and it learns exactly one identity to admit.
+        let redeem = serde_json::json!({ "session_id": session, "sent_unix": now_secs() }).to_string();
+        let signature = crate::bot_admission::sign_redeem_body(&TEST_BOT_KEY, redeem.as_bytes());
+        let admitted = b.handle_with_peer(
+            &bot_post("/v1/bot/sessions/redeem", &redeem, &signature),
+            Some(loopback()),
+        ).await;
+        assert_eq!(admitted.status, 200, "{}", admitted.body);
+        let admitted: serde_json::Value = serde_json::from_str(&admitted.body).unwrap();
+        assert_eq!(admitted["telegram_user_id"], TEST_USER);
+        assert_eq!(admitted["telegram_chat_id"], TEST_CHAT);
+
+        // 5. The authorization is spent; a replay of the identical request admits nobody.
+        let replay = b.handle_with_peer(
+            &bot_post("/v1/bot/sessions/redeem", &redeem, &signature),
+            Some(loopback()),
+        ).await;
+        assert_eq!(replay.status, 403, "a redeemed authorization must not admit twice");
+    }
+
+    #[tokio::test]
+    async fn an_unqualified_visitor_is_refused_over_http_and_admits_nobody() {
+        let db = BotDb::new();
+        // The chain vouches for an output one unit under the gate's 10_000.
+        let (mut b, secret, substate, res) = admission_bridge(&db, 9_999);
+        let body = create_body(102);
+        let created = b.handle_with_peer(
+            &bot_post("/v1/bot/sessions", &body, &sign_create(body.as_bytes())),
+            Some(loopback()),
+        ).await;
+        let created: serde_json::Value = serde_json::from_str(&created.body).unwrap();
+        let session = created["session_id"].as_str().unwrap().to_string();
+
+        let challenge = b.handle_with_peer(
+            &visitor_post(&format!("/v1/bot/sessions/{session}/challenge"),
+                serde_json::json!({ "substate_id": substate })),
+            Some(loopback()),
+        ).await;
+        let challenge: serde_json::Value = serde_json::from_str(&challenge.body).unwrap();
+        let to_sign = challenge["challenge"].as_str().unwrap();
+        let nonce = challenge["challenge_nonce"].as_str().unwrap();
+        let network = challenge["network"].as_u64().unwrap() as u8;
+
+        let message = crate::credential::ownership_proof_message(network, &res, &substate, to_sign);
+        let signature = SchnorrSignature::<RistrettoPublicKey, RistrettoSecretKey, SchnorrSigChallenge>
+            ::sign(&secret, &message, &mut rng()).unwrap();
+        let public = RistrettoPublicKey::from_secret_key(&secret);
+        let refused = b.handle_with_peer(
+            &visitor_post(&format!("/v1/bot/sessions/{session}/proof"), serde_json::json!({
+                "gate_id": "g1", "challenge_nonce": nonce,
+                "session_commitment": "11".repeat(32), "substate_id": substate,
+                "public_key": hex::encode(public.as_bytes()),
+                "public_nonce": hex::encode(signature.get_public_nonce().as_bytes()),
+                "signature": hex::encode(signature.get_signature().as_bytes()),
+            })),
+            Some(loopback()),
+        ).await;
+        assert_eq!(refused.status, 403, "{}", refused.body);
+        assert!(refused.body.contains("below"), "the refusal names the public floor: {}", refused.body);
+
+        // Nothing was verified, so redemption finds nothing to spend.
+        let redeem = serde_json::json!({ "session_id": session, "sent_unix": now_secs() }).to_string();
+        let signature = crate::bot_admission::sign_redeem_body(&TEST_BOT_KEY, redeem.as_bytes());
+        let admitted = b.handle_with_peer(
+            &bot_post("/v1/bot/sessions/redeem", &redeem, &signature),
+            Some(loopback()),
+        ).await;
+        assert_eq!(admitted.status, 403, "an unqualified visitor must never be admitted");
+    }
+
+    #[tokio::test]
+    async fn the_bot_routes_refuse_an_unverified_or_remote_peer() {
+        let db = BotDb::new();
+        let (mut b, _secret, _substate, _res) = admission_bridge(&db, 50_000);
+        let body = create_body(103);
+        let signature = sign_create(body.as_bytes());
+
+        // `handle` has no peer to vouch for, so it must not open the path.
+        let no_peer = b.handle(&bot_post("/v1/bot/sessions", &body, &signature)).await;
+        assert_eq!(no_peer.status, 403, "a request with no verified peer must be refused");
+
+        // A remote peer with a perfectly valid signature is still refused.
+        let remote = b.handle_with_peer(
+            &bot_post("/v1/bot/sessions", &body, &signature),
+            Some("203.0.113.5:44321".parse().unwrap()),
+        ).await;
+        assert_eq!(remote.status, 403, "a non-loopback peer must be refused");
+
+        // A browser that guesses the route cannot create a session: it has no HMAC.
+        let browser = b.handle_with_peer(
+            &visitor_post("/v1/bot/sessions", serde_json::json!({})),
+            Some(loopback()),
+        ).await;
+        assert_eq!(browser.status, 403);
+
+        // And the real bot still works, proving the refusals above were about the peer and
+        // credential rather than a misconfigured fixture.
+        let ok = b.handle_with_peer(
+            &bot_post("/v1/bot/sessions", &body, &signature),
+            Some(loopback()),
+        ).await;
+        assert_eq!(ok.status, 201, "{}", ok.body);
+    }
+
+    #[tokio::test]
+    async fn a_bridge_without_admission_configured_refuses_every_bot_route() {
+        let mut b = credential_bridge(FakeWallet::new(), FakeChain::with("x".into(), 1, [0; 32]));
+        let body = create_body(104);
+        for request in [
+            bot_post("/v1/bot/sessions", &body, &sign_create(body.as_bytes())),
+            bot_post("/v1/bot/sessions/redeem", "{}", "00".repeat(32).as_str()),
+        ] {
+            let r = b.handle_with_peer(&request, Some(loopback())).await;
+            assert_eq!(r.status, 503, "an unconfigured bridge must say so, not refuse ambiguously");
         }
     }
 

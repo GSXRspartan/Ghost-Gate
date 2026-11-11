@@ -132,6 +132,15 @@ pub enum Route<'a> {
     Asset(&'a str),
     /// `POST /v1/hosted/verify` — the hosted-verifier adapter that wraps the credential path.
     HostedVerify,
+    /// `POST /v1/bot/sessions` — the Telegram bot opens an authorized session. Loopback + HMAC.
+    BotCreateSession,
+    /// `POST /v1/bot/sessions/:id/challenge` — the visitor's wallet asks what to sign.
+    BotChallenge(&'a str),
+    /// `POST /v1/bot/sessions/:id/proof` — the visitor submits a Telegram-bound proof.
+    BotProof(&'a str),
+    /// `POST /v1/bot/sessions/:id/redeem` — the bot consumes a verified authorization and
+    /// learns the one identity to admit. Loopback + HMAC; the only route returning identity.
+    BotRedeem,
     /// No such route.
     NotFound,
 }
@@ -187,6 +196,13 @@ impl<'a> Route<'a> {
             ("GET", ["telegram", "join"]) => Route::Asset("telegram/join.html"),
             ("GET", ["telegram", "claim.js"]) => Route::Asset("telegram/claim.js"),
             ("POST", ["v1", "hosted", "verify"]) => Route::HostedVerify,
+            // The Telegram admission path. The two bot-only routes carry no id in the path:
+            // the session id travels inside the HMAC-signed body, so it cannot be swapped by
+            // anything that did not also produce a valid signature over it.
+            ("POST", ["v1", "bot", "sessions"]) => Route::BotCreateSession,
+            ("POST", ["v1", "bot", "sessions", "redeem"]) => Route::BotRedeem,
+            ("POST", ["v1", "bot", "sessions", id, "challenge"]) => Route::BotChallenge(id),
+            ("POST", ["v1", "bot", "sessions", id, "proof"]) => Route::BotProof(id),
             _ => Route::NotFound,
         }
     }
