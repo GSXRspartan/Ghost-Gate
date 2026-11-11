@@ -76,6 +76,15 @@ const DEFAULT_CLAIM_PORT: u16 = 7808;
 const DEFAULT_GATE: &str = "Crypt";
 const JOIN_TTL: Duration = Duration::from_secs(600);
 const ACCESS_TTL: Duration = Duration::from_secs(3600);
+/// Maximum bot-admission sessions held before expiry (per bridge). Prevents unbounded growth on
+/// join-request storms exactly as MAX_PENDING_TOKENS bounds the legacy token set.
+const MAX_PENDING_BOT_SESSIONS: usize = 512;
+
+// ── HMAC domain constants ─────────────────────────────────────────────────────────────────────
+// These MUST match the bridge's bot_session_interface.rs and bot_admission.rs byte-for-byte.
+// A mismatch produces an authentication failure at the bridge, not a silent wrong answer.
+const BOT_SESSION_DOMAIN: &[u8] = b"ghost-gate/bot-session/v1\0POST\0/v1/bot/sessions\0";
+const BOT_REDEEM_DOMAIN: &[u8]  = b"ghost-gate/bot-redeem/v1\0POST\0/v1/bot/sessions/redeem\0";
 const WELCOME_MESSAGE: &str = "👻 Welcome to Ghost Gate.\n\nI verify token-gated access for supported Telegram groups without asking for your seed phrase, private keys, or exact wallet balance.\n\nTo verify your access:\n\n1. Request to join the protected Telegram group.\n2. Send me /join.\n3. Open the single-use Ghost Gate verification link I send you.\n4. Connect your wallet and complete the required token proof.\n\nIf your verification succeeds, I'll automatically approve your pending group join request.\n\nTestnet only.";
 const RECHECK_INTERVAL: Duration = Duration::from_secs(60);
 /// Whether the fixture bridge/telegram pair is in use; set once at startup.
@@ -83,6 +92,163 @@ static FIXTURE_POLL_PAUSE: std::sync::atomic::AtomicBool = std::sync::atomic::At
 
 /// The Telegram account fixture grants bind to.
 const FIXTURE_TG_USER: i64 = 42;
+
+// ── Bot-to-bridge admission client ───────────────────────────────────────────────────────────
+
+/// Wire response from `POST /v1/bot/sessions`.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct BotSessionCreated {
+    pub session_id: String,
+    pub expires_unix: u64,
+}
+
+/// Wire response from `POST /v1/bot/sessions/redeem`.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct BotAdmission {
+    pub telegram_user_id: i64,
+    pub telegram_chat_id: i64,
+    pub gate_id: String,
+    pub wallet_output: String,
+}
+
+/// One pending admission session, tracking which user and bridge it belongs to.
+#[derive(Debug, Clone)]
+struct PendingBotSession {
+    /// The bridge that issued this session (index into `Bot::admission_bridges`).
+    bridge_index: usize,
+    telegram_user_id: i64,
+    expires: Instant,
+}
+
+/// HMAC-authenticated loopback client for the bridge's bot-only admission routes.
+///
+/// Each instance is bound to ONE bridge endpoint, ONE bot key, and ONE network. For dual-network
+/// operation (testnet + mainnet, same bot + group), hold two instances in `Bot::admission_bridges`.
+pub struct BotAdmissionBridge {
+    /// The bridge's base URL (always a loopback address in production).
+    pub endpoint: String,
+    /// 32-byte HMAC key — distinct from all other credential keys.
+    bot_key: [u8; 32],
+    /// The page path the user opens to verify their wallet (e.g. `/lab` or `/mainnet`).
+    page: String,
+    /// The gate this bridge's admission is for.
+    pub gate_id: String,
+    /// 64 hex-char policy hash, bound into every challenge by the bridge.
+    pub policy_hash: String,
+    /// Human-readable label for audit messages and user-facing links.
+    pub network_label: String,
+    http: reqwest::Client,
+}
+
+impl BotAdmissionBridge {
+    pub fn new(
+        endpoint: String,
+        bot_key: [u8; 32],
+        gate_id: String,
+        policy_hash: String,
+        network_label: String,
+        page: String,
+    ) -> Self {
+        Self {
+            endpoint: endpoint.trim_end_matches('/').to_string(),
+            bot_key,
+            page,
+            gate_id,
+            policy_hash,
+            network_label,
+            http: reqwest::Client::builder()
+                .timeout(CLAIM_HTTP_TIMEOUT)
+                .build()
+                .expect("fixed admission HTTP client"),
+        }
+    }
+
+    fn sign_body(key: &[u8; 32], domain: &[u8], body: &[u8]) -> String {
+        use hmac::Mac;
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(key)
+            .expect("HMAC accepts any key length");
+        mac.update(domain);
+        mac.update(body);
+        hex::encode(mac.finalize().into_bytes())
+    }
+
+    /// Create a session bound to one Telegram update. The bridge deduplicates on `update_id` so
+    /// a resent Telegram update cannot mint a second session for the same user.
+    pub async fn create_session(
+        &self,
+        update_id: u64,
+        user_id: i64,
+        chat_id: i64,
+    ) -> Result<BotSessionCreated, String> {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "update_id": update_id as i64,
+            "telegram_user_id": user_id,
+            "telegram_chat_id": chat_id,
+            "gate_id": self.gate_id,
+            "policy_hash": self.policy_hash,
+            "sent_unix": now_unix(),
+        }))
+        .map_err(|e| e.to_string())?;
+        let sig = Self::sign_body(&self.bot_key, BOT_SESSION_DOMAIN, &body);
+        let resp = self
+            .http
+            .post(format!("{}/v1/bot/sessions", self.endpoint))
+            .header("Authorization", format!("GG-Bot-HMAC {sig}"))
+            .header("Content-Type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| format!("bot create_session: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "bot create_session refused: {}",
+                resp.status().as_u16()
+            ));
+        }
+        resp.json::<BotSessionCreated>().await.map_err(|e| e.to_string())
+    }
+
+    /// Atomically consume a Verified session and return the admission record.
+    ///
+    /// The bridge enforces single-use: a second call with the same session_id returns 403.
+    pub async fn redeem(&self, session_id: &str) -> Result<BotAdmission, String> {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "session_id": session_id,
+            "sent_unix": now_unix(),
+        }))
+        .map_err(|e| e.to_string())?;
+        let sig = Self::sign_body(&self.bot_key, BOT_REDEEM_DOMAIN, &body);
+        let resp = self
+            .http
+            .post(format!("{}/v1/bot/sessions/redeem", self.endpoint))
+            .header("Authorization", format!("GG-Bot-HMAC {sig}"))
+            .header("Content-Type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| format!("bot redeem: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "bot redeem refused: {}",
+                resp.status().as_u16()
+            ));
+        }
+        resp.json::<BotAdmission>().await.map_err(|e| e.to_string())
+    }
+
+    /// Build the verification page URL to send to the user.
+    ///
+    /// The page must call the bridge's challenge + proof endpoints with this session_id. The bot
+    /// never sends the full session_id in a human-visible message — it embeds it in the URL only.
+    pub fn verify_url(&self, session_id: &str, join_base: &str) -> String {
+        let page = &self.page;
+        format!(
+            "{}{page}?bot_session={session_id}&gate={}",
+            join_base.trim_end_matches('/'),
+            urlencode(&self.gate_id)
+        )
+    }
+}
 
 /// The most pending join tokens held at once (audit F-03's class, applied to the bot).
 const MAX_PENDING_TOKENS: usize = 512;
@@ -498,6 +664,14 @@ pub struct Bot<T: TelegramApi, B: BridgeClient> {
     /// IDs already acted on, so a replayed update (Telegram resends on offset races) cannot mint a
     /// second grant.
     seen_updates: std::collections::BTreeSet<u64>,
+
+    // ── M6 bot-admission fields ────────────────────────────────────────────────────────────────
+    /// Bot-to-bridge admission clients, one per network. Usually one (Esmeralda) or two
+    /// (Esmeralda + mainnet). Empty in fixture/legacy mode: use `fixture_authorization` instead.
+    pub admission_bridges: Vec<BotAdmissionBridge>,
+    /// Sessions created by `admission_bridges`, awaiting proof verification by the browser.
+    /// Maps session_id → pending record. Expired entries are pruned on each `tick()`.
+    bot_sessions: HashMap<String, PendingBotSession>,
 }
 
 impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
@@ -513,6 +687,8 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
             tokens: HashMap::new(),
             grants: HashMap::new(),
             seen_updates: std::collections::BTreeSet::new(),
+            admission_bridges: Vec::new(),
+            bot_sessions: HashMap::new(),
         }
     }
 
@@ -522,8 +698,12 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
         bot
     }
 
-    /// `/join`: mints a single-use token bound to this Telegram account.
-    pub async fn join(&mut self, user: i64, base_url: &str, _claim_base: &str, _bridge_public_url: Option<&str>) -> Result<String, String> {
+    /// `/join`: mints a single-use token (or bot-admission session) bound to this Telegram account.
+    ///
+    /// `update_id` is the Telegram update that triggered this call, used for idempotency at the
+    /// bridge. The bridge's deduplication table rejects the same `update_id` twice, so a resent
+    /// Telegram update cannot create two sessions for the same user.
+    pub async fn join(&mut self, user: i64, update_id: u64, base_url: &str, _claim_base: &str, _bridge_public_url: Option<&str>) -> Result<String, String> {
         // A user rejoining while a grant is live gets told, rather than silently minting a second
         // proof obligation. A server-backed grant is ASKED, not trusted from memory: if the session
         // was revoked or expired while the bot was looking away, the user simply rejoins.
@@ -547,6 +727,73 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
                 self.grants.remove(&user);
             }
         }
+        // ── M6 admission-bridge path ──────────────────────────────────────────────────────────
+        // When admission bridges are configured, create sessions on each bridge (testnet + mainnet)
+        // and return link(s) for the user to verify their wallet. Each session is bound to the
+        // exact (user, chat, gate, policy_hash, network) tuple at the bridge — no browser-supplied
+        // identity can substitute for it.
+        if !self.admission_bridges.is_empty() {
+            self.bot_sessions.retain(|_, s| s.expires > Instant::now());
+            if self.bot_sessions.len() >= MAX_PENDING_BOT_SESSIONS {
+                // Evict the entry that expires soonest.
+                let oldest_key = self.bot_sessions
+                    .iter()
+                    .min_by_key(|(_, s)| s.expires)
+                    .map(|(k, _)| k.clone());
+                if let Some(k) = oldest_key { self.bot_sessions.remove(&k); }
+            }
+            let mut links: Vec<String> = Vec::new();
+            // Collect what each bridge needs before the await so we don't hold a borrow on
+            // self.admission_bridges across the await point while also needing &mut self.bot_sessions.
+            let bridge_count = self.admission_bridges.len();
+            for idx in 0..bridge_count {
+                let (result, gate_id, network_label) = {
+                    let bridge = &self.admission_bridges[idx];
+                    let r = bridge.create_session(update_id, user, self.chat).await;
+                    (r, bridge.gate_id.clone(), bridge.network_label.clone())
+                };
+                match result {
+                    Ok(session) => {
+                        let ttl = session.expires_unix.saturating_sub(now_unix()).min(600).max(60);
+                        let expires = Instant::now() + Duration::from_secs(ttl);
+                        audit("BOT_SESSION_CREATED", json!({
+                            "flow_id": audit_id(&session.session_id),
+                            "telegram_user_id": user,
+                            "chat_id": self.chat,
+                            "gate_id": gate_id,
+                            "network": network_label,
+                            "expires_unix": session.expires_unix,
+                        }));
+                        self.bot_sessions.insert(session.session_id.clone(), PendingBotSession {
+                            bridge_index: idx,
+                            telegram_user_id: user,
+                            expires,
+                        });
+                        let url = self.admission_bridges[idx].verify_url(&session.session_id, base_url);
+                        links.push(format!("{} verification:\n{}", network_label, url));
+                    }
+                    Err(e) => {
+                        audit("BOT_SESSION_CREATE_FAILED", json!({
+                            "telegram_user_id": user,
+                            "chat_id": self.chat,
+                            "network": network_label,
+                            "error_class": error_class(&e),
+                        }));
+                        eprintln!("ghost-gate-telegram: could not create admission session on {network_label}: {e}");
+                    }
+                }
+            }
+            return if links.is_empty() {
+                Err("verification service unavailable — please try again shortly".into())
+            } else {
+                Ok(format!(
+                    "To verify wallet access, open one of the following links in the browser where your wallet lives:\n\n{}\n\nEach link is for you alone, works once, and expires shortly. I will never ask for your seed phrase, keys, or exact balance.",
+                    links.join("\n\n")
+                ))
+            };
+        }
+
+        // ── Legacy fixture / token-based path ─────────────────────────────────────────────────
         let mut bytes = [0u8; 32];
         rand::fill(&mut bytes);
         let token = hex::encode(bytes);
@@ -760,6 +1007,80 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
         Ok(link)
     }
 
+    /// Redeem a bot admission session created via the M5 session-based flow.
+    ///
+    /// The browser POSTs `{bot_session_id}` after the wallet proof completes. The bot looks up
+    /// which bridge owns that session, calls `redeem`, and approves the join request via Telegram.
+    /// No Telegram identity ever comes from the browser — it comes from the bridge's response.
+    pub async fn claim_bot_admission(&mut self, session_id: &str) -> Result<String, String> {
+        let flow_id = audit_id(session_id);
+        audit("BOT_CLAIM_RECEIVED", json!({ "flow_id": flow_id, "session_id_len": session_id.len() }));
+
+        let entry = self.bot_sessions.get(session_id).ok_or_else(|| {
+            audit("BOT_CLAIM_REJECTED", json!({ "flow_id": flow_id, "reason": "unknown_session" }));
+            "unknown or already-consumed session"
+        })?;
+        if entry.expires < Instant::now() {
+            self.bot_sessions.remove(session_id);
+            audit("BOT_CLAIM_REJECTED", json!({ "flow_id": flow_id, "reason": "expired" }));
+            return Err("session expired; use /join to start again".into());
+        }
+        let bridge_index = entry.bridge_index;
+        let expected_user = entry.telegram_user_id;
+
+        // Extract what we need from the bridge before the await to avoid holding a borrow on
+        // self.admission_bridges across the await point.
+        let (result, network_label) = {
+            let bridge = self.admission_bridges.get(bridge_index).ok_or_else(|| {
+                "internal: bridge index out of range".to_string()
+            })?;
+            let r = bridge.redeem(session_id).await;
+            (r, bridge.network_label.clone())
+        };
+        let admission = result.map_err(|e| {
+            audit("BOT_REDEEM_FAILED", json!({ "flow_id": flow_id, "network": network_label, "error_class": error_class(&e) }));
+            format!("bridge could not complete admission: {e}")
+        })?;
+
+        // The bridge binds user and chat at session creation; verify nothing changed.
+        if admission.telegram_user_id != expected_user {
+            audit("BOT_CLAIM_REJECTED", json!({ "flow_id": flow_id, "reason": "user_mismatch" }));
+            return Err("session identity mismatch".into());
+        }
+        if admission.telegram_chat_id != self.chat {
+            audit("BOT_CLAIM_REJECTED", json!({ "flow_id": flow_id, "reason": "chat_mismatch",
+                "expected_chat": self.chat, "got_chat": admission.telegram_chat_id }));
+            return Err("session belongs to a different chat".into());
+        }
+
+        audit("BOT_REDEEMED", json!({
+            "flow_id": flow_id,
+            "telegram_user_id": admission.telegram_user_id,
+            "chat_id": self.chat,
+            "gate_id": admission.gate_id,
+            "network": network_label,
+        }));
+        // Consume the session before the Telegram call; a double-approve is harmless,
+        // but a bridge replay must never open a second session window.
+        self.bot_sessions.remove(session_id);
+
+        let result = self.telegram.approve_join_request(self.chat, admission.telegram_user_id).await;
+        audit("TELEGRAM_APPROVAL", json!({
+            "flow_id": flow_id,
+            "telegram_user_id": admission.telegram_user_id,
+            "chat_id": self.chat,
+            "success": result.is_ok(),
+            "error_class": result.as_ref().err().map(|e| error_class(e)),
+        }));
+        result.map_err(|e| format!("Telegram approval failed: {e}"))?;
+
+        self.telegram
+            .send_message(admission.telegram_user_id, "Wallet verified. Your join request has been approved — welcome to the group.")
+            .await
+            .ok();
+        Ok("approved".into())
+    }
+
     /// Expire tracked grants without modifying existing Telegram membership.
     ///
     /// Runs in one place (the caller's loop) so no two ticks can race the same user's revocation.
@@ -767,6 +1088,8 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
         let now = Instant::now();
         // Tokens whose TTL passed — used or not — are state nobody can act on any more.
         self.tokens.retain(|_, t| t.expires > now);
+        // Admission sessions that expired are state nobody can act on any more.
+        self.bot_sessions.retain(|_, s| s.expires > now);
         // Legacy grants (no server session) expire on the bot's clock, as before. Server-backed
         // grants are ASKED: the registry's expiry, revocation and policy-hash checks are the
         // authority for tracked grants; revocation does not change Telegram membership.
@@ -801,19 +1124,22 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
 
     /// Acts on one update: commands and no-op resends.
     pub async fn handle_update(&mut self, update: TgUpdate, base_url: &str, claim_base: &str, bridge_public_url: Option<&str>) {
+        let update_id = update.update_id;
         if let Some(request) = update.chat_join_request {
-            self.handle_join_request(request).await;
+            self.handle_join_request(request, update_id).await;
             return;
         }
         let Some(message) = update.message.clone() else { return };
         let Some(user) = message.from.as_ref().map(|f| f.id) else { return };
         let text = message.text.clone().unwrap_or_default();
         if text.starts_with("/join") {
-            if !self.fixture_authorization {
+            // When admission bridges are configured, /join is always available.
+            // Legacy fixture-only gate: guard still applies when no bridges are set up.
+            if self.admission_bridges.is_empty() && !self.fixture_authorization {
                 self.telegram.send_message(user, "Telegram verification is temporarily unavailable. Existing group membership is unchanged.").await.ok();
                 return;
             }
-            if let Ok(reply) = self.join(user, base_url, claim_base, bridge_public_url).await {
+            if let Ok(reply) = self.join(user, update_id, base_url, claim_base, bridge_public_url).await {
                 self.telegram.send_message(user, &reply).await.ok();
             } else {
                 self.telegram
@@ -832,7 +1158,7 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
     /// Telegram supplies this identity in its own signed/update channel; it is never accepted
     /// from the browser claim. A forwarded invite reaches this check under the forwarder's own
     /// Telegram user id and is declined unless that id owns a live grant for this exact chat.
-    async fn handle_join_request(&mut self, request: TgJoinRequest) {
+    async fn handle_join_request(&mut self, request: TgJoinRequest, _update_id: u64) {
         audit(
             "CHAT_JOIN_REQUEST_RECEIVED",
             json!({ "telegram_user_id": request.from.id, "chat_id": request.chat.id }),
@@ -1050,7 +1376,7 @@ async fn run() -> i32 {
             gate.clone(),
         );
         let reply = bot
-            .join(FIXTURE_TG_USER, &bridge_base, &format!("http://127.0.0.1:{claim_port}"), bridge_public_url.as_deref())
+            .join(FIXTURE_TG_USER, 0, &bridge_base, &format!("http://127.0.0.1:{claim_port}"), bridge_public_url.as_deref())
             .await
             .expect("fixture join");
         let marker = "token=";
@@ -1148,10 +1474,74 @@ async fn run() -> i32 {
         return serve(bot, &bridge_base, &format!("http://127.0.0.1:{claim_port}"), claim_port, &gate, bridge_public_url.as_deref()).await;
     }
 
+    // M6 production path: build admission bridges from env vars and launch.
+    // GG_BOT_ESMERALDA_BRIDGE / GG_BOT_MAINNET_BRIDGE control which networks are live.
+    // A network with any missing var is skipped — only those with a complete config are active.
+    let mut bridges = configure_admission_bridges();
+    if bridges.is_empty() {
+        eprintln!(
+            "ghost-gate-telegram: production admission is disabled: the Stage 5 consensus trust bootstrap is not independently authenticated"
+        );
+        return 1;
+    }
     eprintln!(
-        "ghost-gate-telegram: production admission is disabled: the Stage 5 consensus trust bootstrap is not independently authenticated"
+        "ghost-gate-telegram: PRODUCTION M6 — {} admission network(s) configured: {}",
+        bridges.len(),
+        bridges.iter().map(|b| b.network_label.as_str()).collect::<Vec<_>>().join(", ")
     );
-    1
+    let mut bot = Bot::new(
+        telegram,
+        HttpBridge::new(&bridge),
+        chat,
+        gate.clone(),
+    );
+    bot.admission_bridges.append(&mut bridges);
+    serve(bot, &bridge_base, &format!("http://127.0.0.1:{claim_port}"), claim_port, &gate, bridge_public_url.as_deref()).await
+}
+
+/// Build `BotAdmissionBridge` instances from environment variables.
+///
+/// Each network requires a complete set of vars. Missing or empty any single field skips that
+/// network — a partial config never starts a half-wired bridge.
+fn configure_admission_bridges() -> Vec<BotAdmissionBridge> {
+    let mut bridges: Vec<BotAdmissionBridge> = Vec::new();
+    for (prefix, label, page) in &[
+        ("GG_BOT_ESMERALDA", "Esmeralda testnet", "/lab"),
+        ("GG_BOT_MAINNET",   "Tari mainnet",      "/mainnet"),
+    ] {
+        let key_hex  = std::env::var(format!("{prefix}_KEY")).unwrap_or_default();
+        let endpoint = std::env::var(format!("{prefix}_BRIDGE")).unwrap_or_default();
+        let gate_id  = std::env::var(format!("{prefix}_GATE_ID")).unwrap_or_default();
+        let ph       = std::env::var(format!("{prefix}_POLICY_HASH")).unwrap_or_default();
+        if [&key_hex, &endpoint, &gate_id, &ph].iter().any(|v| v.trim().is_empty()) {
+            continue;
+        }
+        let key_bytes = match hex::decode(key_hex.trim()) {
+            Ok(b) if b.len() == 32 => {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&b);
+                arr
+            }
+            Ok(_) => {
+                eprintln!("ghost-gate-telegram: {prefix}_KEY must be 32 bytes (64 hex chars); skipping {label}");
+                continue;
+            }
+            Err(e) => {
+                eprintln!("ghost-gate-telegram: {prefix}_KEY is not valid hex: {e}; skipping {label}");
+                continue;
+            }
+        };
+        bridges.push(BotAdmissionBridge::new(
+            endpoint.trim().to_string(),
+            key_bytes,
+            gate_id.trim().to_string(),
+            ph.trim().to_string(),
+            label.to_string(),
+            page.to_string(),
+        ));
+        eprintln!("ghost-gate-telegram: admission bridge configured: {label} at {}", endpoint.trim());
+    }
+    bridges
 }
 
 /// The bot's two loops plus the claim listener, wired together.
@@ -1384,6 +1774,28 @@ async fn handle_claim_http_for_origin<T: TelegramApi, B: BridgeClient>(
             allowed_origin,
         );
     };
+    // M5 admission-bridge claim: browser posts `{bot_session_id}` after the wallet proof.
+    if let Some(session_id) = body["bot_session_id"].as_str() {
+        if session_id.is_empty() {
+            return claim_http_response(
+                "400 Bad Request",
+                &json!({ "error": "bot_session_id must not be empty" }).to_string(),
+                allowed_origin,
+            );
+        }
+        return match bot.claim_bot_admission(session_id).await {
+            Ok(_) => {
+                let payload = json!({ "state": "granted", "admission": "production", "at": now_unix() }).to_string();
+                claim_http_response("200 OK", &payload, allowed_origin)
+            },
+            Err(e) => {
+                let payload = json!({ "state": "refused", "error": e }).to_string();
+                claim_http_response("403 Forbidden", &payload, allowed_origin)
+            },
+        };
+    }
+
+    // Legacy / fixture claim: browser posts `{token, proof_id}`.
     let token = body["token"].as_str().unwrap_or("").to_string();
     let proof_id = body["proof_id"].as_str().unwrap_or("").to_string();
     if token.is_empty() || proof_id.is_empty() {
@@ -1548,7 +1960,7 @@ mod tests {
     }
 
     async fn mint_join(bot: &mut Bot<Wrap, FakeBridge>, user: i64) -> (String, String) {
-        let reply = bot.join(user, "http://127.0.0.1:7799", "http://127.0.0.1:7808", None).await.unwrap();
+        let reply = bot.join(user, 0, "http://127.0.0.1:7799", "http://127.0.0.1:7808", None).await.unwrap();
         // Extract the token from the reply (the `token=` query param).
         let marker = "token=";
         let i = reply.find(marker).expect("the reply embeds the join link") + marker.len();
@@ -1719,11 +2131,11 @@ mod tests {
             flow_id: "legacy".into(),
             server: Some(ServerGrant { token: "legacy".into(), application_id: "crypt".into(), expires_unix: now_unix() + 60 }),
         });
-        bot.handle_join_request(TgJoinRequest { chat: TgChat { id: -1001234 }, from: TgUser { id: 81 } }).await;
+        bot.handle_join_request(TgJoinRequest { chat: TgChat { id: -1001234 }, from: TgUser { id: 81 } }, 0).await;
         // Simulate process replacement while retaining Telegram's independent membership state.
         let bridge = FakeBridge { answers: HashMap::new(), access: None };
         let mut restarted = Bot::new(Wrap(tg.clone()), bridge, -1001234, "crypt".into());
-        restarted.handle_join_request(TgJoinRequest { chat: TgChat { id: -1001234 }, from: TgUser { id: 82 } }).await;
+        restarted.handle_join_request(TgJoinRequest { chat: TgChat { id: -1001234 }, from: TgUser { id: 82 } }, 0).await;
         restarted.tick().await;
         let fake = tg.lock().unwrap();
         assert_eq!(fake.members, original_members);
@@ -1742,7 +2154,7 @@ mod tests {
             flow_id: "legacy".into(),
             server: Some(ServerGrant { token: "legacy".into(), application_id: "crypt".into(), expires_unix: now_unix() + 60 }),
         });
-        assert!(bot.join(81, "http://localhost", "http://localhost", None).await.is_err());
+        assert!(bot.join(81, 0, "http://localhost", "http://localhost", None).await.is_err());
         assert!(bot.grants.contains_key(&81));
     }
 
@@ -1801,9 +2213,9 @@ mod tests {
         let (token, _) = mint_join(&mut bot, 82).await;
         bot.claim(&token, "proof-join").await.expect("fixture grant");
 
-        bot.handle_join_request(TgJoinRequest { chat: TgChat { id: -1001234 }, from: TgUser { id: 82 } }).await;
-        bot.handle_join_request(TgJoinRequest { chat: TgChat { id: -1001234 }, from: TgUser { id: 83 } }).await;
-        bot.handle_join_request(TgJoinRequest { chat: TgChat { id: -1009999 }, from: TgUser { id: 82 } }).await;
+        bot.handle_join_request(TgJoinRequest { chat: TgChat { id: -1001234 }, from: TgUser { id: 82 } }, 0).await;
+        bot.handle_join_request(TgJoinRequest { chat: TgChat { id: -1001234 }, from: TgUser { id: 83 } }, 0).await;
+        bot.handle_join_request(TgJoinRequest { chat: TgChat { id: -1009999 }, from: TgUser { id: 82 } }, 0).await;
 
         let fake = tg.lock().unwrap();
         assert_eq!(fake.approved, vec![(-1001234, 82)]);
@@ -1898,7 +2310,7 @@ mod tests {
         bot.claim(&token, "proof6").await.unwrap();
 
         // The user rejoins while verified: no second obligation, no second proof.
-        let reply = bot.join(11, "http://127.0.0.1:7799", "http://127.0.0.1:7808", None).await.unwrap();
+        let reply = bot.join(11, 0, "http://127.0.0.1:7799", "http://127.0.0.1:7808", None).await.unwrap();
         assert!(reply.contains("already verified"), "{reply}");
         assert_eq!(bot.grant_count(), 1);
     }
@@ -1980,7 +2392,7 @@ mod tests {
         let bridge = FakeBridge { answers: HashMap::new(), access: None };
         let (mut bot, _tg) = bot_owned(bridge);
         for u in 0..(MAX_PENDING_TOKENS + 10) {
-            bot.join(u as i64, "http://x", "http://y", None).await.unwrap();
+            bot.join(u as i64, u as u64, "http://x", "http://y", None).await.unwrap();
         }
         assert!(
             bot.tokens.len() <= MAX_PENDING_TOKENS,
@@ -2096,8 +2508,8 @@ mod tests {
         let (token, _) = mint_join(&mut bot, 77).await;
         bot.claim(&token, "proof-telegram").await.expect("server session creates grant");
 
-        bot.handle_join_request(TgJoinRequest { chat: TgChat { id: -1001234 }, from: TgUser { id: 77 } }).await;
-        bot.handle_join_request(TgJoinRequest { chat: TgChat { id: -1001234 }, from: TgUser { id: 78 } }).await;
+        bot.handle_join_request(TgJoinRequest { chat: TgChat { id: -1001234 }, from: TgUser { id: 77 } }, 0).await;
+        bot.handle_join_request(TgJoinRequest { chat: TgChat { id: -1001234 }, from: TgUser { id: 78 } }, 0).await;
 
         let fake = tg.lock().unwrap();
         assert_eq!(fake.approved, vec![(-1001234, 77)]);
@@ -2148,8 +2560,231 @@ mod tests {
         let (mut bot, _tg) = bot_owned(bridge);
         let (token, _) = mint_join(&mut bot, 24).await;
         bot.claim(&token, "proofs4").await.expect("granted");
-        let reply = bot.join(24, "http://127.0.0.1:7799", "http://127.0.0.1:7808", None).await.unwrap();
+        let reply = bot.join(24, 0, "http://127.0.0.1:7799", "http://127.0.0.1:7808", None).await.unwrap();
         assert!(!reply.contains("already verified"), "the dead session is not claimed as live: {reply}");
         assert!(reply.contains("/telegram/join?token="), "a fresh join link is minted: {reply}");
+    }
+
+    // ── M6 admission-bridge integration tests ──────────────────────────────────────────────────
+    //
+    // These tests run a real HTTP listener on a loopback port that speaks the M5 bot admission
+    // API. The bot calls it exactly as it would call a real bridge; the listener records calls and
+    // controls what it returns, so each test drives a specific outcome without touching Telegram.
+
+    use std::sync::{Arc, Mutex};
+
+    struct FakeAdmissionServer {
+        port: u16,
+        created_sessions: Arc<Mutex<Vec<serde_json::Value>>>,
+        redeemed_sessions: Arc<Mutex<Vec<String>>>,
+        /// If Some, create_session returns this session_id; None → 500
+        create_response: Arc<Mutex<Option<String>>>,
+        /// If Some, redeem returns this admission JSON; None → 404
+        redeem_response: Arc<Mutex<Option<serde_json::Value>>>,
+    }
+
+    impl FakeAdmissionServer {
+        fn start(port: u16) -> Self {
+            let created_sessions = Arc::new(Mutex::new(Vec::new()));
+            let redeemed_sessions = Arc::new(Mutex::new(Vec::new()));
+            let create_response: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(Some(format!("session-{port}"))));
+            let redeem_response: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
+
+            let cs = created_sessions.clone();
+            let rs = redeemed_sessions.clone();
+            let cr = create_response.clone();
+            let rr = redeem_response.clone();
+
+            tokio::spawn(async move {
+                let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.unwrap();
+                loop {
+                    let Ok((mut socket, _)) = listener.accept().await else { continue };
+                    let cs2 = cs.clone();
+                    let rs2 = rs.clone();
+                    let cr2 = cr.clone();
+                    let rr2 = rr.clone();
+                    tokio::spawn(async move {
+                        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                        let mut buf = vec![0u8; 8192];
+                        let n = match socket.read(&mut buf).await { Ok(n) => n, Err(_) => return };
+                        let raw = String::from_utf8_lossy(&buf[..n]).to_string();
+                        let (head, body_raw) = raw.split_once("\r\n\r\n").unwrap_or((&raw, ""));
+                        let first_line = head.lines().next().unwrap_or("");
+                        let target = first_line.split_whitespace().nth(1).unwrap_or("");
+
+                        let body_val: serde_json::Value = serde_json::from_str(body_raw).unwrap_or_default();
+
+                        let response = if target == "/v1/bot/sessions" {
+                            cs2.lock().unwrap().push(body_val);
+                            match cr2.lock().unwrap().clone() {
+                                Some(id) => {
+                                    let exp = now_unix() + 300;
+                                    let resp = serde_json::json!({ "session_id": id, "expires_unix": exp }).to_string();
+                                    format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}", resp.len(), resp)
+                                }
+                                None => "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 2\r\n\r\n{}".into(),
+                            }
+                        } else if target == "/v1/bot/sessions/redeem" {
+                            let sid = body_val["session_id"].as_str().unwrap_or("").to_string();
+                            rs2.lock().unwrap().push(sid);
+                            match rr2.lock().unwrap().clone() {
+                                Some(admission) => {
+                                    let s = admission.to_string();
+                                    format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}", s.len(), s)
+                                }
+                                None => {
+                                    let err = r#"{"error":"not found"}"#;
+                                    format!("HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}", err.len(), err)
+                                }
+                            }
+                        } else {
+                            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".into()
+                        };
+                        let _ = socket.write_all(response.as_bytes()).await;
+                    });
+                }
+            });
+            Self { port, created_sessions, redeemed_sessions, create_response, redeem_response }
+        }
+
+        fn set_create_response(&self, session_id: Option<&str>) {
+            *self.create_response.lock().unwrap() = session_id.map(|s| s.to_string());
+        }
+
+        fn set_redeem_response(&self, admission: Option<serde_json::Value>) {
+            *self.redeem_response.lock().unwrap() = admission;
+        }
+
+        fn bridge(&self, page: &str) -> BotAdmissionBridge {
+            BotAdmissionBridge::new(
+                format!("http://127.0.0.1:{}", self.port),
+                [0u8; 32],
+                "gate1".into(),
+                "ph1".into(),
+                "testnet".into(),
+                page.into(),
+            )
+        }
+    }
+
+    fn admission_bot(server: &FakeAdmissionServer) -> (Bot<Wrap, FakeBridge>, SharedFake) {
+        let tg = Arc::new(Mutex::new(FakeTelegram::new()));
+        let t2 = tg.clone();
+        let bridge = FakeBridge { answers: HashMap::new(), access: None };
+        let mut bot = Bot::new(Wrap(t2), bridge, -1001234, "gate1".into());
+        bot.admission_bridges.push(server.bridge("/lab"));
+        (bot, tg)
+    }
+
+    #[tokio::test]
+    async fn admission_qualified_user_admitted() {
+        let srv = FakeAdmissionServer::start(7920);
+        srv.set_create_response(Some("sess-qualified"));
+        srv.set_redeem_response(Some(serde_json::json!({
+            "telegram_user_id": 55i64,
+            "telegram_chat_id": -1001234i64,
+            "gate_id": "gate1",
+            "wallet_output": "abc123",
+        })));
+        let (mut bot, tg) = admission_bot(&srv);
+
+        // /join creates a session and returns a /lab link.
+        let reply = bot.join(55, 101, "http://127.0.0.1:7799", "http://claim", None).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(reply.contains("bot_session=sess-qualified"), "join link embeds session id: {reply}");
+        assert_eq!(srv.created_sessions.lock().unwrap().len(), 1);
+
+        // /claim with bot_session_id redeems and approves the join request.
+        let request = format!(
+            "POST /claim HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://127.0.0.1:7799\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            r#"{"bot_session_id":"sess-qualified"}"#.len(),
+            r#"{"bot_session_id":"sess-qualified"}"#,
+        );
+        let response = handle_claim_http_for_origin(&mut bot, &request, "http://127.0.0.1:7799").await;
+        assert!(response.contains("200 OK"), "{response}");
+        assert!(response.contains("granted"), "{response}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(srv.redeemed_sessions.lock().unwrap().as_slice(), &["sess-qualified"]);
+        let fake = tg.lock().unwrap();
+        assert!(fake.approved.contains(&(-1001234, 55)), "join request was approved; approved={:?}", fake.approved);
+    }
+
+    #[tokio::test]
+    async fn admission_replay_rejected() {
+        let srv = FakeAdmissionServer::start(7921);
+        srv.set_create_response(Some("sess-replay"));
+        srv.set_redeem_response(Some(serde_json::json!({
+            "telegram_user_id": 56i64,
+            "telegram_chat_id": -1001234i64,
+            "gate_id": "gate1",
+            "wallet_output": "def456",
+        })));
+        let (mut bot, _tg) = admission_bot(&srv);
+        bot.join(56, 102, "http://127.0.0.1:7799", "http://claim", None).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let make_req = |sid: &str| format!(
+            "POST /claim HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://127.0.0.1:7799\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{{\"bot_session_id\":\"{}\"}}",
+            4 + sid.len() + 18, sid
+        );
+        let r1 = handle_claim_http_for_origin(&mut bot, &make_req("sess-replay"), "http://127.0.0.1:7799").await;
+        assert!(r1.contains("200 OK"), "first claim succeeds: {r1}");
+        // Second claim on the same session_id: session was consumed, so it's unknown.
+        let r2 = handle_claim_http_for_origin(&mut bot, &make_req("sess-replay"), "http://127.0.0.1:7799").await;
+        assert!(r2.contains("403"), "replay is rejected: {r2}");
+    }
+
+    #[tokio::test]
+    async fn admission_wrong_user_rejected() {
+        let srv = FakeAdmissionServer::start(7922);
+        srv.set_create_response(Some("sess-wrong-user"));
+        // Bridge returns a different user_id than the one who called /join.
+        srv.set_redeem_response(Some(serde_json::json!({
+            "telegram_user_id": 999i64,
+            "telegram_chat_id": -1001234i64,
+            "gate_id": "gate1",
+            "wallet_output": "xyz789",
+        })));
+        let (mut bot, _tg) = admission_bot(&srv);
+        bot.join(57, 103, "http://127.0.0.1:7799", "http://claim", None).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let body = r#"{"bot_session_id":"sess-wrong-user"}"#;
+        let req = format!(
+            "POST /claim HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://127.0.0.1:7799\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let response = handle_claim_http_for_origin(&mut bot, &req, "http://127.0.0.1:7799").await;
+        assert!(response.contains("403"), "user mismatch is rejected: {response}");
+        assert!(response.contains("mismatch"), "{response}");
+    }
+
+    #[tokio::test]
+    async fn admission_unknown_session_rejected() {
+        let srv = FakeAdmissionServer::start(7923);
+        let (mut bot, _tg) = admission_bot(&srv);
+        let body = r#"{"bot_session_id":"no-such-session"}"#;
+        let req = format!(
+            "POST /claim HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://127.0.0.1:7799\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let response = handle_claim_http_for_origin(&mut bot, &req, "http://127.0.0.1:7799").await;
+        assert!(response.contains("403"), "unknown session rejected: {response}");
+    }
+
+    #[tokio::test]
+    async fn admission_session_expires_on_tick() {
+        let srv = FakeAdmissionServer::start(7924);
+        srv.set_create_response(Some("sess-expiry"));
+        let (mut bot, _tg) = admission_bot(&srv);
+        bot.join(58, 104, "http://127.0.0.1:7799", "http://claim", None).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(bot.bot_sessions.len(), 1);
+        // Manually expire by overwriting the entry's expires field.
+        for s in bot.bot_sessions.values_mut() {
+            s.expires = Instant::now() - Duration::from_secs(1);
+        }
+        bot.tick().await;
+        assert!(bot.bot_sessions.is_empty(), "expired session pruned by tick");
     }
 }

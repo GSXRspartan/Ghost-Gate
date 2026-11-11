@@ -3030,6 +3030,7 @@ name = "ghost-gate-telegram"
 version = "0.1.0"
 dependencies = [
  "hex",
+ "hmac",
  "rand 0.10.3",
  "reqwest 0.12.28",
  "serde",

@@ -316,6 +316,10 @@ fn main() -> ExitCode {
                             return ExitCode::FAILURE;
                         }
                         configure_tunnel_support(&mut bridge);
+                        if let Err(e) = configure_bot_admission(&mut bridge) {
+                            eprintln!("ghost-gate-bridge: {e}");
+                            return ExitCode::FAILURE;
+                        }
                         let recovered = runtime.block_on(bridge.recover_pending_jobs());
                         if recovered > 0 { println!("  replay recovery: resumed {recovered} durable Ootle finality job(s)"); }
                         runtime.block_on(ghost_gate_bridge::server::serve(&config.bind, bridge))
@@ -336,6 +340,10 @@ fn main() -> ExitCode {
                             return ExitCode::FAILURE;
                         }
                         configure_tunnel_support(&mut bridge);
+                        if let Err(e) = configure_bot_admission(&mut bridge) {
+                            eprintln!("ghost-gate-bridge: {e}");
+                            return ExitCode::FAILURE;
+                        }
                         let recovered = runtime.block_on(bridge.recover_pending_jobs());
                         if recovered > 0 { println!("  replay recovery: resumed {recovered} durable Ootle finality job(s)"); }
                         runtime.block_on(ghost_gate_bridge::server::serve(&config.bind, bridge))
@@ -359,6 +367,10 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
             configure_tunnel_support(&mut bridge);
+            if let Err(e) = configure_bot_admission(&mut bridge) {
+                eprintln!("ghost-gate-bridge: {e}");
+                return ExitCode::FAILURE;
+            }
             let recovered = runtime.block_on(bridge.recover_pending_jobs());
             if recovered > 0 { println!("  replay recovery: resumed {recovered} durable Ootle finality job(s)"); }
             runtime.block_on(ghost_gate_bridge::server::serve(&config.bind, bridge))
@@ -803,6 +815,112 @@ where
     println!(
         "  access plane: registry-backed ({bound} of {count} snapshot gates bound; {} revocation prefixes; durable local replay store configured)",
         snapshot.revoked_session_prefixes.len()
+    );
+    Ok(())
+}
+
+/// Attaches bot admission when the operator configures the bot key, DB directory, and policy.
+///
+/// All eight env vars must be provided together or not at all — a partial configuration is
+/// refused rather than silently degraded. When none are set the bridge starts normally and all
+/// four bot routes answer 503, which is the existing, documented behaviour.
+///
+/// | Variable                | Purpose                                                          |
+/// |------------------------|------------------------------------------------------------------|
+/// | `GG_BOT_KEY`           | 64 hex-char (32-byte) HMAC key, distinct from all other keys    |
+/// | `GG_BOT_AUTH_DB_DIR`   | Directory that holds `authorization.sqlite`                     |
+/// | `GG_BOT_GATE_ID`       | Gate this bridge serves (must match the gate registry entry)    |
+/// | `GG_BOT_POLICY_HASH`   | 64 hex-char hash of the gate policy, bound into every challenge |
+/// | `GG_BOT_NETWORK`       | Network byte in hex, e.g. `0x26` (Esmeralda) or `0x00` (mainnet)|
+/// | `GG_BOT_RESOURCE`      | Resource address string starting with `resource_`              |
+/// | `GG_BOT_THRESHOLD`     | Qualification threshold as a u64                               |
+/// | `GG_BOT_CHAT_ID`       | Telegram group chat ID (must be negative)                       |
+fn configure_bot_admission<W, R, X, XR>(bridge: &mut Bridge<W, R, X, XR>) -> Result<(), String>
+where
+    W: ghost_gate_bridge::wallet::WalletChannel,
+    R: ghost_gate_bridge::credential::ChainReader,
+    X: ghost_gate_bridge::xtm::XtmChannel,
+    XR: ghost_gate_bridge::xtm::XtmChainReader,
+{
+    let key_hex    = std::env::var("GG_BOT_KEY").ok().filter(|v| !v.trim().is_empty());
+    let db_dir     = std::env::var("GG_BOT_AUTH_DB_DIR").ok().filter(|v| !v.trim().is_empty());
+    let gate_id    = std::env::var("GG_BOT_GATE_ID").ok().filter(|v| !v.trim().is_empty());
+    let policy_hash = std::env::var("GG_BOT_POLICY_HASH").ok().filter(|v| !v.trim().is_empty());
+    let network_s  = std::env::var("GG_BOT_NETWORK").ok().filter(|v| !v.trim().is_empty());
+    let resource   = std::env::var("GG_BOT_RESOURCE").ok().filter(|v| !v.trim().is_empty());
+    let threshold_s = std::env::var("GG_BOT_THRESHOLD").ok().filter(|v| !v.trim().is_empty());
+    let chat_s     = std::env::var("GG_BOT_CHAT_ID").ok().filter(|v| !v.trim().is_empty());
+
+    let any_set = [&key_hex, &db_dir, &gate_id, &policy_hash, &network_s, &resource, &threshold_s, &chat_s]
+        .iter().any(|v| v.is_some());
+    if !any_set { return Ok(()); }
+
+    let key_hex     = key_hex.ok_or("GG_BOT_KEY required when bot admission is configured")?;
+    let db_dir      = db_dir.ok_or("GG_BOT_AUTH_DB_DIR required when bot admission is configured")?;
+    let gate_id     = gate_id.ok_or("GG_BOT_GATE_ID required when bot admission is configured")?;
+    let policy_hash = policy_hash.ok_or("GG_BOT_POLICY_HASH required when bot admission is configured")?;
+    let network_s   = network_s.ok_or("GG_BOT_NETWORK required when bot admission is configured")?;
+    let resource    = resource.ok_or("GG_BOT_RESOURCE required when bot admission is configured")?;
+    let threshold_s = threshold_s.ok_or("GG_BOT_THRESHOLD required when bot admission is configured")?;
+    let chat_s      = chat_s.ok_or("GG_BOT_CHAT_ID required when bot admission is configured")?;
+
+    let key_bytes = hex::decode(key_hex.trim())
+        .map_err(|_| "GG_BOT_KEY must be 64 hex characters (32 bytes)")?;
+    let bot_key: [u8; 32] = key_bytes.as_slice().try_into()
+        .map_err(|_| "GG_BOT_KEY must be exactly 32 bytes (64 hex characters)")?;
+    if bot_key == [0u8; 32] {
+        return Err("GG_BOT_KEY must not be all zeros — use a cryptographically random 32-byte key".into());
+    }
+
+    let db_path = std::path::Path::new(&db_dir).join("authorization.sqlite");
+    let mut db = if db_path.exists() {
+        ghost_gate_bridge::authorization_coordinator::AuthorizationCoordinator::open_existing(&db_path)
+            .map_err(|e| format!("GG_BOT_AUTH_DB_DIR: cannot open {}: {e}", db_path.display()))?
+    } else {
+        // Create both the DB and the bot-event deduplication store in one step. If creation
+        // fails (directory missing, permission denied) the process refuses to start rather than
+        // running without replay protection.
+        let mut db = ghost_gate_bridge::authorization_coordinator::AuthorizationCoordinator::create_new(&db_path)
+            .map_err(|e| format!("GG_BOT_AUTH_DB_DIR: cannot create {}: {e}", db_path.display()))?;
+        db.initialize_bot_event_store()
+            .map_err(|e| format!("GG_BOT_AUTH_DB_DIR: initialization failed: {e}"))?;
+        db
+    };
+    // A re-opened DB may not have been initialized with the event store (opened from a plain
+    // authorization.sqlite without bot admission). Calling initialize_bot_event_store on an
+    // already-initialized DB is idempotent: the table exists, the CREATE IF NOT EXISTS is a no-op.
+    db.initialize_bot_event_store()
+        .map_err(|e| format!("GG_BOT_AUTH_DB_DIR: event-store setup failed: {e}"))?;
+
+    let network: u8 = u8::from_str_radix(network_s.trim().trim_start_matches("0x"), 16)
+        .map_err(|_| "GG_BOT_NETWORK must be a hex byte, e.g. 0x26 or 26")?;
+    let threshold: u64 = threshold_s.trim().parse()
+        .map_err(|_| "GG_BOT_THRESHOLD must be an unsigned 64-bit integer")?;
+    let chat_id: i64 = chat_s.trim().parse()
+        .map_err(|_| "GG_BOT_CHAT_ID must be a signed 64-bit integer")?;
+    if chat_id >= 0 {
+        return Err("GG_BOT_CHAT_ID must be negative (Telegram group and supergroup IDs are negative)".into());
+    }
+    let policy_hash = policy_hash.trim().to_string();
+    if policy_hash.len() != 64 {
+        return Err("GG_BOT_POLICY_HASH must be exactly 64 hex characters".into());
+    }
+
+    let policy = ghost_gate_bridge::bot_session_interface::BotGatePolicy {
+        gate_id: gate_id.clone(),
+        policy_hash,
+        network,
+        resource: resource.trim().to_string(),
+        threshold,
+        telegram_chat_id: chat_id,
+    };
+
+    bridge.bot_key = Some(bot_key);
+    bridge.bot_authorizations = Some(db);
+    bridge.bot_gate_policy = Some(policy);
+
+    println!(
+        "  bot admission: configured (gate {gate_id}, network 0x{network:02x}, chat {chat_id})"
     );
     Ok(())
 }
