@@ -741,6 +741,13 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
     /// Call once at production startup, before entering the serve loop.
     pub fn load_stores(&mut self) {
         let Some(dir) = self.bot_store_dir.clone() else { return };
+        // Remove any stale .tmp files left by a crash mid-write so they don't confuse readers.
+        for name in &["pending_sessions.json.tmp", "pending_approvals.json.tmp"] {
+            let p = dir.join(name);
+            if p.exists() {
+                let _ = std::fs::remove_file(&p);
+            }
+        }
         let sessions_path = dir.join("pending_sessions.json");
         if let Ok(data) = std::fs::read_to_string(&sessions_path) {
             if let Ok(map) = serde_json::from_str::<HashMap<String, StoredSession>>(&data) {
@@ -1437,12 +1444,38 @@ fn now_unix() -> u64 {
     SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-/// Write `data` to `path` atomically: write to a `.tmp` sibling, then rename.
+/// Write `data` to `path` atomically: write to a `.tmp` sibling, fsync, then rename.
+/// Sets file permissions to 0o600 on Unix so session state is not world-readable.
+/// Syncs the parent directory entry after rename for durability on Linux ext4/xfs.
 /// Silently ignores failures — the in-memory state is always authoritative.
 fn atomic_write_json(path: &std::path::Path, data: &str) {
+    use std::io::Write as _;
     let tmp = path.with_extension("json.tmp");
-    if std::fs::write(&tmp, data).is_ok() {
-        let _ = std::fs::rename(&tmp, path);
+    let write_result = (|| -> std::io::Result<()> {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        f.write_all(data.as_bytes())?;
+        f.sync_all()?; // flush data + metadata to storage before rename
+        Ok(())
+    })();
+    if write_result.is_ok() {
+        if std::fs::rename(&tmp, path).is_ok() {
+            // Sync parent directory so the rename (new directory entry) is durable.
+            #[cfg(unix)]
+            if let Some(parent) = path.parent() {
+                if let Ok(dir) = std::fs::File::open(parent) {
+                    let _ = dir.sync_all();
+                }
+            }
+        }
     }
 }
 
@@ -1680,19 +1713,32 @@ async fn run() -> i32 {
         gate.clone(),
     );
     bot.admission_bridges.append(&mut bridges);
-    // Durable state: persist pending sessions and unapproved admissions across restarts.
-    if let Ok(store_dir) = std::env::var("GG_BOT_SESSION_STORE_DIR") {
-        if !store_dir.trim().is_empty() {
-            let dir = std::path::PathBuf::from(store_dir.trim());
-            if let Err(e) = std::fs::create_dir_all(&dir) {
-                eprintln!("ghost-gate-telegram: cannot create session store dir {}: {e}", dir.display());
-            } else {
-                eprintln!("ghost-gate-telegram: durable session store: {}", dir.display());
-                bot.bot_store_dir = Some(dir);
-                bot.load_stores();
-            }
+    // Durable state is MANDATORY when production admission bridges are active.
+    // A missing, empty, or unwritable store dir is a hard failure — admission must not run
+    // without durable state because pending sessions and approvals would be lost on restart.
+    let store_dir_val = std::env::var("GG_BOT_SESSION_STORE_DIR").unwrap_or_default();
+    let store_dir_trimmed = store_dir_val.trim();
+    if store_dir_trimmed.is_empty() {
+        eprintln!("ghost-gate-telegram: GG_BOT_SESSION_STORE_DIR is required when admission bridges are configured; refusing to start");
+        return 1;
+    }
+    let dir = std::path::PathBuf::from(store_dir_trimmed);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("ghost-gate-telegram: cannot create session store dir {}: {e}; refusing to start", dir.display());
+        return 1;
+    }
+    // Verify the directory is actually writable by touching a probe file.
+    let probe = dir.join(".write-probe");
+    match std::fs::write(&probe, b"probe") {
+        Ok(_) => { let _ = std::fs::remove_file(&probe); }
+        Err(e) => {
+            eprintln!("ghost-gate-telegram: session store dir {} is not writable: {e}; refusing to start", dir.display());
+            return 1;
         }
     }
+    eprintln!("ghost-gate-telegram: durable session store: {}", dir.display());
+    bot.bot_store_dir = Some(dir);
+    bot.load_stores();
     serve(bot, &bridge_base, &format!("http://127.0.0.1:{claim_port}"), claim_port, &gate, bridge_public_url.as_deref()).await
 }
 
@@ -3057,6 +3103,42 @@ mod tests {
             tg.lock().unwrap().approved.contains(&(-1001234, 61)),
             "Telegram approved on retry"
         );
+    }
+
+    /// `load_stores` removes stale `.tmp` files left by a crash mid-write.
+    #[test]
+    fn load_stores_removes_stale_tmp_files() {
+        let dir = std::env::temp_dir().join(format!("gg-test-store-tmp-{}", now_unix()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sess_tmp = dir.join("pending_sessions.json.tmp");
+        let appr_tmp = dir.join("pending_approvals.json.tmp");
+        std::fs::write(&sess_tmp, b"stale").unwrap();
+        std::fs::write(&appr_tmp, b"stale").unwrap();
+        assert!(sess_tmp.exists() && appr_tmp.exists(), "stale files must exist before load");
+
+        let tg = std::sync::Arc::new(std::sync::Mutex::new(FakeTelegram::new()));
+        let bridge = FakeBridge { answers: HashMap::new(), access: None };
+        let mut bot = Bot::new(Wrap(tg), bridge, -1001i64, "test-gate".into());
+        bot.bot_store_dir = Some(dir.clone());
+        bot.load_stores();
+
+        assert!(!sess_tmp.exists(), "stale sessions.json.tmp removed by load_stores");
+        assert!(!appr_tmp.exists(), "stale approvals.json.tmp removed by load_stores");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `atomic_write_json` writes data atomically and leaves no stale `.tmp` on success.
+    #[test]
+    fn atomic_write_json_persists_and_is_readable() {
+        let dir = std::env::temp_dir().join(format!("gg-test-atomic-{}", now_unix()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.json");
+        let payload = r#"{"key":"value"}"#;
+        atomic_write_json(&path, payload);
+        let read_back = std::fs::read_to_string(&path).expect("file should exist after atomic write");
+        assert_eq!(read_back, payload);
+        assert!(!dir.join("test.json.tmp").exists(), "no .tmp sibling after successful write");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Sessions saved to `bot_store_dir` survive restart: `load_stores` restores them from disk.
