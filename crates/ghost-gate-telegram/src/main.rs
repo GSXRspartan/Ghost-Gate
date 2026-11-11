@@ -2947,8 +2947,14 @@ mod tests {
             let cr = create_response.clone();
             let rr = redeem_response.clone();
 
+            // Bind synchronously so the port is ready before this function returns.
+            // If we let tokio::spawn bind asynchronously, bot.join() can fire its TCP connect
+            // before the spawned task gets its first poll and ECONNREFUSED is returned.
+            let std_listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+            std_listener.set_nonblocking(true).unwrap();
+            let listener = tokio::net::TcpListener::from_std(std_listener).unwrap();
+
             tokio::spawn(async move {
-                let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.unwrap();
                 loop {
                     let Ok((mut socket, _)) = listener.accept().await else { continue };
                     let cs2 = cs.clone();

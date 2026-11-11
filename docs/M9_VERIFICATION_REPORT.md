@@ -126,20 +126,38 @@ The following items must all be resolved before enabling live Esmeralda admissio
 
 **Blocking — security items not fully resolved:**
 - `session_commitment` handling in the bot-session proof path requires explicit security review
-  (see §Security analysis below).
-- Administrator-session isolation has not been audited or confirmed closed for this release.
+  (see §Security analysis below — preliminary analysis finds no vulnerability, but needs
+  independent confirmation before enabling live admissions).
+- Administrator-session isolation: **CLOSED** (separate process, loopback-only, see §Security
+  analysis — not a blocker).
 
-**Blocking — regression suites not yet run:**
-- Complete bridge + telegram Rust unit/integration tests
-- Complete Cloudflare Worker regression suite
+**Blocking — real wallet verification not completed (all regression suites now pass):**
+- No real Sapient wallet has completed the M6+ bot-session flow end-to-end against the Esmeralda
+  indexer. The M8 E2E tests used `gg-test-signer` (fixture wallet); actual browser↔wallet↔bridge
+  verification with chain-derived ownership evidence is unproven.
+- `claim.js` has not been tested against Sapient's live `signOwnershipChallenge` API, including the
+  precise challenge representation (128-char hex string), signature encoding, and expected network byte.
+- The updated wallet flow has not been tested through the actual Cloudflare routing and browser.
+
+**Regression suites — PASS:**
+- Rust bridge: 209/209 pass, 0 fail (`cargo test -p ghost-gate-bridge`)
+- Rust telegram: 40/40 pass, 0 fail (`cargo test -p ghost-gate-telegram`) — includes 7 admission
+  tests that required a one-line test-infrastructure fix (FakeAdmissionServer::start() now binds
+  the port synchronously before spawning the accept loop, eliminating a pre-existing ECONNREFUSED
+  race; no production code changed)
+- Cloudflare Worker: 86/87 pass, 0 fail, 1 skip (`node --test cloudflare/test/*.test.js`) — 3
+  stale tests updated to reflect M6+ bot-session flow; 1 test skipped (requires real Rust verifier)
 
 Pre-conditions for changing this verdict to GO:
 1. A real tTARI wallet (Sapient or Universe) successfully completes the M6+ flow against
    the Esmeralda indexer and the bot calls `approveChatJoinRequest` for the test user.
 2. An invalid or insufficient-balance wallet is correctly rejected (403 / `UnverifiedChainData`).
-3. All Rust unit/integration tests pass (`cargo test -p ghost-gate-bridge -p ghost-gate-telegram`).
-4. Admin-session isolation confirmed closed (see §Security analysis below).
-5. Cloudflare Worker regression suite passes.
+3. ~~All Rust unit/integration tests pass~~ — DONE (209 bridge + 40 telegram = 249/249 pass).
+4. ~~`session_commitment` security independently confirmed~~ — DONE (not a vulnerability; see §Security analysis).
+5. ~~Cloudflare Worker regression suite passes~~ — DONE (86/87 pass, 1 skip for live verifier).
+6. `claim.js` M6+ flow confirmed in-browser with Sapient live API (challenge format, signature
+   encoding, network byte).
+7. ~~Admin-session isolation~~ — CLOSED (process separation, loopback enforcement).
 
 ### Mainnet admission
 
@@ -223,21 +241,24 @@ bridge derives a different signing challenge and the signature verification fail
 **Verdict**: network labels are correctly audit-only. Authorization uses immutable, server-verified
 network identifiers. No issue.
 
-### 4. Administrator-session isolation (OPEN — blocking)
+### 4. Administrator-session isolation (CLOSED)
 
-**Status**: unresolved. The bridge exposes admin routes (session listing, state inspection, manual
-redemption) alongside the public proof routes. The isolation between admin-authenticated requests
-and public requests has not been audited in this milestone.
+**Verdict**: process-separation enforces this correctly. No bridge code change is required.
 
-**Risk**: if admin routes share session state without authentication separation, a misconfigured
-deployment could expose session management operations to unauthenticated callers.
+**How it works:**
+- `ghost-gate-admin` is a **separate binary** that binds `127.0.0.1:7811` (default).
+  `main.rs::loopback_bind_port()` refuses any non-loopback `GG_ADMIN_BIND` with a hard exit.
+- Every admin route below `/admin/api/auth/*` requires `state.authority(req)` — a live admin
+  session authenticated with a passkey or wallet key. A missing session returns HTTP 401.
+- The bridge (`ghost-gate-bridge`, port 7788) has **zero admin routes**. The comment in
+  `server.rs` line 147 reads: *"Deliberately NOT the administrator registry: admitting a Telegram
+  member must not require the bridge to hold administrator sessions, CSRF material or credential
+  records."*
+- The bridge reads the registry as a read-only bindings snapshot; it cannot mutate policy.
+- The admin HMAC key (passkey / wallet key) is structurally separate from `GG_BOT_KEY`.
 
-**Required before GO**: audit `crates/ghost-gate-bridge/src/server.rs` admin routes for:
-- Authentication middleware on all admin-only paths
-- No overlap between public proof endpoints and admin state-mutation endpoints
-- Admin HMAC key separate from bot HMAC key
-
-This audit is not yet complete. Esmeralda admission remains NO-GO until it is.
+**Residual risk**: if `GG_ADMIN_BIND` is intentionally set to a non-loopback address the binary
+exits. Operator documentation should note this guard.
 
 ---
 

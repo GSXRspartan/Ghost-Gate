@@ -46,8 +46,12 @@ function fail(message, technical = "") {
   const detail = $("tg-error-detail");
   detail.hidden = !technical;
   $("tg-error-technical").textContent = technical;
-  const action = $("tg-error-action");
-  if (action) action.hidden = true;
+  const a = $("tg-error-action");
+  if (a) {
+    a.hidden = true;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+  }
   $("tg-line").textContent = "The verification did not complete.";
 }
 
@@ -216,6 +220,12 @@ async function main() {
         "Proof rejected.",
         "The bridge could not verify your proof against the chain. " +
         "Make sure your wallet holds the required balance and try again with /join.",
+      );
+    }
+    if (lc.includes("join link expired") || lc.includes("session expired") || lc.includes("unknown or already-consumed")) {
+      return showRejection(
+        "Verification link expired",
+        "This single-use verification link has expired. Return to the Ghost Gate bot and send /join again.",
       );
     }
     fail(

@@ -11,13 +11,19 @@ const cryptV3 = {
   relyingSite: "https://ghostgate.boo",
 };
 
-test("paused Telegram page stops before any wallet proof is requested", () => {
+test("M6+ Telegram page verifies bot session and gate before any wallet proof is requested", () => {
+  // M6+: the admission gate is the server-issued bot_session and gate parameter check, not a
+  // static telegramAdmissionAvailable flag. The page must verify these before reaching the wallet.
   const source = readFileSync(new URL("../../web/telegram/claim.js", import.meta.url), "utf8");
-  const guard = source.indexOf("const telegramAdmissionAvailable = false;");
-  const stop = source.indexOf("if (!telegramAdmissionAvailable)", guard);
+  // No static kill-switch — server-side session creation is the authoritative admission gate.
+  assert.doesNotMatch(source, /const telegramAdmissionAvailable = false/);
+  // bot_session guard must appear before the wallet call.
+  const botSessionCheck = source.indexOf("if (!botSession)");
   const wallet = source.indexOf("await provider.approveAndBuildProof");
-  assert.ok(guard >= 0 && stop > guard && wallet > stop);
-  assert.match(source.slice(stop, wallet), /return fail\(/);
+  assert.ok(botSessionCheck >= 0 && wallet > botSessionCheck,
+    "bot_session guard must come before wallet call");
+  // Between the guard and the wallet call there must be a fail() return.
+  assert.match(source.slice(botSessionCheck, wallet), /return fail\(/);
 });
 
 test("Telegram join uses only deployment-configured exact HTTPS bridge and claim endpoints", () => {
@@ -67,10 +73,13 @@ test("Telegram join fails closed on malformed or unavailable catalog entries", a
   assert.equal(publishedGateFromCatalog([{ ...cryptV3, gateId: "Crypt", policyHash: "not-a-hash" }], "Crypt"), null);
 });
 
-test("Telegram join uses the Worker proxy for published-gate proof operations", () => {
+test("Telegram join uses M6+ bot-session bridge endpoints for all proof operations", () => {
+  // M6+: proof operations use /v1/bot/sessions/{id}/challenge and /v1/bot/sessions/{id}/proof,
+  // not the old /gate/{id}/challenge or /gate/{id}/credential endpoints.
   const source = readFileSync(new URL("../../web/telegram/claim.js", import.meta.url), "utf8");
   assert.match(source, /resolvePublishedGate\(gate\)/);
-  assert.match(source, /const gatePath = `\/gate\/\$\{encodeURIComponent\(gateId\)\}`/);
+  assert.match(source, /\/v1\/bot\/sessions\//);
+  // The gate path must not appear as a direct URL suffix — routing goes through bot-session ids.
   assert.doesNotMatch(source, /bridgeBase}\/gate/);
 });
 
@@ -95,7 +104,7 @@ test("Telegram expiry tells the user to mint a new link without weakening token 
   const source = readFileSync(new URL("../../web/telegram/claim.js", import.meta.url), "utf8");
   assert.match(source, /Verification link expired/);
   assert.match(source, /This single-use verification link has expired\. Return to the Ghost Gate bot and send \/join again/);
-  assert.match(source, /if \(!token\) return fail\("This page needs a join link from the bot/);
+  assert.match(source, /if \(!botSession\)/);
   assert.match(source, /includes\("join link expired"\)/);
 });
 
