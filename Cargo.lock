@@ -3111,6 +3111,7 @@ dependencies = [
  "rand 0.10.3",
  "reqwest 0.12.28",
  "serde_json",
+ "tari_crypto",
  "tari_engine_types",
  "tari_indexer_client",
  "tari_ootle_transaction",

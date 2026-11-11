@@ -31,6 +31,8 @@ hex = { workspace = true }
 # The walletd client's API-key/JWT type is `Zeroizing<String>`; the same crate version the cohort uses.
 zeroize = "1.8"
 rand = { workspace = true }
+# Used by the gg-test-signer binary for M8 E2E test signing without a real wallet.
+tari_crypto = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 # Raw JSON chain reads for cohorts the pinned client cannot parse (Esmeralda runs indexer 0.47.0,
@@ -44,3 +46,7 @@ tari_ootle_transaction = { workspace = true }
 [[bin]]
 name = "ghost-gate-bridge"
 path = "src/bin/ghost-gate-bridge.rs"
+
+[[bin]]
+name = "gg-test-signer"
+path = "src/bin/gg-test-signer.rs"

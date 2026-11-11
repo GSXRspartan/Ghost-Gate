@@ -463,6 +463,10 @@ impl BridgeClient for FixtureBridge {
 pub struct TelegramBot {
     http: reqwest::Client,
     token: String,
+    /// Base URL for the Bot API. Defaults to `https://api.telegram.org`.
+    /// Overridable for M8 E2E testing via `TelegramBot::with_api_url`, which requires the token
+    /// to start with `fixture_` so this cannot be misconfigured in production.
+    base_url: String,
 }
 
 impl TelegramBot {
@@ -473,11 +477,32 @@ impl TelegramBot {
                 .build()
                 .expect("fixed Telegram HTTP client configuration"),
             token: token.to_string(),
+            base_url: "https://api.telegram.org".to_string(),
+        }
+    }
+
+    /// M8 test-only constructor: points the client at a local fixture Telegram server.
+    ///
+    /// The token MUST start with `fixture_` to prevent accidental production use. A production
+    /// token from BotFather never starts with that prefix, so there is no way to misconfigure
+    /// a live bot into this mode without an obviously wrong token.
+    pub fn with_api_url(token: &str, base_url: &str) -> Self {
+        assert!(
+            token.starts_with("fixture_"),
+            "with_api_url requires a fixture_ token prefix; real bot tokens must use TelegramBot::new"
+        );
+        Self {
+            http: reqwest::Client::builder()
+                .timeout(TELEGRAM_HTTP_TIMEOUT)
+                .build()
+                .expect("fixed Telegram HTTP client configuration"),
+            token: token.to_string(),
+            base_url: base_url.trim_end_matches('/').to_string(),
         }
     }
 
     async fn call(&self, method: &str, params: &serde_json::Value) -> Result<serde_json::Value, String> {
-        let url = format!("https://api.telegram.org/bot{}/{}", self.token, method);
+        let url = format!("{}/bot{}/{}", self.base_url, self.token, method);
         let resp = self
             .http
             .post(&url)
@@ -1544,6 +1569,10 @@ async fn run() -> i32 {
         return 1;
     }
     let token = match (fixture, std::env::var("GG_TG_BOT_TOKEN")) {
+        // M8 HTTP fixture mode: GG_TG_FIXTURE=1 + token starting with "fixture_".
+        // The fixture_ prefix is the safety check that prevents a real BotFather token from
+        // accidentally routing to a local fixture server via GG_TG_API_URL.
+        (true, Ok(t)) if t.trim().starts_with("fixture_") => t.trim().to_string(),
         (true, _) => String::new(),
         (false, Ok(t)) if !t.trim().is_empty() => t,
         _ => {
@@ -1567,10 +1596,72 @@ async fn run() -> i32 {
     let bridge_base = std::env::var("GG_JOIN_BASE_URL").unwrap_or_else(|_| bridge.clone());
     let bridge_public_url: Option<String> = std::env::var("GG_BRIDGE_PUBLIC_URL").ok().filter(|v| !v.is_empty());
 
-    // Two arms, because the fixture and real bots are different types (the clients are type
-    // parameters, never trait objects), and unifying them would need an extra enum for one
-    // startup if/else.
+    // Three arms for three distinct startup modes. The fixture and real bots are different types
+    // (the clients are type parameters, never trait objects), so each path returns independently.
     if fixture {
+        // M8: HTTP fixture mode — real bot process, simulated Telegram API, real bridge.
+        // Activated when GG_TG_FIXTURE=1 AND GG_TG_API_URL is set AND token starts with "fixture_".
+        let api_url = std::env::var("GG_TG_API_URL").ok().filter(|v| !v.trim().is_empty());
+        if let Some(ref api_base) = api_url {
+            if !token.starts_with("fixture_") {
+                eprintln!(
+                    "ghost-gate-telegram: GG_TG_API_URL requires GG_TG_BOT_TOKEN to start with \
+                     'fixture_' — this prevents a production token from routing to the fixture server"
+                );
+                return 1;
+            }
+            let test_chat = match std::env::var("GG_TG_FIXTURE_TEST_CHAT_ID")
+                .ok()
+                .and_then(|v| v.parse::<i64>().ok())
+            {
+                Some(v) if v == chat => v,
+                _ => {
+                    eprintln!(
+                        "ghost-gate-telegram: HTTP fixture mode requires GG_TG_FIXTURE_TEST_CHAT_ID \
+                         to equal GG_TG_CHAT_ID; no real Telegram membership is ever changed"
+                    );
+                    return 1;
+                }
+            };
+            let mut bridges = configure_admission_bridges();
+            if bridges.is_empty() {
+                eprintln!(
+                    "ghost-gate-telegram: HTTP fixture mode requires at least one admission bridge \
+                     (GG_BOT_ESMERALDA_BRIDGE / GG_BOT_MAINNET_BRIDGE)"
+                );
+                return 1;
+            }
+            let store_dir_val = std::env::var("GG_BOT_SESSION_STORE_DIR").unwrap_or_default();
+            let store_dir_trimmed = store_dir_val.trim();
+            if store_dir_trimmed.is_empty() {
+                eprintln!(
+                    "ghost-gate-telegram: GG_BOT_SESSION_STORE_DIR is required in HTTP fixture mode \
+                     so that restart-safety tests can verify session persistence"
+                );
+                return 1;
+            }
+            let dir = std::path::PathBuf::from(store_dir_trimmed);
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                eprintln!(
+                    "ghost-gate-telegram: cannot create session store dir {}: {e}",
+                    dir.display()
+                );
+                return 1;
+            }
+            eprintln!(
+                "ghost-gate-telegram: HTTP FIXTURE MODE — real bot binary, simulated Telegram API \
+                 at {api_base}, {} bridge(s): {}",
+                bridges.len(),
+                bridges.iter().map(|b| b.network_label.as_str()).collect::<Vec<_>>().join(", ")
+            );
+            let telegram = TelegramBot::with_api_url(&token, api_base);
+            let mut bot = Bot::new(telegram, HttpBridge::new(&bridge), test_chat, gate.clone());
+            bot.admission_bridges.append(&mut bridges);
+            bot.bot_store_dir = Some(dir);
+            bot.load_stores();
+            return serve(bot, &bridge_base, &format!("http://127.0.0.1:{claim_port}"), claim_port, &gate, bridge_public_url.as_deref()).await;
+        }
+
         let test_chat = match std::env::var("GG_TG_FIXTURE_TEST_CHAT_ID")
             .ok()
             .and_then(|value| value.parse::<i64>().ok())

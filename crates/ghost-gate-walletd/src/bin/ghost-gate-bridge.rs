@@ -356,24 +356,61 @@ fn main() -> ExitCode {
             }
         },
         None => {
-            eprintln!(
-                "  note: GG_INDEXER_ENDPOINT is not set, so the credential proof mode (browser \
-                 wallets) is disabled; the consensus mode through walletd is unaffected."
-            );
-            let mut bridge = Bridge::<AnyWallet, ghost_gate_bridge::credential::NoChainReader, AnyXtm, _>::with_xtm_full(registry, wallet, config.origins, xtm_channel, xtm_chain);
-            bridge.component_session = component_session.clone().map(String::into_bytes);
-            if let Err(e) = attach_access_plane(&mut bridge) {
-                eprintln!("ghost-gate-bridge: {e}");
-                return ExitCode::FAILURE;
+            // M8 test-only: fixture chain reader, activated only when GG_TG_FIXTURE=1 is also
+            // set. The double guard (fixture flag + explicit UTXO spec) makes accidental
+            // production use nearly impossible: a bridge without GG_TG_FIXTURE=1 ignores
+            // GG_FIXTURE_UTXO entirely and falls through to the NoChainReader path below.
+            let fixture_active = std::env::var("GG_TG_FIXTURE").map(|v| v == "1").unwrap_or(false);
+            let fixture_utxo = std::env::var("GG_FIXTURE_UTXO").ok().filter(|v| !v.trim().is_empty());
+            if let (true, Some(utxo_spec)) = (fixture_active, fixture_utxo) {
+                match FixtureChainReader::from_spec(&utxo_spec) {
+                    Ok(reader) => {
+                        eprintln!(
+                            "  WARNING: fixture chain reader active (GG_FIXTURE_UTXO). \
+                             Requires GG_TG_FIXTURE=1 and must never be used in production."
+                        );
+                        let mut bridge = ghost_gate_bridge::server::Bridge::assemble_full(
+                            registry, wallet, config.origins, reader, xtm_channel, xtm_chain,
+                        );
+                        bridge.component_session = component_session.clone().map(String::into_bytes);
+                        if let Err(e) = attach_access_plane(&mut bridge) {
+                            eprintln!("ghost-gate-bridge: {e}");
+                            return ExitCode::FAILURE;
+                        }
+                        configure_tunnel_support(&mut bridge);
+                        if let Err(e) = configure_bot_admission(&mut bridge) {
+                            eprintln!("ghost-gate-bridge: {e}");
+                            return ExitCode::FAILURE;
+                        }
+                        let recovered = runtime.block_on(bridge.recover_pending_jobs());
+                        if recovered > 0 { println!("  replay recovery: resumed {recovered} durable Ootle finality job(s)"); }
+                        runtime.block_on(ghost_gate_bridge::server::serve(&config.bind, bridge))
+                    }
+                    Err(e) => {
+                        eprintln!("ghost-gate-bridge: GG_FIXTURE_UTXO: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            } else {
+                eprintln!(
+                    "  note: GG_INDEXER_ENDPOINT is not set, so the credential proof mode (browser \
+                     wallets) is disabled; the consensus mode through walletd is unaffected."
+                );
+                let mut bridge = Bridge::<AnyWallet, ghost_gate_bridge::credential::NoChainReader, AnyXtm, _>::with_xtm_full(registry, wallet, config.origins, xtm_channel, xtm_chain);
+                bridge.component_session = component_session.clone().map(String::into_bytes);
+                if let Err(e) = attach_access_plane(&mut bridge) {
+                    eprintln!("ghost-gate-bridge: {e}");
+                    return ExitCode::FAILURE;
+                }
+                configure_tunnel_support(&mut bridge);
+                if let Err(e) = configure_bot_admission(&mut bridge) {
+                    eprintln!("ghost-gate-bridge: {e}");
+                    return ExitCode::FAILURE;
+                }
+                let recovered = runtime.block_on(bridge.recover_pending_jobs());
+                if recovered > 0 { println!("  replay recovery: resumed {recovered} durable Ootle finality job(s)"); }
+                runtime.block_on(ghost_gate_bridge::server::serve(&config.bind, bridge))
             }
-            configure_tunnel_support(&mut bridge);
-            if let Err(e) = configure_bot_admission(&mut bridge) {
-                eprintln!("ghost-gate-bridge: {e}");
-                return ExitCode::FAILURE;
-            }
-            let recovered = runtime.block_on(bridge.recover_pending_jobs());
-            if recovered > 0 { println!("  replay recovery: resumed {recovered} durable Ootle finality job(s)"); }
-            runtime.block_on(ghost_gate_bridge::server::serve(&config.bind, bridge))
         }
     };
     match outcome {
@@ -923,6 +960,86 @@ where
         "  bot admission: configured (gate {gate_id}, network 0x{network:02x}, chat {chat_id})"
     );
     Ok(())
+}
+
+// ---------------------------------------------------------------------------------------
+// M8: fixture chain reader — test-only, guarded by GG_TG_FIXTURE=1
+// ---------------------------------------------------------------------------------------
+
+/// A `ChainReader` that serves pre-programmed UTXO responses from env-var configuration.
+///
+/// Activated only when both `GG_TG_FIXTURE=1` and `GG_FIXTURE_UTXO` are set at bridge startup.
+/// Production bridges never load this code path; the two-var guard makes accidental activation
+/// essentially impossible.
+///
+/// `GG_FIXTURE_UTXO` format: `utxo_addr:auth_key_hex:min_value[,utxo_addr:auth_key_hex:min_value,...]`
+/// where `auth_key_hex` is the 32-byte (64 hex char) Ristretto public key that the gg-test-signer
+/// binary will sign with. The bridge verifies signatures against this key the same way it verifies
+/// real on-chain keys — the fixture only replaces the network round-trip.
+struct FixtureChainReader {
+    // substate_id string → (minimum_value_promise, auth_key_bytes)
+    entries: std::collections::HashMap<String, (u64, [u8; 32])>,
+}
+
+impl FixtureChainReader {
+    fn from_spec(spec: &str) -> Result<Self, String> {
+        let mut entries = std::collections::HashMap::new();
+        for entry in spec.split(',') {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                continue;
+            }
+            let parts: Vec<&str> = entry.splitn(3, ':').collect();
+            if parts.len() != 3 {
+                return Err(format!(
+                    "each entry must be utxo_addr:auth_key_hex:min_value, got {entry:?}"
+                ));
+            }
+            let substate_id = parts[0].trim().to_string();
+            if !substate_id.starts_with("utxo_") {
+                return Err(format!(
+                    "substate_id must start with utxo_, got {substate_id:?}"
+                ));
+            }
+            let auth_key_hex = parts[1].trim();
+            let min_value: u64 = parts[2]
+                .trim()
+                .parse()
+                .map_err(|e| format!("bad min_value in {entry:?}: {e}"))?;
+            let auth_key_bytes = hex::decode(auth_key_hex)
+                .map_err(|e| format!("bad auth_key hex in {entry:?}: {e}"))?;
+            if auth_key_bytes.len() != 32 {
+                return Err(format!(
+                    "auth_key must be exactly 32 bytes (64 hex chars), got {} bytes in {entry:?}",
+                    auth_key_bytes.len()
+                ));
+            }
+            let mut auth_key = [0u8; 32];
+            auth_key.copy_from_slice(&auth_key_bytes);
+            entries.insert(substate_id, (min_value, auth_key));
+        }
+        if entries.is_empty() {
+            return Err("GG_FIXTURE_UTXO contains no valid entries".into());
+        }
+        Ok(Self { entries })
+    }
+}
+
+impl ghost_gate_bridge::ChainReader for FixtureChainReader {
+    async fn utxo(
+        &self,
+        address: &tari_template_lib_types::UtxoAddress,
+    ) -> Result<ghost_gate_bridge::UtxoOnChain, String> {
+        let key = format!("{address}");
+        match self.entries.get(&key) {
+            Some(&(min_value, auth_key)) => Ok(ghost_gate_bridge::UtxoOnChain {
+                minimum_value_promise: min_value,
+                auth_key: Some(auth_key),
+                verified: true,
+            }),
+            None => Err(format!("fixture chain reader: no entry configured for {key}")),
+        }
+    }
 }
 
 fn configure_tunnel_support<W, R, X, XR>(
