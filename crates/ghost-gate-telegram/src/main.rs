@@ -43,8 +43,10 @@
 //!
 //! # What a POC deliberately does not do
 //!
-//! - Grant state is in-memory. A restart forgets the user-to-session mapping, but Telegram
-//!   membership already approved by the previous process persists. Until durable reconciliation
+//! - Grant state is mostly in-memory.  When `GG_BOT_SESSION_STORE_DIR` is set, the bot
+//!   persists admission sessions and unapproved Telegram admissions across restarts.  Grant
+//!   records (the `grants` table) remain in-memory; a restart forgets those, but Telegram
+//!   membership approved by the previous process persists.  Until durable reconciliation
 //!   exists, expiry/revocation cannot be guaranteed across a restart. When the bridge is
 //!   REGISTRY-BACKED, the
 //!   expiry, revocation and policy-hash decisions live in the registry, not here: the bot asks the
@@ -118,6 +120,30 @@ struct PendingBotSession {
     bridge_index: usize,
     telegram_user_id: i64,
     expires: Instant,
+}
+
+/// Serialisable form of `PendingBotSession` for the restart-safety store.
+/// `Instant` is not meaningful across restarts; `expires_unix` is seconds since the UNIX epoch.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct StoredSession {
+    bridge_index: usize,
+    telegram_user_id: i64,
+    expires_unix: u64,
+}
+
+/// A bridge admission that completed but whose Telegram `approve_join_request` has not yet
+/// confirmed.  Persisted to disk so a transient Telegram failure does not permanently strand
+/// a verified user.  Retried on each `tick()`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PendingApproval {
+    telegram_user_id: i64,
+    telegram_chat_id: i64,
+    gate_id: String,
+    network_label: String,
+    /// How many Telegram calls have been attempted so far (first try is 0 → 1 on first attempt).
+    attempt_count: u32,
+    /// Unix timestamp of the first bridge redeem, for operator visibility.
+    first_seen_unix: u64,
 }
 
 /// HMAC-authenticated loopback client for the bridge's bot-only admission routes.
@@ -672,6 +698,14 @@ pub struct Bot<T: TelegramApi, B: BridgeClient> {
     /// Sessions created by `admission_bridges`, awaiting proof verification by the browser.
     /// Maps session_id → pending record. Expired entries are pruned on each `tick()`.
     bot_sessions: HashMap<String, PendingBotSession>,
+
+    // ── M6+ durable state ─────────────────────────────────────────────────────────────────────
+    /// Directory for the restart-safety JSON stores.  `None` = in-memory only (tests and dev).
+    /// Set from `GG_BOT_SESSION_STORE_DIR` at production startup.
+    bot_store_dir: Option<std::path::PathBuf>,
+    /// Bridge admissions whose `approve_join_request` has not yet returned success.
+    /// Keyed by the opaque bridge session_id.  Retried on every `tick()`.
+    pending_approvals: HashMap<String, PendingApproval>,
 }
 
 impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
@@ -689,6 +723,8 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
             seen_updates: std::collections::BTreeSet::new(),
             admission_bridges: Vec::new(),
             bot_sessions: HashMap::new(),
+            bot_store_dir: None,
+            pending_approvals: HashMap::new(),
         }
     }
 
@@ -696,6 +732,69 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
         let mut bot = Self::new(telegram, bridge, chat, gate);
         bot.fixture_authorization = true;
         bot
+    }
+
+    // ── M6+ durable-state helpers ──────────────────────────────────────────────────────────────
+
+    /// Load previously-persisted sessions and pending approvals from `bot_store_dir`.
+    /// Non-expired sessions are restored to `bot_sessions`; pending approvals to `pending_approvals`.
+    /// Call once at production startup, before entering the serve loop.
+    pub fn load_stores(&mut self) {
+        let Some(dir) = self.bot_store_dir.clone() else { return };
+        let sessions_path = dir.join("pending_sessions.json");
+        if let Ok(data) = std::fs::read_to_string(&sessions_path) {
+            if let Ok(map) = serde_json::from_str::<HashMap<String, StoredSession>>(&data) {
+                let now_secs = now_unix();
+                for (id, s) in map {
+                    if s.expires_unix > now_secs {
+                        let secs_left = s.expires_unix - now_secs;
+                        self.bot_sessions.insert(id, PendingBotSession {
+                            bridge_index: s.bridge_index,
+                            telegram_user_id: s.telegram_user_id,
+                            expires: Instant::now() + Duration::from_secs(secs_left),
+                        });
+                    }
+                }
+                if !self.bot_sessions.is_empty() {
+                    eprintln!("ghost-gate-telegram: restored {} pending bot session(s) from disk", self.bot_sessions.len());
+                }
+            }
+        }
+        let approvals_path = dir.join("pending_approvals.json");
+        if let Ok(data) = std::fs::read_to_string(&approvals_path) {
+            if let Ok(map) = serde_json::from_str::<HashMap<String, PendingApproval>>(&data) {
+                if !map.is_empty() {
+                    eprintln!("ghost-gate-telegram: loaded {} pending Telegram approval(s) from disk", map.len());
+                }
+                self.pending_approvals = map;
+            }
+        }
+    }
+
+    fn write_sessions_store(&self) {
+        let Some(dir) = &self.bot_store_dir else { return };
+        let now_secs = now_unix();
+        let map: HashMap<&String, StoredSession> = self.bot_sessions.iter()
+            .filter_map(|(id, s)| {
+                let left = s.expires.saturating_duration_since(Instant::now());
+                if left.is_zero() { return None; }
+                Some((id, StoredSession {
+                    bridge_index: s.bridge_index,
+                    telegram_user_id: s.telegram_user_id,
+                    expires_unix: now_secs.saturating_add(left.as_secs()),
+                }))
+            })
+            .collect();
+        if let Ok(data) = serde_json::to_string(&map) {
+            atomic_write_json(&dir.join("pending_sessions.json"), &data);
+        }
+    }
+
+    fn write_approvals_store(&self) {
+        let Some(dir) = &self.bot_store_dir else { return };
+        if let Ok(data) = serde_json::to_string(&self.pending_approvals) {
+            atomic_write_json(&dir.join("pending_approvals.json"), &data);
+        }
     }
 
     /// `/join`: mints a single-use token (or bot-admission session) bound to this Telegram account.
@@ -769,6 +868,7 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
                             telegram_user_id: user,
                             expires,
                         });
+                        self.write_sessions_store();
                         let url = self.admission_bridges[idx].verify_url(&session.session_id, base_url);
                         links.push(format!("{} verification:\n{}", network_label, url));
                     }
@@ -1063,21 +1163,49 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
         // Consume the session before the Telegram call; a double-approve is harmless,
         // but a bridge replay must never open a second session window.
         self.bot_sessions.remove(session_id);
+        self.write_sessions_store();
+
+        // Record the admission durably BEFORE calling Telegram: if the network call fails,
+        // the record stays in `pending_approvals` and `tick()` retries it automatically.
+        // The bridge-side session is already single-use; this cannot cause a second bridge replay.
+        self.pending_approvals.insert(session_id.to_string(), PendingApproval {
+            telegram_user_id: admission.telegram_user_id,
+            telegram_chat_id: admission.telegram_chat_id,
+            gate_id: admission.gate_id.clone(),
+            network_label: network_label.clone(),
+            attempt_count: 0,
+            first_seen_unix: now_unix(),
+        });
+        self.write_approvals_store();
 
         let result = self.telegram.approve_join_request(self.chat, admission.telegram_user_id).await;
+        let approval_ok = result.is_ok();
         audit("TELEGRAM_APPROVAL", json!({
             "flow_id": flow_id,
             "telegram_user_id": admission.telegram_user_id,
             "chat_id": self.chat,
-            "success": result.is_ok(),
+            "success": approval_ok,
+            "queued_for_retry": !approval_ok,
             "error_class": result.as_ref().err().map(|e| error_class(e)),
         }));
-        result.map_err(|e| format!("Telegram approval failed: {e}"))?;
 
-        self.telegram
-            .send_message(admission.telegram_user_id, "Wallet verified. Your join request has been approved — welcome to the group.")
-            .await
-            .ok();
+        if approval_ok {
+            // Success: clean up the durable record and send the confirmation DM.
+            self.pending_approvals.remove(session_id);
+            self.write_approvals_store();
+            self.telegram
+                .send_message(admission.telegram_user_id, "Wallet verified. Your join request has been approved — welcome to the group.")
+                .await
+                .ok();
+        } else {
+            // Telegram temporarily unavailable.  The pending approval is already on disk and
+            // `tick()` will retry until Telegram responds.  Return success to the browser anyway:
+            // the bridge-side proof is complete and no replay is possible.
+            eprintln!(
+                "ghost-gate-telegram: Telegram approval queued for retry (user {}, chat {}, attempt 1): {}",
+                admission.telegram_user_id, self.chat, result.unwrap_err()
+            );
+        }
         Ok("approved".into())
     }
 
@@ -1089,7 +1217,54 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
         // Tokens whose TTL passed — used or not — are state nobody can act on any more.
         self.tokens.retain(|_, t| t.expires > now);
         // Admission sessions that expired are state nobody can act on any more.
+        let sessions_before = self.bot_sessions.len();
         self.bot_sessions.retain(|_, s| s.expires > now);
+        if self.bot_sessions.len() < sessions_before {
+            self.write_sessions_store();
+        }
+
+        // Retry any pending Telegram approvals (from bridge redeems where approve_join_request
+        // failed transiently).  `approve_join_request` is idempotent — a second call for a user
+        // who already joined is a no-op.  After 24 h of retries, log a warning and stop.
+        if !self.pending_approvals.is_empty() {
+            let ids: Vec<String> = self.pending_approvals.keys().cloned().collect();
+            let mut approved: Vec<String> = Vec::new();
+            let mut store_changed = false;
+            const MAX_ATTEMPTS: u32 = 1440; // ~24 h at 60-second ticks
+            for id in ids {
+                // Extract all fields and update attempt_count in one block so the mutable borrow
+                // drops before the await.
+                let (attempt, user_id, chat_id, network_label, gate_id, first_seen) = {
+                    let Some(approval) = self.pending_approvals.get_mut(&id) else { continue };
+                    approval.attempt_count += 1;
+                    (approval.attempt_count, approval.telegram_user_id, approval.telegram_chat_id,
+                     approval.network_label.clone(), approval.gate_id.clone(), approval.first_seen_unix)
+                };
+                store_changed = true; // attempt_count changed regardless of Telegram result
+                if attempt > MAX_ATTEMPTS {
+                    eprintln!(
+                        "ghost-gate-telegram: pending approval for user {} (gate {}, {}) abandoned after {} attempts (first seen unix {}); operator review required",
+                        user_id, gate_id, network_label, attempt, first_seen
+                    );
+                    approved.push(id.clone()); // remove from map to stop logging every tick
+                    continue;
+                }
+                let result = self.telegram.approve_join_request(chat_id, user_id).await;
+                if result.is_ok() {
+                    self.telegram
+                        .send_message(user_id, "Wallet verified. Your join request has been approved — welcome to the group.")
+                        .await
+                        .ok();
+                    approved.push(id);
+                }
+            }
+            for id in &approved {
+                self.pending_approvals.remove(id);
+            }
+            if store_changed {
+                self.write_approvals_store();
+            }
+        }
         // Legacy grants (no server session) expire on the bot's clock, as before. Server-backed
         // grants are ASKED: the registry's expiry, revocation and policy-hash checks are the
         // authority for tracked grants; revocation does not change Telegram membership.
@@ -1260,6 +1435,15 @@ impl TruncateTail for std::collections::BTreeSet<u64> {
 
 fn now_unix() -> u64 {
     SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Write `data` to `path` atomically: write to a `.tmp` sibling, then rename.
+/// Silently ignores failures — the in-memory state is always authoritative.
+fn atomic_write_json(path: &std::path::Path, data: &str) {
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, data).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
 }
 
 /// Return a short, non-reversible correlation identifier for an in-memory bearer value.
@@ -1496,6 +1680,19 @@ async fn run() -> i32 {
         gate.clone(),
     );
     bot.admission_bridges.append(&mut bridges);
+    // Durable state: persist pending sessions and unapproved admissions across restarts.
+    if let Ok(store_dir) = std::env::var("GG_BOT_SESSION_STORE_DIR") {
+        if !store_dir.trim().is_empty() {
+            let dir = std::path::PathBuf::from(store_dir.trim());
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                eprintln!("ghost-gate-telegram: cannot create session store dir {}: {e}", dir.display());
+            } else {
+                eprintln!("ghost-gate-telegram: durable session store: {}", dir.display());
+                bot.bot_store_dir = Some(dir);
+                bot.load_stores();
+            }
+        }
+    }
     serve(bot, &bridge_base, &format!("http://127.0.0.1:{claim_port}"), claim_port, &gate, bridge_public_url.as_deref()).await
 }
 
@@ -1832,6 +2029,7 @@ mod tests {
         members: std::collections::BTreeSet<i64>,
         invites: Vec<i64>,
         invite_fails: bool,
+        approve_fails: bool,
         kicked: Vec<i64>,
         unbanned: Vec<i64>,
         approved: Vec<(i64, i64)>,
@@ -1846,6 +2044,7 @@ mod tests {
                 members: std::collections::BTreeSet::new(),
                 invites: Vec::new(),
                 invite_fails: false,
+                approve_fails: false,
                 kicked: Vec::new(),
                 unbanned: Vec::new(),
                 approved: Vec::new(),
@@ -1875,6 +2074,9 @@ mod tests {
         }
         async fn approve_join_request(&mut self, chat: i64, user: i64) -> Result<(), String> {
             let mut g = self.0.lock().unwrap();
+            if g.approve_fails {
+                return Err("telegram approve_join_request failed (injected test failure)".into());
+            }
             g.approved.push((chat, user));
             g.members.insert(user);
             Ok(())
@@ -2786,5 +2988,105 @@ mod tests {
         }
         bot.tick().await;
         assert!(bot.bot_sessions.is_empty(), "expired session pruned by tick");
+    }
+
+    /// If Telegram's approve_join_request fails, the admission is queued in `pending_approvals`.
+    /// The browser-visible response is still 200 (the bridge proof is complete, no replay possible).
+    #[tokio::test]
+    async fn admission_telegram_failure_queued_for_retry() {
+        let srv = FakeAdmissionServer::start(7925);
+        srv.set_create_response(Some("sess-tg-fail"));
+        srv.set_redeem_response(Some(serde_json::json!({
+            "telegram_user_id": 60i64,
+            "telegram_chat_id": -1001234i64,
+            "gate_id": "gate1",
+            "wallet_output": "abc",
+        })));
+        let (mut bot, tg) = admission_bot(&srv);
+        // Inject Telegram failure.
+        tg.lock().unwrap().approve_fails = true;
+        bot.join(60, 110, "http://127.0.0.1:7799", "http://claim", None).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let body = r#"{"bot_session_id":"sess-tg-fail"}"#;
+        let req = format!(
+            "POST /claim HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://127.0.0.1:7799\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let response = handle_claim_http_for_origin(&mut bot, &req, "http://127.0.0.1:7799").await;
+        // Bridge proof succeeded; we return 200 and queue the Telegram approval.
+        assert!(response.contains("200 OK"), "claim returns 200 even when Telegram temporarily fails: {response}");
+        // Session was consumed (no replay).
+        assert!(bot.bot_sessions.is_empty(), "session consumed regardless of Telegram outcome");
+        // Pending approval queued.
+        assert_eq!(bot.pending_approvals.len(), 1, "pending_approvals has the queued entry");
+        // No actual Telegram approval yet.
+        assert!(tg.lock().unwrap().approved.is_empty(), "no Telegram approval yet");
+    }
+
+    /// After a Telegram failure, the next tick() retries and clears `pending_approvals` on success.
+    #[tokio::test]
+    async fn admission_telegram_retry_succeeds_on_tick() {
+        let srv = FakeAdmissionServer::start(7926);
+        srv.set_create_response(Some("sess-tg-retry"));
+        srv.set_redeem_response(Some(serde_json::json!({
+            "telegram_user_id": 61i64,
+            "telegram_chat_id": -1001234i64,
+            "gate_id": "gate1",
+            "wallet_output": "abc",
+        })));
+        let (mut bot, tg) = admission_bot(&srv);
+        tg.lock().unwrap().approve_fails = true;
+        bot.join(61, 111, "http://127.0.0.1:7799", "http://claim", None).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let body = r#"{"bot_session_id":"sess-tg-retry"}"#;
+        let req = format!(
+            "POST /claim HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://127.0.0.1:7799\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        handle_claim_http_for_origin(&mut bot, &req, "http://127.0.0.1:7799").await;
+        assert_eq!(bot.pending_approvals.len(), 1, "queued after Telegram fail");
+
+        // Repair Telegram and tick.
+        tg.lock().unwrap().approve_fails = false;
+        bot.tick().await;
+
+        assert!(bot.pending_approvals.is_empty(), "pending_approvals cleared after tick retry");
+        assert!(
+            tg.lock().unwrap().approved.contains(&(-1001234, 61)),
+            "Telegram approved on retry"
+        );
+    }
+
+    /// Sessions saved to `bot_store_dir` survive restart: `load_stores` restores them from disk.
+    #[tokio::test]
+    async fn admission_sessions_survive_restart_via_store() {
+        let dir = std::env::temp_dir().join(format!("gg-test-store-{}", now_unix()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let srv = FakeAdmissionServer::start(7927);
+        srv.set_create_response(Some("sess-restart"));
+
+        // First "process": create the session and persist it.
+        {
+            let (mut bot, _tg) = admission_bot(&srv);
+            bot.bot_store_dir = Some(dir.clone());
+            bot.join(62, 112, "http://127.0.0.1:7799", "http://claim", None).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            assert_eq!(bot.bot_sessions.len(), 1);
+        }
+
+        // Second "process": load from disk and verify the session is there.
+        {
+            let (mut bot2, _tg2) = admission_bot(&srv);
+            bot2.bot_store_dir = Some(dir.clone());
+            assert!(bot2.bot_sessions.is_empty(), "fresh bot has no sessions in memory");
+            bot2.load_stores();
+            assert_eq!(bot2.bot_sessions.len(), 1, "session restored from disk");
+            assert!(bot2.bot_sessions.contains_key("sess-restart"), "correct session_id loaded");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
