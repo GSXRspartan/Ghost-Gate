@@ -1,4 +1,4 @@
-import { failClosed, gateFor, json, originMatches, parseGateCatalog } from "./contracts.js";
+import { failClosed, gateFor, isMainnetGate, json, mainnetAdmissionsEnabled, originMatches, parseGateCatalog } from "./contracts.js";
 export { ReplayCoordinator } from "./replay-coordinator.js";
 
 const text = new TextEncoder();
@@ -309,6 +309,11 @@ export default {
       if (parsed.pathname === "/lab" || parsed.pathname === "/lab/") {
         return embeddableLabDocument(await env.ASSETS.fetch(request));
       }
+      // The mainnet preview page. Served as a hardened asset — no COEP opt-in needed here.
+      // Admissions are disabled (preview only). The page itself documents the go/no-go status.
+      if (parsed.pathname === "/mainnet" || parsed.pathname === "/mainnet/") {
+        return hardenedAsset(await env.ASSETS.fetch(new Request(new URL("/mainnet/", request.url), request)));
+      }
       // Telegram's bot historically minted /telegram/join links.  /claim is the concise public
       // alias.  Both serve the same static page and still require a bot-minted single-use token.
       if (parsed.pathname === "/claim" || parsed.pathname === "/claim/" || parsed.pathname === "/telegram/join") {
@@ -330,6 +335,15 @@ export default {
     const allCookies = cookies(request);
     const names = cookieNames(request, env);
     const visitorSession = allCookies[names.visitor] || randomId();
+
+    // Mainnet gates require an explicit operator opt-in flag before any challenge or proof
+    // is accepted. This prevents an accidental testnet→mainnet misconfiguration from
+    // granting real mainnet access. Testnet proofs cannot cross into mainnet: each gate
+    // binding carries the network byte, so a testnet proof rejected by the mainnet verifier,
+    // but this belt-and-suspenders check refuses before any proof is even attempted.
+    if (isMainnetGate(gate) && !mainnetAdmissionsEnabled(env)) {
+      return failClosed("mainnet admissions are not yet enabled — this is a preview deployment");
+    }
 
     if (match.kind === "challenge" && request.method === "POST") {
       const nonce = randomId();

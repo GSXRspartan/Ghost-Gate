@@ -1,5 +1,25 @@
 /** Shared, wire-safe contract checks for the hosted edge. */
 
+// Network byte constants. Use these instead of raw numbers throughout the worker.
+// Mainnet = 0 (0x00); Esmeralda testnet = 38 (0x26).
+// See docs/M5_MAINNET_COMPATIBILITY.md for upgrade notes.
+export const NETWORK_MAINNET = 0;
+export const NETWORK_ESMERALDA = 38;
+
+/** True when this gate targets Ootle mainnet. */
+export function isMainnetGate(gate) { return gate.network === NETWORK_MAINNET; }
+
+/** True when mainnet admissions are explicitly enabled for this deployment.
+ *
+ * Returns false unless GG_MAINNET_ADMISSIONS_ENABLED is exactly "1". This is a
+ * belt-and-suspenders check on top of gate configuration: even if a mainnet gate
+ * slips into GG_GATE_CATALOG, challenges and proofs fail closed until the
+ * operator has set this flag and deployed deliberately.
+ */
+export function mainnetAdmissionsEnabled(env) {
+  return env.GG_MAINNET_ADMISSIONS_ENABLED === "1";
+}
+
 export function json(status, body, extra = {}) {
   const { cookies, ...headers } = extra;
   const responseHeaders = new Headers({
