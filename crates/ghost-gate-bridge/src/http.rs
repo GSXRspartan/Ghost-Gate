@@ -157,6 +157,12 @@ impl<'a> Route<'a> {
             ("GET", ["lab", "lab.css"]) => Route::Asset("lab/lab.css"),
             ("GET", ["lab", "lab.js"]) => Route::Asset("lab/lab.js"),
             ("GET", ["lab", "gate-list.js"]) => Route::Asset("lab/gate-list.js"),
+            ("GET", ["lab", "technical-state.js"]) => Route::Asset("lab/technical-state.js"),
+            ("GET", ["lab", "wallet-connection-state.js"]) => Route::Asset("lab/wallet-connection-state.js"),
+            // The mainnet page. Same fixed-name discipline as the Lab.
+            ("GET", ["mainnet"]) => Route::Asset("mainnet/index.html"),
+            ("GET", ["mainnet", "mainnet.css"]) => Route::Asset("mainnet/mainnet.css"),
+            ("GET", ["mainnet", "mainnet.js"]) => Route::Asset("mainnet/mainnet.js"),
             ("GET", ["wallet", "status"]) => Route::WalletStatus,
             ("GET", ["gate", id]) => Route::Gate(id),
             ("POST", ["gate", id, "challenge"]) => Route::Challenge(id),
@@ -174,6 +180,7 @@ impl<'a> Route<'a> {
             ("GET", ["js", "ghost", "provider.js"]) => Route::Asset("js/ghost/provider.js"),
             ("GET", ["js", "ghost", "ghost-gate.js"]) => Route::Asset("js/ghost/ghost-gate.js"),
             ("GET", ["js", "ghost", "test.js"]) => Route::Asset("js/ghost/test.js"),
+            ("GET", ["js", "ghost", "matrix-edges.js"]) => Route::Asset("js/ghost/matrix-edges.js"),
             ("GET", ["vendor", "tari-connector.js"]) => Route::Asset("vendor/tari-connector.js"),
             ("GET", ["vendor", "tari-dapp.d.ts"]) => Route::Asset("vendor/tari-dapp.d.ts"),
             // The Telegram join flow, served same-origin so the credential flow works.

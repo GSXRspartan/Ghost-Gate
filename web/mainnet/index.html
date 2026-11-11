@@ -3,308 +3,140 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-    <title>Ghost Gate — Mainnet Preview</title>
-    <meta name="description" content="Ghost Gate mainnet preview: threshold-privacy verification for Ootle mainnet. Admissions not yet enabled — verification launches with Tari mainnet.">
+    <title>Ghost Gate — Mainnet</title>
+    <meta name="description" content="Ghost Gate on Tari Ootle mainnet: prove a minimum threshold without disclosing your balance. Admissions not yet enabled.">
     <meta name="referrer" content="no-referrer">
-    <link rel="icon" href="data:,">
+    <!-- The Privacy Lab stylesheet IS the Ghost Gate design system. The mainnet sheet below
+         adds only the gold mainnet designation on top of it; it redefines nothing else. -->
+    <link rel="stylesheet" href="/lab/lab.css">
     <link rel="stylesheet" href="/mainnet/mainnet.css">
+    <link rel="icon" href="data:,">
 </head>
 <body>
+<div id="matrix-edges" aria-hidden="true"></div>
 
-<!-- Preview state banner — removed when mainnet admissions are enabled -->
-<div class="preview-banner" role="alert" aria-live="polite">
-    <span class="dot" aria-hidden="true"></span>
-    <span>MAINNET PREVIEW — ADMISSIONS NOT YET ENABLED</span>
-</div>
-
-<div id="root">
+<div id="lab-root">
 
     <header class="masthead">
         <div>
-            <h1>
-                <span class="gg">GHOST GATE</span>
-                <span aria-hidden="true"> · </span>MAINNET
-                <span class="net-badge" aria-label="network byte zero">0x00</span>
-            </h1>
-            <div class="tagline">Threshold privacy on Tari Ootle mainnet. Prove enough. Reveal less.</div>
+            <h1><span class="gg">GHOST GATE</span> · <span class="mainnet-word">MAINNET</span></h1>
+            <div class="tagline">Prove enough. Reveal less.</div>
         </div>
-        <nav aria-label="Site navigation">
-            <a href="/lab" class="lab" aria-label="Go to Esmeralda Test Lab">← TEST LAB</a>
-            <a href="https://tari.com" rel="noopener noreferrer" aria-label="Tari website">TARI.COM</a>
+        <nav>
+            <span class="mode-badge preview"><span class="dot"></span><span>PREVIEW</span></span>
+            <div class="view-switch" role="tablist" aria-label="Network">
+                <button id="view-lab" role="tab" aria-selected="false" onclick="location.href='/lab'">TEST LAB</button>
+                <button id="view-mainnet" role="tab" aria-selected="true">MAINNET</button>
+            </div>
         </nav>
     </header>
 
-    <!-- System status pills -->
-    <div class="status-strip" role="status" aria-label="Mainnet system status">
-        <span class="pill gold" id="pill-network">
-            <span class="dot" aria-hidden="true"></span>
-            <span class="k">NETWORK</span>
-            <span class="v">mainnet (0x00)</span>
-        </span>
-        <span class="pill" id="pill-bridge">
-            <span class="dot" aria-hidden="true"></span>
-            <span class="k">BRIDGE</span>
-            <span class="v">checking…</span>
-        </span>
-        <span class="pill warn" id="pill-admissions">
-            <span class="dot" aria-hidden="true"></span>
-            <span class="k">ADMISSIONS</span>
-            <span class="v">disabled — preview</span>
-        </span>
-        <span class="pill warn">
-            <span class="dot" aria-hidden="true"></span>
-            <span class="k">MAINNET LAUNCH</span>
-            <span class="v">pending</span>
-        </span>
+    <!-- Same honest-pill contract as the Lab: configuration is not health. -->
+    <div class="status-strip" id="status-strip" role="status" aria-label="System status">
+        <span class="pill gold" id="pill-network"><span class="dot"></span><span class="k">NETWORK</span><span class="v">mainnet 0x00</span></span>
+        <span class="pill" id="pill-bridge"><span class="dot"></span><span class="k">BRIDGE</span><span class="v" id="pill-bridge-v">checking…</span></span>
+        <span class="pill" id="pill-indexer"><span class="dot"></span><span class="k">INDEXER</span><span class="v" id="pill-indexer-v">not published</span></span>
+        <span class="pill warn" id="pill-admissions"><span class="dot"></span><span class="k">ADMISSIONS</span><span class="v">disabled</span></span>
+        <span class="pill" id="pill-cohort"><span class="dot"></span><span class="k">COHORT</span><span class="v">v0.42 → v0.52</span></span>
+        <span class="pill" id="pill-gates"><span class="dot"></span><span class="k">GATES</span><span class="v">0 published</span></span>
     </div>
 
-    <!-- Wallet provider sections -->
-    <div class="dash-grid">
+    <p class="mainnet-banner" role="alert">
+        MAINNET PREVIEW — ADMISSIONS NOT YET ENABLED. No wallet connection is requested on this page and no access is granted.
+    </p>
 
-        <!-- Ootle L2 / TARI / Sapient -->
-        <section class="card" aria-labelledby="l2-heading">
-            <h2 id="l2-heading"><span class="n" aria-hidden="true">01</span>Ootle L2 (TARI)</h2>
-            <p class="sub">Credential-mode threshold proof on Ootle Layer 2. Proves a minimum TARI balance without disclosing the amount held.</p>
+    <main class="dash">
+        <div class="dash-grid">
 
-            <div class="wallet-section" aria-label="Sapient wallet status">
-                <div class="wallet-section-head">
-                    <span class="wname">Sapient</span>
-                    <span class="wnet">ootle-l2 · mainnet</span>
-                    <span class="wallet-status pending">pending mainnet</span>
-                </div>
-                <p class="wallet-desc">
-                    Browser extension wallet for Ootle Layer 2. Supported proof mode: <strong>credential</strong> (minimum-value promise, single-output substate commitment).
-                </p>
-                <div class="wallet-facts">
-                    <span class="k">EXTENSION</span>
-                    <span class="v" id="sapient-status">checking…</span>
-                    <span class="k">NETWORK</span>
-                    <span class="v">mainnet (0x00) — not yet live</span>
-                    <span class="k">PROOF MODE</span>
-                    <span class="v ok">credential (ready when mainnet launches)</span>
-                    <span class="k">RESOURCE</span>
-                    <span class="v warn">mainnet TARI resource address not yet published</span>
-                    <span class="k">THRESHOLD</span>
-                    <span class="v warn">gate policy pending administrator configuration</span>
-                    <span class="k">SDK</span>
-                    <span class="v">requires Ootle ≥ v0.52.0 (tari_template_lib ≥ 0.38)</span>
-                </div>
+            <div class="col-main">
+
+                <section class="card" id="l2-card">
+                    <h2><span class="n">01</span>Ootle L2 — TARI</h2>
+                    <p class="sub">Credential-mode threshold proof. The gate learns a lower bound, never an amount — the same verification the Test Lab runs today on Esmeralda.</p>
+
+                    <dl class="technical-facts">
+                        <dt>Wallet</dt><dd>Sapient <span class="badge gold">mainnet pending</span></dd>
+                        <dt>Extension</dt><dd id="sapient-status">checking…</dd>
+                        <dt>Proof mode</dt><dd>credential — minimum-value promise, single output</dd>
+                        <dt>Resource</dt><dd class="unpublished">mainnet TARI resource address not yet published</dd>
+                        <dt>Threshold</dt><dd class="unpublished">awaiting administrator gate policy</dd>
+                        <dt>Required SDK</dt><dd>Ootle ≥ v0.52.0</dd>
+                    </dl>
+
+                    <p class="sub">Verification runs server-side against the indexer. Ownership is proven by a signature over a challenge this bridge minted; an ownership signature alone is never treated as a balance.</p>
+                </section>
+
+                <section class="card" id="l1-card">
+                    <h2><span class="n">02</span>Minotari L1 — XTM</h2>
+                    <p class="sub">L1 balance verification through GGBP-1. The proof capability this requires does not yet exist in the wallet, so the method is stated as unavailable rather than offered.</p>
+
+                    <dl class="technical-facts">
+                        <dt>Wallet</dt><dd>Tari Universe <span class="badge bad">unavailable</span></dd>
+                        <dt>Context</dt><dd id="universe-status">checking…</dd>
+                        <dt>Required version</dt><dd>≥ v1.6.23 (tari-ootle v0.52.0)</dd>
+                        <dt>GGBP-1 proof API</dt><dd class="unpublished">not implemented — wallet-internal work outstanding</dd>
+                        <dt>dApp bridge</dt><dd>compatible — tari-dapp-bridge/1</dd>
+                        <dt>Iframe embedding</dt><dd>permitted</dd>
+                    </dl>
+
+                    <p class="sub">The bridge protocol and embedding both work. What is missing is a wallet-side capability to produce an L1 balance proof; until it ships, no L1 gate can be published.</p>
+                </section>
+
+                <section class="card" id="compat-card">
+                    <h2><span class="n">03</span>Protocol compatibility</h2>
+                    <p class="sub">Changes between this build's Ootle cohort (v0.42.0) and the latest release (v0.52.0, 2026-11-09). Only the marked rows require Ghost Gate code changes.</p>
+                    <ul class="tg-facts compat-list">
+                        <li><b>v0.48</b> — transactions moved to sr25519 signing. <span class="flag">affects the wallet signing path</span></li>
+                        <li><b>v0.49</b> — fleet-wide reset; Esmeralda L2 state wiped. <span class="flag">testnet gate must be re-published</span></li>
+                        <li><b>v0.50</b> — template definitions moved to V2; mainnet settings ship in the binary. <span class="flag">template rebuild under review</span></li>
+                        <li><b>v0.51</b> — <code>fee_claim_public_key</code> and walletd permission changes. <span class="flag">affects the walletd client</span></li>
+                        <li><b>v0.52</b> — ClaimBurn yields a revealed TARI bucket. <span class="ok-note">no effect — Ghost Gate does not use ClaimBurn</span></li>
+                    </ul>
+                </section>
+
             </div>
 
-            <div class="wallet-section" aria-label="Walletd status">
-                <div class="wallet-section-head">
-                    <span class="wname">walletd</span>
-                    <span class="wnet">ootle-l2 · local daemon</span>
-                    <span class="wallet-status pending">local daemon</span>
-                </div>
-                <p class="wallet-desc">
-                    Local wallet daemon with direct indexer access. Requires separate setup. Used for the administrator's gate publishing workflow, not the visitor proof flow.
-                </p>
-                <div class="wallet-facts">
-                    <span class="k">BINARY</span>
-                    <span class="v warn">mainnet walletd binary not yet published</span>
-                    <span class="k">ENDPOINT</span>
-                    <span class="v warn">mainnet indexer endpoint TBD</span>
-                    <span class="k">UPGRADE</span>
-                    <span class="v">v0.47 → v0.52 required (sr25519 signing, template V2)</span>
-                </div>
-            </div>
-        </section>
+            <aside class="col-side">
 
-        <!-- Minotari L1 / XTM / Tari Universe -->
-        <section class="card" aria-labelledby="l1-heading">
-            <h2 id="l1-heading"><span class="n" aria-hidden="true">02</span>Minotari L1 (XTM)</h2>
-            <p class="sub">L1 balance verification via GGBP-1 (Ghost Gate Balance Protocol). Proves Minotari holdings without disclosing the exact amount. Proof implementation is not yet available.</p>
+                <section class="card" id="blockers-card">
+                    <h2><span class="n">04</span>What is blocking admission</h2>
+                    <p class="sub">Open implementation work, not accepted limitations.</p>
+                    <ul class="tg-facts">
+                        <li><b>Mainnet TARI resource address</b> — not published. An Esmeralda address must never be substituted.</li>
+                        <li><b>Cohort upgrade v0.42 → v0.52</b> — sr25519 signing and template V2 are breaking.</li>
+                        <li><b>Mainnet indexer endpoint</b> — not published; the SDK's default throws for mainnet.</li>
+                        <li><b>Telegram identity binding</b> — bot-to-bridge transport, durable receipts and admin isolation.</li>
+                        <li><b>End-to-end admission test</b> — required against real mainnet evidence before activation.</li>
+                    </ul>
+                </section>
 
-            <div class="wallet-section" aria-label="Tari Universe status">
-                <div class="wallet-section-head">
-                    <span class="wname">Tari Universe</span>
-                    <span class="wnet">minotari-l1 · mainnet</span>
-                    <span class="wallet-status blocked">GGBP-1 not available</span>
-                </div>
-                <p class="wallet-desc">
-                    Desktop application with integrated Minotari L1 and Ootle L2 wallets. Ghost Gate uses the GGBP-1 protocol for L1 proof (balance floor, no exact amount). The required proof API is not yet implemented in Tari Universe.
-                </p>
-                <div class="wallet-facts">
-                    <span class="k">REQUIRED VERSION</span>
-                    <span class="v">≥ v1.6.23 (tari-ootle v0.52.0)</span>
-                    <span class="k">GGBP-1 PROOF API</span>
-                    <span class="v bad">not implemented — wallet-internal work outstanding</span>
-                    <span class="k">DAPP BRIDGE</span>
-                    <span class="v ok">compatible (tari-dapp-bridge/1 protocol match)</span>
-                    <span class="k">IFRAME EMBEDDING</span>
-                    <span class="v ok">permitted by ghost-gate Cloudflare worker</span>
-                    <span class="k">L2 ACCOUNT</span>
-                    <span class="v warn">requires funded L2 account (new on mainnet)</span>
-                    <span class="k">BLOCKER</span>
-                    <span class="v bad">GGBP-1 proof capability disabled in Tari Universe</span>
-                </div>
-            </div>
+                <section class="card" id="status-card">
+                    <h2><span class="n">05</span>Activation status</h2>
+                    <p class="sub">Each stage needs separate authorization.</p>
+                    <dl class="technical-facts">
+                        <dt>Preview page</dt><dd class="go">published</dd>
+                        <dt>Cohort upgrade</dt><dd class="pending">in progress</dd>
+                        <dt>Gate policy</dt><dd class="blocked">blocked — no resource address</dd>
+                        <dt>Credential admission</dt><dd class="blocked">blocked</dd>
+                        <dt>Telegram admission</dt><dd class="blocked">blocked</dd>
+                    </dl>
+                    <p class="sub" style="margin-bottom:0">The Esmeralda Test Lab is unaffected and continues to run the full verification flow.</p>
+                </section>
 
-            <div class="change-block note" style="margin-top:0.9rem">
-                <strong>What this means for mainnet</strong>
-                <p>L1 (XTM/Minotari) proof support requires GGBP-1 to be implemented inside Tari Universe as a wallet-internal capability. The bridge protocol and iframe embedding work correctly. When GGBP-1 ships, the mainnet page will be updated and a new admission policy published.</p>
-            </div>
-        </section>
-
-        <!-- Version compatibility matrix -->
-        <section class="card full" aria-labelledby="compat-heading">
-            <h2 id="compat-heading"><span class="n" aria-hidden="true">03</span>Compatibility Matrix — v0.42 → v0.52</h2>
-            <p class="sub">Breaking and significant changes between Ghost Gate's current Ootle cohort (v0.42.0) and the latest compatible release (v0.52.0, 2026-11-09). Items that require Ghost Gate code changes are marked.</p>
-
-            <table class="compat-table" aria-label="Ootle compatibility changes">
-                <thead>
-                    <tr>
-                        <th>Release</th>
-                        <th>Change</th>
-                        <th>Affects Ghost Gate</th>
-                        <th>Action Required</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <tr>
-                        <td>v0.48.0</td>
-                        <td>Transactions moved to standard sr25519 signing. All wallets, SDKs, ootle.ts, ootle-go, ootle-py and the Ledger app must upgrade.</td>
-                        <td class="warn">YES — wallet signing path</td>
-                        <td>Upgrade to <code>_ootle-v052</code> cohort. Rebuild ghost-gate-wallet and ghost-gate-verifier crates. Confirm walletd signing compatibility.</td>
-                    </tr>
-                    <tr>
-                        <td>v0.49.x</td>
-                        <td>Fleet-wide reset required (network, indexer, wallets). Testnet reset wipes all Esmeralda L2 state.</td>
-                        <td class="warn">YES — testnet state</td>
-                        <td>Re-create Esmeralda gate after reset. Re-seed admin registry. Re-verify existing test outputs against reset chain.</td>
-                    </tr>
-                    <tr>
-                        <td>v0.50.0</td>
-                        <td>Template definitions moved to V2. Templates must be rebuilt against <code>tari_template_lib ≥ 0.38</code>. MainNet settings (genesis council key) ship in the binary.</td>
-                        <td class="warn">YES — template build</td>
-                        <td>Rebuild ghost_gate template in <code>templates/ghost_gate</code> against ootle v0.50+ workspace. Update pinned cohort path in Cargo.toml.</td>
-                    </tr>
-                    <tr>
-                        <td>v0.50.0</td>
-                        <td>Indexer now indexes burnt UTXO substates when promoting shard snapshots. Dry-run lists upgradable components.</td>
-                        <td class="dim">minor</td>
-                        <td>No code change. Verify indexer CBOR substate response format unchanged for Ghost Gate's credential verifier.</td>
-                    </tr>
-                    <tr>
-                        <td>v0.51.0</td>
-                        <td><code>fee_claim_public_key</code> requirement and walletd permission changes.</td>
-                        <td class="warn">YES — walletd client</td>
-                        <td>Update ghost-gate-walletd client types if ghost-gate-bridge calls affected walletd RPC methods. Verify token auth flow.</td>
-                    </tr>
-                    <tr>
-                        <td>v0.52.0</td>
-                        <td><code>Instruction::ClaimBurn</code> drops <code>output_data</code>; <code>TransactionBuilder::claim_burn</code> takes only the proof; claims produce a revealed TARI bucket. Wallets and validators must upgrade together.</td>
-                        <td class="dim">no (ClaimBurn unused)</td>
-                        <td>No change needed unless Ghost Gate adds L1→L2 burn flows in future.</td>
-                    </tr>
-                    <tr>
-                        <td>v0.52.0</td>
-                        <td>Consensus fix: avoid orphan Down on failed <code>update_in_place</code>; guard version overflow in ChangeLog.</td>
-                        <td class="dim">no (network only)</td>
-                        <td>No code change required. Benefit from improved consensus stability.</td>
-                    </tr>
-                    <tr>
-                        <td>ootle.ts v0.14.0</td>
-                        <td>TypeScript SDK upgraded to Ootle v0.50.0. <code>Network.MainNet = 0x00</code> enum value. <code>defaultIndexerUrl</code> throws for mainnet (mainnet indexer URL not yet set).</td>
-                        <td class="warn">YES — TS bindings</td>
-                        <td>Update <code>web/vendor/tari-connector.js</code> if it uses ootle.ts directly. Confirm mainnet indexer URL when published by Tari Labs.</td>
-                    </tr>
-                </tbody>
-            </table>
-
-            <div class="change-block" style="margin-top:1rem">
-                <strong>Upgrade path summary</strong>
-                <p>The minimum safe upgrade for mainnet is: pin to an <code>_ootle-v052-ghost-gate</code> cohort, rebuild the ghost_gate template with <code>tari_template_lib 0.38</code>, update walletd client types for v0.51+ permission changes, confirm sr25519 signing round-trips with the mainnet Sapient extension, and populate mainnet indexer/resource addresses once published. The ClaimBurn change does not affect Ghost Gate. Full rebuild and test suite must run against the new cohort before any mainnet deployment.</p>
-            </div>
-        </section>
-
-        <!-- Outstanding blockers -->
-        <section class="card" aria-labelledby="blockers-heading">
-            <h2 id="blockers-heading"><span class="n" aria-hidden="true">04</span>Mainnet Admission Blockers</h2>
-            <p class="sub">The following must be resolved before mainnet admissions can be enabled. These are implementation tasks, not accepted limitations.</p>
-
-            <ul class="blockers" aria-label="Mainnet admission blockers">
-                <li>
-                    <div>
-                        <strong>Mainnet resource address (TARI)</strong>
-                        <p>The on-chain resource address for TARI on Ootle mainnet has not been published. The gate policy cannot be configured without it. Do not substitute an Esmeralda testnet address.</p>
-                    </div>
-                </li>
-                <li>
-                    <div>
-                        <strong>Ootle cohort upgrade (v0.42 → v0.52)</strong>
-                        <p>Ghost Gate's Rust workspace pins to the v0.42.0 Ootle tree. sr25519 signing (v0.48) and template V2 (v0.50) are breaking changes. The upgrade requires a new cohort checkout, template rebuild, walletd client update, and full test suite pass.</p>
-                    </div>
-                </li>
-                <li>
-                    <div>
-                        <strong>Mainnet indexer and walletd endpoints</strong>
-                        <p>The mainnet Ootle indexer URL and walletd binary/endpoint are not yet published by Tari Labs. ootle.ts v0.14.0 notes that <code>defaultIndexerUrl</code> throws for mainnet. The bridge configuration requires these before any proof attempt.</p>
-                    </div>
-                </li>
-                <li class="warn">
-                    <div>
-                        <strong>M3 High security findings (identity binding, restart recovery, admin isolation)</strong>
-                        <p>Three unresolved High findings documented in <code>docs/SECURITY_M3_REVIEW_STATUS.md</code> must be resolved before Telegram admission can be enabled on any network, including mainnet. These affect all admission paths, not only Esmeralda.</p>
-                    </div>
-                </li>
-                <li class="warn">
-                    <div>
-                        <strong>Telegram admission testing against mainnet infrastructure</strong>
-                        <p>End-to-end admission testing requires a live mainnet wallet producing an authenticated credential proof against a real mainnet gate. No synthetic shortcut is acceptable for the final pre-activation check.</p>
-                    </div>
-                </li>
-            </ul>
-        </section>
-
-        <!-- Go/No-Go verdicts -->
-        <section class="card" aria-labelledby="verdict-heading">
-            <h2 id="verdict-heading"><span class="n" aria-hidden="true">05</span>GO / NO-GO Status</h2>
-            <p class="sub">Current readiness for each stage of mainnet activation. Each item requires explicit authorization before proceeding.</p>
-
-            <div class="wallet-facts" style="margin-bottom:0.8rem">
-                <span class="k">PUBLISHING PREVIEW PAGE</span>
-                <span class="v ok">GO — static page, admissions disabled, no live admission path exposed</span>
-                <span class="k">MAINNET COHORT UPGRADE</span>
-                <span class="v warn">PENDING — requires v0.52 checkout and full test pass</span>
-                <span class="k">MAINNET GATE CONFIGURATION</span>
-                <span class="v bad">BLOCKED — mainnet TARI resource address not yet published</span>
-                <span class="k">MAINNET ADMISSION (CREDENTIAL PROOF)</span>
-                <span class="v bad">BLOCKED — cohort upgrade + resource address + M3 fixes all required</span>
-                <span class="k">MAINNET TELEGRAM ADMISSION</span>
-                <span class="v bad">BLOCKED — M3 High findings unresolved; no live end-to-end test</span>
-                <span class="k">CLOUDFLARE DEPLOYMENT (preview page)</span>
-                <span class="v warn">PENDING — routing prepared, requires explicit deployment authorization</span>
-            </div>
-
-            <div class="verdict-row" role="list">
-                <span class="verdict go" role="listitem">GO: publish preview page</span>
-                <span class="verdict nogo" role="listitem">NO-GO: enable admissions</span>
-                <span class="verdict nogo" role="listitem">NO-GO: Telegram admission</span>
-                <span class="verdict pending" role="listitem">PENDING: cohort upgrade</span>
-            </div>
-        </section>
-
-    </div><!-- /.dash-grid -->
-
-    <!-- Bridge network note (populated by mainnet.js) -->
-    <p id="bridge-network-note" class="lab-footer" style="margin-top:0.9rem; border-top:0; padding-top:0; font-size:0.74rem; color:var(--dim)"></p>
+            </aside>
+        </div>
+    </main>
 
     <footer class="lab-footer">
-        Ghost Gate — Mainnet Preview. Threshold privacy verification for Tari Ootle mainnet.
-        Admissions are disabled until all blockers are resolved and explicit deployment authorization is received.
-        No wallet connection is requested on this page; no access is granted or implied.
+        Ghost Gate — Mainnet. A minimum threshold can be proven without disclosing the amount held; the verifier learns a lower bound, never a balance. Sessions expire and require a fresh proof.
         <br><br>
-        Network: Ootle mainnet (0x00) · Latest Ootle: v0.52.0 (2026-11-09) · Latest Tari Universe: v1.6.23 ·
-        Ghost Gate cohort: v0.42.0 (upgrade to v0.52 required for mainnet)
+        Mainnet admissions are disabled until the blockers above are closed and activation is explicitly authorized. Gate configuration is managed through the private administrator and cannot be changed from this page.
         <br><br>
-        <a href="/lab">← Esmeralda Test Lab</a> ·
-        <a href="https://github.com/tari-project/tari-ootle/releases" rel="noopener noreferrer">Ootle releases</a>
+        <a href="/lab">← Esmeralda Test Lab</a>
+        <span id="version-line"></span>
     </footer>
 
-</div><!-- /#root -->
-
+</div>
 <script type="module" src="/mainnet/mainnet.js"></script>
 </body>
 </html>

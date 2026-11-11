@@ -1075,15 +1075,25 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                 | "js/ghost/provider.js"
                 | "js/ghost/ghost-gate.js"
                 | "js/ghost/test.js"
+                // The digital rain, shared by the Lab and the mainnet page.
+                | "js/ghost/matrix-edges.js"
                 | "vendor/tari-connector.js"
                 | "vendor/tari-dapp.d.ts"
                 | "telegram/join.html"
                 | "telegram/claim.js"
-                // The Privacy Lab page and its two assets. A fixed set, like every other asset:
-                // there is no dynamic path under /lab, only the three files the Lab actually uses.
+                // The Privacy Lab page and its assets. A fixed set, like every other asset:
+                // there is no dynamic path under /lab, only the files the Lab actually loads.
+                // The two state modules are imported by lab.js; without them the Lab's module
+                // graph fails to load when the bridge serves the page itself.
                 | "lab/index.html"
                 | "lab/lab.css"
                 | "lab/lab.js"
+                | "lab/technical-state.js"
+                | "lab/wallet-connection-state.js"
+                // The mainnet page. It reuses the Lab stylesheet and adds one accent sheet.
+                | "mainnet/index.html"
+                | "mainnet/mainnet.css"
+                | "mainnet/mainnet.js"
         ) {
             return Response::error(404, "GG: no such asset");
         }
@@ -1098,8 +1108,8 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             Ok(bytes) => Response {
                 status: 200,
                 content_type: match name {
-                    "index.html" | "telegram/join.html" | "lab/index.html" => "text/html; charset=utf-8",
-                    "app.css" | "lab/lab.css" => "text/css; charset=utf-8",
+                    "index.html" | "telegram/join.html" | "lab/index.html" | "mainnet/index.html" => "text/html; charset=utf-8",
+                    "app.css" | "lab/lab.css" | "mainnet/mainnet.css" => "text/css; charset=utf-8",
                     // A declaration file is source text, not JavaScript.
                     "vendor/tari-dapp.d.ts" => "text/plain; charset=utf-8",
                     _ => "text/javascript; charset=utf-8",

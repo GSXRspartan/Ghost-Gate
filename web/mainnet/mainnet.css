@@ -1,314 +1,60 @@
-/* GHOST GATE — MAINNET PREVIEW
-   Warm dark palette with gold mainnet identity.
-   Prove enough. Reveal less. */
+/* GHOST GATE — MAINNET accent layer.
+
+   This is NOT a second design system. /lab/lab.css supplies every token, component,
+   animation and breakpoint; this sheet adds only what distinguishes mainnet from the
+   test lab: a gold designation, a gold network pill, and the preview notice.
+   It redefines no lab colour, no layout and no component. */
 
 :root {
-    --ink:       #07090a;
-    --ink-2:     #0e1012;
-    --panel:     #111417;
-    --panel-2:   #161a1e;
-    --line:      #202830;
-    --gold:      #c8a24e;
-    --gold-dim:  #8a6e34;
-    --gold-glow: rgba(200, 162, 78, 0.14);
-    --gold-bg:   rgba(200, 162, 78, 0.07);
-    --amber:     #d47a1a;
-    --amber-dim: #94541a;
-    --green:     #29d47c;
-    --green-dim: #1c8b52;
-    --text:      #d8e0e8;
-    --dim:       #6a7a8a;
-    --warn:      #e0b96a;
-    --bad:       #e06a6a;
-    --mono:      ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    --sans:      -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
-    --radius:    12px;
-    --radius-sm: 8px;
+    --gold: #d8b45a;
+    --gold-dim: #8a6e34;
+    --gold-glow: rgba(216, 180, 90, 0.16);
 }
 
-* { box-sizing: border-box; }
-[hidden] { display: none !important; }
-
-html, body {
-    margin: 0; padding: 0;
-    background: var(--ink);
-    color: var(--text);
-    font-family: var(--sans);
-    -webkit-font-smoothing: antialiased;
-}
-
-body {
-    min-height: 100vh;
-    background-image: radial-gradient(900px 400px at 50% -4%, rgba(200, 162, 78, 0.07), transparent 55%);
-    overflow-x: hidden;
-}
-
-/* ---- preview banner ---- */
-.preview-banner {
-    background: linear-gradient(90deg, rgba(200, 162, 78, 0.12), rgba(200, 162, 78, 0.06), rgba(200, 162, 78, 0.12));
-    border-bottom: 1px solid rgba(200, 162, 78, 0.35);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.75rem;
-    padding: 0.5rem 1rem;
-    text-align: center;
-    position: sticky;
-    top: 0;
-    z-index: 20;
-    backdrop-filter: blur(4px);
-}
-.preview-banner .dot {
-    width: 7px; height: 7px; border-radius: 50%;
-    background: var(--gold);
-    box-shadow: 0 0 7px var(--gold);
-    flex: none;
-}
-.preview-banner span {
-    font: 600 0.75rem var(--mono);
-    letter-spacing: 0.14em;
+/* ---- the MAINNET designation: the single strongest gold in the page ---- */
+.masthead h1 .mainnet-word {
     color: var(--gold);
+    text-shadow: 0 0 10px var(--gold-glow);
 }
 
-/* ---- shell ---- */
-#root { max-width: 980px; margin: 0 auto; padding: 0 1.2rem 3.2rem; }
-
-/* ---- masthead ---- */
-.masthead {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 1rem;
-    padding: 1.2rem 0 0.75rem;
-    flex-wrap: wrap;
-}
-.masthead h1 {
-    margin: 0;
-    font-size: 1.3rem;
-    letter-spacing: 0.14em;
-    font-weight: 600;
-    border-bottom: 1px solid var(--line);
-    padding-bottom: 0.5rem;
-    flex: 1 1 auto; min-width: 220px;
-}
-.masthead h1 .gg { color: var(--gold); }
-.masthead h1 .net-badge {
-    display: inline-flex; align-items: center; gap: 0.4rem;
-    margin-left: 0.6rem;
-    font: 600 0.65rem var(--mono); letter-spacing: 0.12em;
-    background: var(--gold-bg);
-    border: 1px solid rgba(200, 162, 78, 0.4);
-    border-radius: 999px;
-    padding: 0.2rem 0.6rem;
-    color: var(--gold);
-    vertical-align: middle;
-}
-.masthead h1 .net-badge::before {
-    content: ""; width: 5px; height: 5px; border-radius: 50%;
-    background: var(--gold); box-shadow: 0 0 5px var(--gold);
-}
-.masthead .tagline { color: var(--dim); font-size: 0.85rem; letter-spacing: 0.04em; margin-top: 0.25rem; }
-.masthead nav { display: flex; gap: 0.9rem; align-items: center; flex-wrap: wrap; }
-.masthead nav a {
-    color: var(--dim); text-decoration: none;
-    font: 0.8rem var(--mono); letter-spacing: 0.06em;
-    border: 1px solid var(--line); border-radius: 6px;
-    padding: 0.3rem 0.7rem;
-    transition: color 0.15s, border-color 0.15s;
-}
-.masthead nav a:hover { color: var(--gold); border-color: var(--gold-dim); }
-.masthead nav a.lab { color: var(--green-dim); border-color: rgba(41, 212, 124, 0.25); }
-.masthead nav a.lab:hover { color: var(--green); border-color: var(--green-dim); }
-
-/* ---- status strip ---- */
-.status-strip {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-    padding: 0.6rem 0.8rem;
-    margin: 0.6rem 0 1.1rem;
-    background: rgba(14, 16, 18, 0.8);
-    border: 1px solid var(--line);
-    border-radius: var(--radius);
-}
-.pill {
-    display: inline-flex; align-items: center; gap: 0.4rem;
-    font: 0.68rem var(--mono); letter-spacing: 0.05em;
-    padding: 0.28rem 0.65rem;
-    border: 1px solid var(--line); border-radius: 999px;
-    color: var(--dim);
-    background: rgba(7, 9, 10, 0.5);
-    white-space: nowrap;
-}
-.pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dim); flex: none; }
-.pill .k { color: var(--dim); letter-spacing: 0.09em; }
-.pill .v { color: var(--text); }
-.pill.ok .dot { background: var(--green); box-shadow: 0 0 6px var(--green); }
-.pill.ok .v { color: var(--green); }
-.pill.ok { border-color: rgba(41, 212, 124, 0.3); }
+/* ---- network identity pill: gold where the Lab would be green ---- */
+.pill.gold { border-color: rgba(216, 180, 90, 0.35); }
 .pill.gold .dot { background: var(--gold); box-shadow: 0 0 6px var(--gold); }
 .pill.gold .v { color: var(--gold); }
-.pill.gold { border-color: rgba(200, 162, 78, 0.35); }
-.pill.warn .dot { background: var(--warn); }
-.pill.warn .v { color: var(--warn); }
-.pill.warn { border-color: rgba(224, 185, 106, 0.4); }
-.pill.bad .dot { background: var(--bad); }
-.pill.bad .v { color: var(--bad); }
-.pill.bad { border-color: rgba(224, 106, 106, 0.4); }
 
-/* ---- dashboard grid ---- */
-.dash-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 0.9rem;
-    margin-bottom: 0.9rem;
-}
+/* ---- a gold badge variant alongside the Lab's ok/warn/bad ---- */
+.badge.gold { color: var(--gold); border-color: rgba(216, 180, 90, 0.35); }
+.badge.gold::before { background: var(--gold); box-shadow: 0 0 5px var(--gold); }
 
-/* ---- cards ---- */
-.card {
-    background: linear-gradient(180deg, var(--panel) 0%, var(--ink-2) 100%);
-    border: 1px solid var(--line);
-    border-radius: var(--radius);
-    padding: 1.1rem 1.2rem;
-    position: relative;
-}
-.card.full { grid-column: 1 / -1; }
-.card h2 { margin: 0 0 0.3rem; font-size: 0.95rem; letter-spacing: 0.06em; font-weight: 600; }
-.card h2 .n { color: var(--gold); font-family: var(--mono); margin-right: 0.45rem; }
-.card .sub { color: var(--dim); font-size: 0.8rem; margin: 0.15rem 0 0.65rem; line-height: 1.5; }
+/* ---- the network switch: mainnet tab reads gold, lab tab stays green ---- */
+.view-switch button[aria-selected="true"]#view-mainnet { background: var(--gold); color: var(--ink); }
+.view-switch button#view-lab[aria-selected="false"]:hover { color: var(--green); }
 
-/* ---- wallet section ---- */
-.wallet-section {
-    display: flex; flex-direction: column; gap: 0.5rem;
-    padding: 0.8rem 0.9rem;
-    background: rgba(0, 0, 0, 0.3);
-    border: 1px solid var(--line);
+/* ---- preview notice: the Lab's .sim-banner shape, gold instead of amber ---- */
+.mainnet-banner {
+    background: rgba(216, 180, 90, 0.07);
+    border: 1px solid rgba(216, 180, 90, 0.45);
+    border-left: 3px solid var(--gold);
+    color: var(--gold);
     border-radius: var(--radius-sm);
-    margin-top: 0.8rem;
+    padding: 0.55rem 0.8rem;
+    font: 0.76rem var(--mono);
+    letter-spacing: 0.04em;
+    line-height: 1.5;
+    margin: 0 0 0.9rem;
 }
-.wallet-section-head {
-    display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; flex-wrap: wrap;
-}
-.wallet-section-head .wname {
-    font: 600 0.9rem var(--mono); letter-spacing: 0.06em; color: var(--text);
-}
-.wallet-section-head .wnet {
-    font: 0.65rem var(--mono); letter-spacing: 0.08em; color: var(--dim);
-    border: 1px solid var(--line); border-radius: 999px; padding: 0.15rem 0.5rem;
-}
-.wallet-status {
-    display: inline-flex; align-items: center; gap: 0.4rem;
-    font: 0.72rem var(--mono); letter-spacing: 0.06em;
-    padding: 0.28rem 0.7rem; border-radius: 999px;
-    border: 1px solid var(--line); color: var(--dim);
-    white-space: nowrap;
-}
-.wallet-status::before {
-    content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--dim); flex: none;
-}
-.wallet-status.pending { color: var(--warn); border-color: rgba(224, 185, 106, 0.4); }
-.wallet-status.pending::before { background: var(--warn); }
-.wallet-status.blocked { color: var(--bad); border-color: rgba(224, 106, 106, 0.3); }
-.wallet-status.blocked::before { background: var(--bad); }
-.wallet-status.ready { color: var(--green); border-color: rgba(41, 212, 124, 0.3); }
-.wallet-status.ready::before { background: var(--green); box-shadow: 0 0 5px var(--green); }
 
-.wallet-desc { font-size: 0.8rem; color: var(--dim); line-height: 1.5; margin: 0; }
-.wallet-facts {
-    display: grid; grid-template-columns: auto 1fr; gap: 0.3rem 0.9rem;
-    margin-top: 0.4rem;
-    font-size: 0.74rem; line-height: 1.4;
-}
-.wallet-facts .k { color: var(--dim); letter-spacing: 0.08em; white-space: nowrap; }
-.wallet-facts .v { color: var(--text); font-family: var(--mono); word-break: break-word; }
-.wallet-facts .v.ok { color: var(--green); }
-.wallet-facts .v.warn { color: var(--warn); }
-.wallet-facts .v.bad { color: var(--bad); }
+/* ---- mode badge: a preview state next to the Lab's live/sim ---- */
+.mode-badge.preview { color: var(--gold); border-color: rgba(216, 180, 90, 0.4); }
+.mode-badge.preview .dot { background: var(--gold); box-shadow: 0 0 6px var(--gold); }
 
-/* ---- compatibility table ---- */
-.compat-table {
-    width: 100%; border-collapse: collapse;
-    font-size: 0.78rem;
-    margin-top: 0.6rem;
-}
-.compat-table th {
-    text-align: left; font: 600 0.65rem var(--mono); letter-spacing: 0.1em;
-    color: var(--dim); border-bottom: 1px solid var(--line);
-    padding: 0.35rem 0.6rem 0.5rem;
-}
-.compat-table td {
-    padding: 0.45rem 0.6rem; border-bottom: 1px solid rgba(32, 40, 48, 0.6);
-    vertical-align: top; line-height: 1.45;
-}
-.compat-table tr:last-child td { border-bottom: none; }
-.compat-table td:first-child { font-family: var(--mono); font-size: 0.75rem; color: var(--text); white-space: nowrap; }
-.compat-table .ok { color: var(--green); }
-.compat-table .warn { color: var(--warn); }
-.compat-table .bad { color: var(--bad); }
-.compat-table .dim { color: var(--dim); }
+/* ---- fact values that name an unpublished dependency ---- */
+.technical-facts dd.unpublished { color: var(--warn); }
+.technical-facts dd.go { color: var(--green); }
+.technical-facts dd.pending { color: var(--warn); }
+.technical-facts dd.blocked { color: var(--bad); }
 
-/* ---- requirement changes block ---- */
-.change-block {
-    padding: 0.7rem 0.9rem;
-    background: rgba(0, 0, 0, 0.3);
-    border-left: 3px solid var(--gold-dim);
-    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
-    margin: 0.6rem 0;
-}
-.change-block.breaking { border-left-color: var(--bad); }
-.change-block.note { border-left-color: var(--dim); }
-.change-block strong { color: var(--gold); font-size: 0.8rem; letter-spacing: 0.04em; display: block; margin-bottom: 0.3rem; }
-.change-block.breaking strong { color: var(--bad); }
-.change-block.note strong { color: var(--dim); }
-.change-block p { margin: 0; font-size: 0.78rem; color: var(--dim); line-height: 1.5; }
-
-/* ---- blocker list ---- */
-.blockers { list-style: none; margin: 0.5rem 0 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; }
-.blockers li {
-    display: flex; align-items: flex-start; gap: 0.65rem;
-    padding: 0.55rem 0.75rem;
-    border: 1px solid var(--line); border-radius: var(--radius-sm);
-    font-size: 0.78rem; line-height: 1.5;
-    background: rgba(0,0,0,0.2);
-}
-.blockers li::before {
-    content: ""; width: 7px; height: 7px; border-radius: 50%;
-    flex: none; margin-top: 0.3rem;
-    background: var(--bad);
-}
-.blockers li.warn::before { background: var(--warn); }
-.blockers li strong { color: var(--text); display: block; margin-bottom: 0.1rem; }
-.blockers li p { color: var(--dim); margin: 0; }
-
-/* ---- go/no-go chips ---- */
-.verdict-row { display: flex; gap: 0.6rem; flex-wrap: wrap; margin-top: 0.75rem; }
-.verdict {
-    display: inline-flex; align-items: center; gap: 0.45rem;
-    font: 700 0.75rem var(--mono); letter-spacing: 0.1em;
-    padding: 0.4rem 0.9rem; border-radius: 999px;
-    border: 1.5px solid;
-}
-.verdict.go { color: var(--green); border-color: rgba(41, 212, 124, 0.5); background: rgba(41, 212, 124, 0.06); }
-.verdict.go::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 6px var(--green); }
-.verdict.nogo { color: var(--bad); border-color: rgba(224, 106, 106, 0.5); background: rgba(224, 106, 106, 0.05); }
-.verdict.nogo::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--bad); }
-.verdict.pending { color: var(--warn); border-color: rgba(224, 185, 106, 0.5); background: rgba(224, 185, 106, 0.05); }
-.verdict.pending::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--warn); }
-
-/* ---- footer ---- */
-.lab-footer {
-    margin-top: 2.5rem;
-    padding: 1.2rem 0 0;
-    border-top: 1px solid var(--line);
-    color: var(--dim); font-size: 0.74rem; line-height: 1.6;
-}
-.lab-footer a { color: var(--gold-dim); text-decoration: none; }
-.lab-footer a:hover { color: var(--gold); }
-
-/* ---- responsive ---- */
-@media (max-width: 680px) {
-    .dash-grid { grid-template-columns: 1fr; }
-    .masthead { gap: 0.6rem; }
-    .masthead h1 .net-badge { display: none; }
-    #root { padding: 0 1rem 2.4rem; }
-}
+/* ---- compatibility list: reuses .tg-facts, marks the rows needing work ---- */
+.compat-list b { color: var(--text); font-weight: 600; }
+.compat-list .flag { color: var(--warn); }
+.compat-list .ok-note { color: var(--green-dim); }
