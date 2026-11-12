@@ -163,6 +163,13 @@ impl TelegramProofContext {
 
     /// Verify the wallet signature and chain-derived output against the server-owned context.
     /// Replay protection and current-policy checks are mandatory responsibilities of the caller.
+    ///
+    /// `request.session_commitment` is intentionally NOT validated here. The web-bridge flow
+    /// validates it via `policy::validate_prove_request` → `ChallengeBook::check_current`, which
+    /// ties the proof to the browser session that received the challenge. The bot-admission flow
+    /// uses a different binding: `session_id` — a 32-byte random secret the bot issues in a private
+    /// Telegram DM. `bot_admission::verify_proof` verifies that binding before calling this method,
+    /// so the per-output security (gate, substate, nonce, signature, chain state) is complete.
     pub async fn verify(
         &self,
         reader: &impl ChainReader,
