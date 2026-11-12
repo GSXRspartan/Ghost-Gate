@@ -310,6 +310,13 @@ impl CborValue {
         }
     }
 
+    pub fn as_bool(&self) -> Result<bool, CborError> {
+        match self {
+            CborValue::Bool(b) => Ok(*b),
+            other => Err(CborError::UnexpectedType { expected: "bool", found: other.type_name() }),
+        }
+    }
+
     pub fn as_bytes(&self) -> Result<&[u8], CborError> {
         match self {
             CborValue::Bytes(b) => Ok(b),
@@ -335,6 +342,17 @@ impl CborValue {
         match self {
             CborValue::Map(m) => Ok(m),
             other => Err(CborError::UnexpectedType { expected: "map", found: other.type_name() }),
+        }
+    }
+
+    /// An array element by position, `None` when the index is out of range or this is not an
+    /// array. The engine's derived CBOR encodes structs as positional arrays (`#[n(i)]` fields),
+    /// so this is how a reader takes a struct field; a missing index is a shape mismatch the
+    /// reader reports rather than something this method invents a default for.
+    pub fn get_index(&self, index: usize) -> Option<&CborValue> {
+        match self {
+            CborValue::Array(a) => a.get(index),
+            _ => None,
         }
     }
 

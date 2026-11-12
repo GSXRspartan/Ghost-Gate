@@ -1036,6 +1036,7 @@ impl ghost_gate_bridge::ChainReader for FixtureChainReader {
                 minimum_value_promise: min_value,
                 auth_key: Some(auth_key),
                 verified: true,
+                is_frozen: false,
             }),
             None => Err(format!("fixture chain reader: no entry configured for {key}")),
         }

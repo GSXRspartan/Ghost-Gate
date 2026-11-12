@@ -57,7 +57,7 @@ impl ChainReader for IndexerChainReader {
             return Err(format!("{} is not a UTXO substate", address));
         };
         let Some(output) = &utxo.output else {
-            return Err(format!("{} has no output body", address));
+            return Err(format!("{} is burnt: it has no output body", address));
         };
         Ok(UtxoOnChain {
             minimum_value_promise: output.output.minimum_value_promise,
@@ -69,6 +69,7 @@ impl ChainReader for IndexerChainReader {
                 out.copy_from_slice(k.as_bytes());
                 out
             }),
+            is_frozen: utxo.is_frozen,
         })
     }
 }

@@ -230,7 +230,16 @@ pub struct CredentialProofRequest {
 pub struct UtxoOnChain {
     pub minimum_value_promise: u64,
     /// The one-time key authorising a key-path spend, when the auth path is a key path.
+    ///
+    /// `None` covers both a script-only authorisation (`SpendAuthorization::Script`: no key
+    /// exists to prove ownership against) and any authorisation shape this version does not
+    /// recognise; the verifier refuses both as not key-spendable, fail-closed.
     pub auth_key: Option<[u8; 32]>,
+    /// Whether the output is frozen on chain. A frozen UTXO is unspendable by anyone — the
+    /// engine itself refuses to spend it — so its ownership proof, though still valid
+    /// cryptographically, does not demonstrate spendable control. The verifier refuses frozen
+    /// outputs so a gate cannot be passed standing on an output that can never move.
+    pub is_frozen: bool,
     /// Whether the indexer's answer was itself verified against the shard group committee by
     /// merkle proof.
     ///
@@ -288,6 +297,8 @@ pub enum CredentialRefusal {
         "GG: the output's spend authorisation is not a key path, so ownership cannot be proven"
     )]
     NotKeySpendable,
+    #[error("GG: the proof output is frozen on chain and cannot be spent")]
+    Frozen,
     #[error("GG: the indexer answered without a merkle-verified value; credential proofs refuse unverified chain data")]
     UnverifiedChainData,
     #[error("GG: the ownership signature does not verify against the output's on-chain key")]
@@ -360,6 +371,12 @@ impl CredentialVerifier<'_> {
         // answer is not evidence and the proof is refused. See `UtxoOnChain::verified`.
         if !on_chain.verified {
             return Err(CredentialRefusal::UnverifiedChainData);
+        }
+
+        // Frozen on chain: the engine refuses to spend it, so an ownership proof against its key
+        // shows the holder kept a coin that can never move. Not a credential for anything.
+        if on_chain.is_frozen {
+            return Err(CredentialRefusal::Frozen);
         }
 
         if on_chain.minimum_value_promise < self.threshold {
@@ -457,6 +474,7 @@ mod tests {
         auth_key: Option<[u8; 32]>,
         error: Option<String>,
         verified: bool,
+        is_frozen: bool,
     }
 
     impl FixedReader {
@@ -466,6 +484,7 @@ mod tests {
                 promise,
                 auth_key: Some(auth_key),
                 error: None,
+                is_frozen: false,
             }
         }
     }
@@ -479,6 +498,7 @@ mod tests {
                 minimum_value_promise: self.promise,
                 auth_key: self.auth_key,
                 verified: self.verified,
+                is_frozen: self.is_frozen,
             })
         }
     }
@@ -738,6 +758,7 @@ mod tests {
             auth_key: Some(key_bytes(&pk)),
             error: Some("InputSubstateIsDown".into()),
             verified: true,
+            is_frozen: false,
         };
         let v = verifier(&res, 10_000, "9d69d80b");
 
@@ -784,7 +805,7 @@ mod tests {
         let req = request(&res, "9d69d80b", &sk);
         // `auth_key: None` is what a script-only auth path reads as: no key, so no ownership
         // proof can bind to this output.
-        let reader = FixedReader { promise: 50_000, auth_key: None, error: None, verified: true };
+        let reader = FixedReader { promise: 50_000, auth_key: None, error: None, verified: true, is_frozen: false };
         let v = verifier(&res, 10_000, "9d69d80b");
 
         let err = v
@@ -824,11 +845,33 @@ mod tests {
             auth_key: Some(key_bytes(&pk)),
             error: None,
             verified: false,
+            is_frozen: false,
         };
         let v = verifier(&res, 10_000, "9d69d80b");
 
         let err = v.verify(&reader, &req).await.expect_err("unverified chain data must refuse");
         assert!(matches!(err, CredentialRefusal::UnverifiedChainData), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_frozen_output_is_refused_even_when_everything_else_matches() {
+        // A frozen UTXO's ownership signature still verifies cryptographically, but the engine
+        // refuses to spend a frozen output: the holder proves they kept a coin that can never
+        // move. The gate is about spendable control, so a frozen output is not a credential.
+        let res = resource(7);
+        let (sk, pk) = keypair();
+        let req = request(&res, "9d69d80b", &sk);
+        let reader = FixedReader {
+            promise: 50_000,
+            auth_key: Some(key_bytes(&pk)),
+            error: None,
+            verified: true,
+            is_frozen: true,
+        };
+        let v = verifier(&res, 10_000, "9d69d80b");
+
+        let err = v.verify(&reader, &req).await.expect_err("a frozen output must refuse");
+        assert!(matches!(err, CredentialRefusal::Frozen), "{err}");
     }
 
     #[tokio::test]

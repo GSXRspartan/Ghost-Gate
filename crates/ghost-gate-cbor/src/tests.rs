@@ -152,3 +152,22 @@ fn a_tagged_value_decodes_to_its_tag_and_inner_value() {
         other => panic!("expected a tag, got {other:?}"),
     }
 }
+
+#[test]
+fn an_array_field_reads_by_position_and_absence_is_none() {
+    // The engine's derived encodings are positional arrays (`#[n(i)]` fields), so a reader takes
+    // struct fields by index. [10, 20, 30] — index 1 is 20; index 3 is absent, not an error.
+    let bytes = enc(|e| {
+        e.array(3).unwrap();
+        e.u64(10).unwrap();
+        e.u64(20).unwrap();
+        e.u64(30).unwrap();
+    });
+    let decoded = decode_committed_bytes(&bytes, Limits::default()).unwrap();
+    assert_eq!(decoded.value().get_index(1).unwrap().as_u64().unwrap(), 20);
+    assert!(decoded.value().get_index(3).is_none(), "out of range is None, the reader fails closed");
+    // A non-array has no positions at all.
+    let map = enc(|e| { e.map(1).unwrap().str("k").unwrap().u64(1).unwrap(); });
+    let decoded = decode_committed_bytes(&map, Limits::default()).unwrap();
+    assert!(decoded.value().get_index(0).is_none());
+}

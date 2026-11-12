@@ -39,9 +39,13 @@ thiserror = { workspace = true }
 # whose REST renamed `substate` to `state`). Same reqwest line the workspace already pins.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde_json = { workspace = true }
+# CBOR decoding for the v0.53.2+ indexer wire format (PRs #3100/#3101/#3107/#3110).
+ghost-gate-cbor = { path = "../ghost-gate-cbor" }
 
 [dev-dependencies]
 tari_ootle_transaction = { workspace = true }
+# CBOR test fixture construction (same version ghost-gate-cbor uses).
+base64 = "0.22"
 
 [[bin]]
 name = "ghost-gate-bridge"

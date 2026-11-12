@@ -2522,6 +2522,7 @@ mod tests {
                     minimum_value_promise: promise,
                     auth_key: Some(auth_key),
                     verified: true,
+                    is_frozen: false,
                 },
             );
             Self { outputs }

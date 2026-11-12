@@ -327,6 +327,7 @@ mod tests {
                 minimum_value_promise: self.promise,
                 auth_key: self.auth_key,
                 verified: true,
+                is_frozen: false,
             })
         }
     }

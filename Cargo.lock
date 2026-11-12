@@ -3103,7 +3103,9 @@ dependencies = [
 name = "ghost-gate-walletd"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "ghost-gate-bridge",
+ "ghost-gate-cbor",
  "ghost-gate-core",
  "ghost-gate-minotari",
  "ghost-gate-registry",
