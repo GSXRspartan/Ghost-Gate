@@ -128,6 +128,11 @@ pub struct ChallengeIssued {
     pub challenge_nonce: String,
     pub network: u8,
     pub gate_id: String,
+    /// The resource this challenge binds, as the page may need it to name the output when
+    /// signing an EXISTING output (the resume path never ran a shield, so the wallet was
+    /// never told the resource in this page session). Public policy data: the challenge
+    /// already binds it, and the bridge re-checks it against chain state.
+    pub resource: String,
 }
 
 /// Issue the signing challenge for one chosen output.
@@ -151,6 +156,7 @@ pub fn challenge_for(
         challenge_nonce: authorization.context.challenge_nonce.clone(),
         network: authorization.context.network,
         gate_id: authorization.context.gate_id.clone(),
+        resource: authorization.context.resource.clone(),
     })
 }
 
@@ -466,6 +472,74 @@ mod tests {
         assert!(redeem(&mut db, &BOT_KEY, local(), None, &sign_redeem_body(&BOT_KEY, &again), &again).is_err(),
             "an authorization must admit at most one person");
         assert_eq!(db.get(&session).unwrap().state, AuthorizationState::Redeemed);
+    }
+
+    #[tokio::test]
+    async fn a_credential_only_lab_signature_cannot_be_replayed_into_a_telegram_session() {
+        // The M11 Lab path signs `ownership_proof_message(net, res, substate, lab_nonce_hex)`:
+        // the challenge string the lab hands the wallet is the raw nonce hex. The Telegram path
+        // verifies against the domain-separated telegram challenge instead — a DIFFERENT string
+        // even when every other field (network, resource, substate, nonce) is identical. This
+        // test pins that difference: a signature over the lab's string must be refused here,
+        // so a captured credential-only proof cannot open a Telegram admission session.
+        let dir = TestDb::new();
+        let res = resource(9);
+        let policy = policy(&res);
+        let substate = substate_of(&res);
+        let (secret, public) = keypair();
+        let mut db = AuthorizationCoordinator::create_new(&dir.path()).unwrap();
+        db.initialize_bot_event_store().unwrap();
+
+        let session = open_session(&mut db, &policy, 77);
+        let challenge = challenge_for(&mut db, &session, &substate, now()).unwrap();
+
+        // The M11 signature: framed over the RAW NONCE HEX, exactly what the credential-only
+        // Lab flow passes to `tari_signOwnershipChallenge` (ghost-gate.js passes
+        // `challenge.challenge_nonce`, not `challenge.challenge`).
+        let lab_message =
+            ownership_proof_message(challenge.network, &res, &substate, &challenge.challenge_nonce);
+        let lab_signature = SchnorrSignature::<
+            RistrettoPublicKey,
+            RistrettoSecretKey,
+            SchnorrSigChallenge,
+        >::sign(&secret, &lab_message, &mut rng())
+        .unwrap();
+        let request = CredentialProofRequest {
+            gate_id: policy.gate_id.clone(),
+            challenge_nonce: challenge.challenge_nonce.clone(),
+            session_commitment: "11".repeat(32),
+            substate_id: substate.clone(),
+            ownership: OwnershipProof {
+                public_key: hex::encode(key_bytes(&public)),
+                public_nonce: hex::encode(lab_signature.get_public_nonce().as_bytes()),
+                signature: hex::encode(lab_signature.get_signature().as_bytes()),
+            },
+        };
+        let reader = FixedReader { promise: 50_000_000, auth_key: Some(key_bytes(&public)) };
+
+        // The signature is over the wrong message, so the Telegram path refuses it — the
+        // session stays in Created, nothing is marked verified, and the bot cannot redeem.
+        let outcome = verify_proof(&mut db, &reader, &session, &request, now()).await;
+        match outcome {
+            Err(AdmissionError::ProofRejected(reason)) => {
+                assert!(
+                    reason.contains("signature does not verify"),
+                    "the refusal must name the signature, got: {reason}"
+                );
+            },
+            other => panic!("a lab-framed signature must be refused, got: {other:?}"),
+        }
+        assert_eq!(
+            db.get(&session).unwrap().state,
+            AuthorizationState::Created,
+            "a replayed lab signature must not move the session"
+        );
+
+        // The same key signing the TELEGRAM challenge string verifies fine: the refusal above
+        // is about the message, not the holder.
+        let genuine = sign_proof(&res, &substate, &challenge, &secret, &policy.gate_id);
+        let accepted = verify_proof(&mut db, &reader, &session, &genuine, now()).await.unwrap();
+        assert!(accepted.verified);
     }
 
     #[tokio::test]

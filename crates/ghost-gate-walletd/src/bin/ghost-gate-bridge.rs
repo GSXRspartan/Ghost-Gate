@@ -594,13 +594,40 @@ impl Config {
                     .into())
             }
         };
+        // The relying site: the site identity every challenge minted from env gates will carry.
+        // It is server-controlled configuration and it is REQUIRED for env gates — a placeholder
+        // here would mint challenges naming a site the operator never chose, and a default would
+        // silently bind a deployment to a host it does not serve. Refusing startup is the
+        // fail-closed answer. (Registry-backed gates carry their own published site from the
+        // snapshot, so the env var is not consulted there.)
+        let relying_site = if gates_raw.is_empty() {
+            String::new()
+        } else {
+            let site = std::env::var("GG_BRIDGE_RELYING_SITE")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .ok_or_else(|| {
+                    "GG_BRIDGE_RELYING_SITE must name the relying site this bridge's challenges \
+                     bind to (for a local test: http://127.0.0.1:7799); refusing to start with no \
+                     site identity"
+                        .to_string()
+                })?;
+            // The site the challenge names must be a site this bridge actually serves to. If it
+            // were not in the permitted origins, every proof would be refused at the origin check
+            // anyway, so the mismatch is named here — at startup — rather than discovered at the
+            // first proof.
+            origins
+                .permits(Some(&site))
+                .map_err(|e| format!("GG_BRIDGE_RELYING_SITE: {e}"))?;
+            site
+        };
         let mut gates = Vec::new();
         for entry in gates_raw
             .split(',')
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            gates.push(parse_gate(entry)?);
+            gates.push(parse_gate(entry, relying_site.as_bytes())?);
         }
         if gates.is_empty() && !registry_backed {
             return Err("GG_BRIDGE_GATES must name at least one gate".into());
@@ -637,9 +664,13 @@ impl Config {
 /// `id=xtm:threshold_micro:symbol` for a native Minotari L1 gate.
 ///
 /// The L1 form's `xtm:` prefix is what makes the two unambiguous. A threshold there is in
-/// **micro-Minotari**: `1000000000000` is 1,000,000 XTM. A `1_000_000`-shaped XTM figure with
-/// guessed decimal math is exactly the error this format exists to prevent — write base units.
-fn parse_gate(entry: &str) -> Result<(String, GateBinding), String> {
+/// `micro-XTM`: `1000000000000` is 1,000,000 XTM. A `1000000000000`-shaped XTM figure with
+/// guessed decimal math is exactly the error this format exists to prevent.
+///
+/// The `relying_site` bytes go into every challenge this gate mints; the operator sets them
+/// explicitly (GG_BRIDGE_RELYING_SITE) so the placeholder-vs-served-origin mismatch cannot
+/// happen.
+fn parse_gate(entry: &str, relying_site: &[u8]) -> Result<(String, GateBinding), String> {
     let (id, rest) = entry
         .split_once('=')
         .ok_or_else(|| format!("{entry:?} is missing id="))?;
@@ -659,8 +690,14 @@ fn parse_gate(entry: &str) -> Result<(String, GateBinding), String> {
                     .ok()
                     .and_then(|v| u8::from_str_radix(v.trim_start_matches("0x"), 16).ok())
                     .unwrap_or(ghost_gate_core::network::LOCALNET),
-                tari_template_lib_types::MaxBytes::new_checked(b"vip.example".to_vec())
-                    .expect("short"),
+                // Length errors become parse failures, not panics: an operator who sets a site
+                // longer than the wire format allows must see the refusal at startup.
+                tari_template_lib_types::MaxBytes::new_checked(relying_site.to_vec()).ok_or_else(
+                    || {
+                        "GG_BRIDGE_RELYING_SITE exceeds 64 bytes (the challenge wire limit)"
+                            .to_string()
+                    },
+                )?,
                 parts[2..].join(":"),
             ),
         ));
@@ -708,7 +745,10 @@ fn parse_gate(entry: &str) -> Result<(String, GateBinding), String> {
                 .ok()
                 .and_then(|v| u8::from_str_radix(v.trim_start_matches("0x"), 16).ok())
                 .unwrap_or(ghost_gate_core::network::LOCALNET),
-            tari_template_lib_types::MaxBytes::new_checked(b"vip.example".to_vec()).expect("short"),
+            tari_template_lib_types::MaxBytes::new_checked(relying_site.to_vec())
+                .ok_or_else(|| {
+                    "GG_BRIDGE_RELYING_SITE exceeds 64 bytes (the challenge wire limit)".to_string()
+                })?,
             parts[3].parse().map_err(|e| format!("divisibility: {e}"))?,
             parts[4..].join(":"),
         ),
@@ -977,8 +1017,8 @@ where
 /// binary will sign with. The bridge verifies signatures against this key the same way it verifies
 /// real on-chain keys — the fixture only replaces the network round-trip.
 struct FixtureChainReader {
-    // substate_id string → (minimum_value_promise, auth_key_bytes)
-    entries: std::collections::HashMap<String, (u64, [u8; 32])>,
+    // substate_id string → (minimum_value_promise, auth_key_bytes, frozen)
+    entries: std::collections::HashMap<String, (u64, [u8; 32], bool)>,
 }
 
 impl FixtureChainReader {
@@ -989,10 +1029,13 @@ impl FixtureChainReader {
             if entry.is_empty() {
                 continue;
             }
-            let parts: Vec<&str> = entry.splitn(3, ':').collect();
-            if parts.len() != 3 {
+            // Optional 4th field `frozen` models an output the engine has frozen: the same
+            // refusal the live CBOR decoder produces for is_frozen=true (M10), so the e2e
+            // suite can exercise that refusal without a real frozen chain object.
+            let parts: Vec<&str> = entry.splitn(4, ':').collect();
+            if parts.len() < 3 || parts.len() > 4 {
                 return Err(format!(
-                    "each entry must be utxo_addr:auth_key_hex:min_value, got {entry:?}"
+                    "each entry must be utxo_addr:auth_key_hex:min_value[:frozen], got {entry:?}"
                 ));
             }
             let substate_id = parts[0].trim().to_string();
@@ -1006,6 +1049,17 @@ impl FixtureChainReader {
                 .trim()
                 .parse()
                 .map_err(|e| format!("bad min_value in {entry:?}: {e}"))?;
+            let frozen = match parts.len() {
+                3 => false,
+                _ => match parts[3].trim() {
+                    "frozen" => true,
+                    other => {
+                        return Err(format!(
+                            "the optional 4th field must be 'frozen' when present, got {other:?} in {entry:?}"
+                        ))
+                    },
+                },
+            };
             let auth_key_bytes = hex::decode(auth_key_hex)
                 .map_err(|e| format!("bad auth_key hex in {entry:?}: {e}"))?;
             if auth_key_bytes.len() != 32 {
@@ -1016,7 +1070,7 @@ impl FixtureChainReader {
             }
             let mut auth_key = [0u8; 32];
             auth_key.copy_from_slice(&auth_key_bytes);
-            entries.insert(substate_id, (min_value, auth_key));
+            entries.insert(substate_id, (min_value, auth_key, frozen));
         }
         if entries.is_empty() {
             return Err("GG_FIXTURE_UTXO contains no valid entries".into());
@@ -1032,11 +1086,11 @@ impl ghost_gate_bridge::ChainReader for FixtureChainReader {
     ) -> Result<ghost_gate_bridge::UtxoOnChain, String> {
         let key = format!("{address}");
         match self.entries.get(&key) {
-            Some(&(min_value, auth_key)) => Ok(ghost_gate_bridge::UtxoOnChain {
+            Some(&(min_value, auth_key, is_frozen)) => Ok(ghost_gate_bridge::UtxoOnChain {
                 minimum_value_promise: min_value,
                 auth_key: Some(auth_key),
                 verified: true,
-                is_frozen: false,
+                is_frozen,
             }),
             None => Err(format!("fixture chain reader: no entry configured for {key}")),
         }
@@ -1066,5 +1120,64 @@ fn configure_tunnel_support<W, R, X, XR>(
         bridge.hosted_verifier_request_key = req_key;
         bridge.hosted_verifier_response_key = resp_key;
         println!("  hosted verifier adapter: enabled (POST /v1/hosted/verify)");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The relying site is the identity the challenge names, so the operator must set it: the
+    // parser stamps exactly what it is given, and the tests below pin the two gate kinds and the
+    // oversize refusal to the same bytes.
+    const SITE: &[u8] = b"http://127.0.0.1:7799";
+
+    #[test]
+    fn parse_gate_stamps_the_configured_site_on_an_ootle_gate() {
+        let (id, binding) = parse_gate(
+            "esme=:resource_0101010101010101010101010101010101010101010101010101010101010101:100000000:8:ESME",
+            SITE,
+        )
+        .expect("valid ootle gate");
+        assert_eq!(id, "esme");
+        assert_eq!(
+            binding.relying_site.as_slice(),
+            SITE,
+            "an ootle gate must carry the configured relying site, not a placeholder"
+        );
+        assert_eq!(binding.threshold(), 100000000);
+    }
+
+    #[test]
+    fn parse_gate_stamps_the_configured_site_on_an_xtm_gate() {
+        let (id, binding) = parse_gate("xtmg=xtm:1000000000000:ESME", SITE).expect("valid xtm gate");
+        assert_eq!(id, "xtmg");
+        assert_eq!(
+            binding.relying_site.as_slice(),
+            SITE,
+            "an xtm gate must carry the configured relying site, not a placeholder"
+        );
+    }
+
+    #[test]
+    fn parse_gate_refuses_a_site_longer_than_the_wire_limit() {
+        let oversized = vec![b'a'; 65];
+        let err = parse_gate("esme=:resource_0101010101010101010101010101010101010101010101010101010101010101:100000000:8:ESME", &oversized)
+            .expect_err("a site longer than 64 bytes must refuse");
+        assert!(
+            err.contains("exceeds 64 bytes"),
+            "the error must name the wire limit, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_gate_accepts_a_site_exactly_the_wire_limit() {
+        let max = vec![b'a'; 64];
+        let (_, binding) = parse_gate(
+            "esme=:resource_0101010101010101010101010101010101010101010101010101010101010101:100000000:8:ESME",
+            &max,
+        )
+        .expect("a 64-byte site fits");
+        assert_eq!(binding.relying_site.as_slice(), max.as_slice());
     }
 }

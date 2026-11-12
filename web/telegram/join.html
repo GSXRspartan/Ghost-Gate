@@ -16,9 +16,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<!-- Configure the exact bridge HTTPS origin before staging; blank value fails closed. -->
-<!-- <meta name="gg-trusted-bridges" content="https://bridge.your-tunnel-domain.example"> -->
-<!-- gg-trusted-claims is not used in the M6+ bot-session flow (bot auto-redeems). -->
+<!-- The join page trusts exactly two origins, configured HERE (deployment-controlled HTML),
+     never from the join link's query string. Loopback http is accepted only when the PAGE
+     itself is served from http://127.0.0.1 or http://localhost (trusted-url.js), which is the
+     local admission test mode. Production replaces both with the deployed HTTPS origins. -->
+<meta name="gg-trusted-bridges" content="http://127.0.0.1:7799">
+<!-- The bot's claim endpoint: the only route that can redeem a verified session. The bot
+     prints the port it bound (GG_TG_CLAIM_PORT) at startup; keep this in sync with it. -->
+<meta name="gg-trusted-claims" content="http://127.0.0.1:7808">
 <title>Ghost Gate — Telegram verification</title>
 <!-- Same design system as the Privacy Lab, so the verification flow reads as one product. -->
 <link rel="stylesheet" href="/lab/lab.css">

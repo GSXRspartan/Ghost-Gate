@@ -1853,7 +1853,11 @@ async fn run() -> i32 {
 fn configure_admission_bridges() -> Vec<BotAdmissionBridge> {
     let mut bridges: Vec<BotAdmissionBridge> = Vec::new();
     for (prefix, label, page) in &[
-        ("GG_BOT_ESMERALDA", "Esmeralda testnet", "/lab"),
+        // The Esmeralda verify URL must land on the M6+ bot-session page: it is the page that
+        // reads ?bot_session=, signs the Telegram-bound challenge, and posts the claim that
+        // triggers redemption. The Lab deliberately cannot do this — its credential route is
+        // session-free by design (M11: PROOF VERIFIED — SESSION NOT ISSUED).
+        ("GG_BOT_ESMERALDA", "Esmeralda testnet", "/telegram/join"),
         ("GG_BOT_MAINNET",   "Tari mainnet",      "/mainnet"),
     ] {
         let key_hex  = std::env::var(format!("{prefix}_KEY")).unwrap_or_default();

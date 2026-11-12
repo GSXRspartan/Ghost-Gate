@@ -32,7 +32,7 @@ const params = new URLSearchParams(window.location.search);
 const botSession = params.get("bot_session") || "";
 const gate = params.get("gate") || "";
 const configured = name => document.querySelector(`meta[name="${name}"]`)?.content || "";
-const { bridgeBase: trustedBridgeOrigin } = configuredJoinEndpoints({
+const { bridgeBase: trustedBridgeOrigin, claimUrl } = configuredJoinEndpoints({
   bridgeOrigin: configured("gg-trusted-bridges"),
   claimOrigin: configured("gg-trusted-claims"),
   pageOrigin: location.origin,
@@ -125,95 +125,147 @@ async function main() {
 
   $("tg-line").textContent = `${provider.label} found. Fetching the gate's terms…`;
 
-  // The bot's gate parameter selects one exact published gate. Policy (resource, threshold)
-  // comes from the same catalog the Privacy Lab uses — never from the query string.
-  let meta;
-  try {
-    meta = await resolvePublishedGate(gate);
-    if (!meta) throw new Error("not registered");
-  } catch (e) {
-    return fail("The requested gate is not available. Send /join again.", "Gate lookup did not return a published gate.");
-  }
-  const div = Number(meta.divisibility ?? 0);
-  $("tg-line").textContent =
-    `Gate ${meta.gateId}: needs at least ${meta.thresholdRaw} raw units` +
-    (formatAmount(meta.thresholdRaw, div) ? ` (${formatAmount(meta.thresholdRaw, div)})` : "") +
-    `. Approve the proof output in your wallet…`;
+  // A previously-shielded qualifying output STAYS qualifying: resuming signs over it and
+  // never moves funds. The id comes from the wallet's own shield response (persisted as
+  // "gg-last-output" when this browser last shielded) — never from a balance display,
+  // which proves nothing about any single output's existence. A malformed id is treated
+  // as absent: the fresh path below is the honest fallback.
+  const remembered = (() => {
+    try { return (localStorage.getItem("gg-last-output") || "").trim(); } catch { return ""; }
+  })();
+  const resumeSubstate = /^utxo_[0-9a-f]{64}_[0-9a-f]{64}$/i.test(remembered) ? remembered : "";
 
-  try {
-    // Step 1: build the credential output. The substateId is needed to bind the challenge.
-    step("output", "active");
-    $("tg-line").textContent = "Approve the proof output in your wallet — it is public and permanent.";
-    const built = await provider.approveAndBuildProof("credential", {
-      resourceAddress: meta.resourceAddress,
-      amount: String(BigInt(meta.thresholdRaw)),
-      minimumValuePromise: String(BigInt(meta.thresholdRaw)),
-      maxFee: "50000",
-    });
+  let substateId;
+  if (resumeSubstate) {
+    // RESUME path: no shield, no spend. The bridge binds the challenge to the EXISTING
+    // output and re-checks existence, unspent status, floor and ownership against chain
+    // state — so a stale or spent id fails here exactly as a fresh one would.
     step("output", "done");
-
-    // Step 2: request a signing challenge bound to the specific output the wallet chose.
-    step("challenge", "active");
-    $("tg-line").textContent = "Requesting a challenge from the bridge…";
-    const ch = await post(
-      `${trustedBridgeOrigin}/v1/bot/sessions/${encodeURIComponent(botSession)}/challenge`,
-      { substate_id: built.substateId },
-    );
-    step("challenge", "done");
-
-    // Step 3: sign the bridge's challenge string in the wallet.
-    step("sign", "active");
-    $("tg-line").textContent = "Sign the gate's challenge in your wallet.";
-    // ch.challenge is the full domain-separated challenge string from the bridge. Pass it
-    // unchanged — the bridge re-derives the same string when verifying the signature.
-    const ownership = await provider.signChallenge(built.substateId, ch.challenge);
-    step("sign", "done");
-
-    // Step 4: submit the proof to the bridge for chain verification.
-    step("verify", "active");
-    $("tg-line").textContent = "The bridge is verifying ownership against chain state…";
-    const proofResult = await post(
-      `${trustedBridgeOrigin}/v1/bot/sessions/${encodeURIComponent(botSession)}/proof`,
-      {
-        gate_id: ch.gate_id,
-        challenge_nonce: ch.challenge_nonce,
-        // session_commitment is a required wire field but is not validated in the bot-session
-        // path: the session identity is carried by the session id, not by a per-challenge
-        // commitment. Any 64-char hex value satisfies the wire schema.
-        session_commitment: "00".repeat(32),
-        substate_id: built.substateId,
-        public_key: ownership.publicKey,
-        public_nonce: ownership.publicNonce,
-        signature: ownership.signature,
-      },
-    );
-    if (!proofResult.verified) {
-      throw new Error("the bridge did not verify this proof");
-    }
-    step("verify", "done");
-
-    // The bot polls the bridge and calls redeem once it sees the Verified session.
-    // No separate claim step is needed on this page.
-    step("claim", "done");
     $("tg-line").textContent =
-      "Your proof was verified — the bot will approve your Telegram join request shortly. " +
-      "Check Telegram for the bot's confirmation.";
+      "Using your existing verified output — nothing new is spent. Approve only the signature when the wallet asks.";
+    substateId = resumeSubstate;
+  } else {
+    // The bot's gate parameter selects one exact published gate. Policy (resource, threshold)
+    // comes from the same catalog the Privacy Lab uses — never from the query string.
+    let meta;
+    try {
+      meta = await resolvePublishedGate(gate);
+      if (!meta) throw new Error("not registered");
+    } catch (e) {
+      return fail("The requested gate is not available. Send /join again.", "Gate lookup did not return a published gate.");
+    }
+    const div = Number(meta.divisibility ?? 0);
+    $("tg-line").textContent =
+      `Gate ${meta.gateId}: needs at least ${meta.thresholdRaw} raw units` +
+      (formatAmount(meta.thresholdRaw, div) ? ` (${formatAmount(meta.thresholdRaw, div)})` : "") +
+      `. Approve the proof output in your wallet…`;
+
+    try {
+      // Step 1: build the credential output. The substateId is needed to bind the challenge.
+      step("output", "active");
+      $("tg-line").textContent = "Approve the proof output in your wallet — it is public and permanent.";
+      const built = await provider.approveAndBuildProof("credential", {
+        resourceAddress: meta.resourceAddress,
+        amount: String(BigInt(meta.thresholdRaw)),
+        minimumValuePromise: String(BigInt(meta.thresholdRaw)),
+        maxFee: "50000",
+      });
+      if (!built || !built.substateId) {
+        throw new Error("the wallet produced no proof artifact to verify");
+      }
+      substateId = built.substateId;
+      // Remember the output so the NEXT join can resume from it instead of shielding again:
+      // re-shielding spends funds for nothing.
+      try { localStorage.setItem("gg-last-output", substateId); } catch { /* private mode */ }
+      step("output", "done");
+    } catch (e) {
+      if (e && e.code === 4100) return fail("Wallet authorization ended. Send /join to start again.");
+      const lc = String(e && e.message ? e.message : e).toLowerCase();
+      if (lc.includes("insufficient")) {
+        const humanThreshold = meta && formatAmount(meta.thresholdRaw, Number(meta.divisibility ?? 0))
+          ? `${formatAmount(meta.thresholdRaw, Number(meta.divisibility ?? 0))} ${meta.symbol || "tokens"}`.trim()
+          : "the required threshold";
+        return showRejection(
+          "Not enough funds.",
+          "Your wallet does not hold enough of the required token to pass this gate. " +
+          `Reveal at least ${humanThreshold} in a qualifying output and try again with /join.`,
+        );
+      }
+      throw e;
+    }
+  }
+
+  // Steps 2-5 are one transaction of progress: a failure in any of them is named by the
+  // catch below, and the page never reports a success that did not happen.
+  try {
+  // Step 2: request a signing challenge bound to the specific output.
+  step("challenge", "active");
+  $("tg-line").textContent = "Requesting a challenge from the bridge…";
+  const ch = await post(
+    `${trustedBridgeOrigin}/v1/bot/sessions/${encodeURIComponent(botSession)}/challenge`,
+    { substate_id: substateId },
+  );
+  step("challenge", "done");
+
+  // Step 3: sign the bridge's challenge string in the wallet.
+  step("sign", "active");
+  $("tg-line").textContent = "Sign the gate's challenge in your wallet.";
+  // ch.challenge is the full domain-separated challenge string from the bridge. Pass it
+  // unchanged — the bridge re-derives the same string when verifying the signature. The
+  // resource override names the gate's resource explicitly: the resume path never ran a
+  // shield, so this page session was never told the resource any other way.
+  const ownership = await provider.signChallenge(substateId, ch.challenge, ch.resource);
+  step("sign", "done");
+
+  // Step 4: submit the proof to the bridge for chain verification.
+  step("verify", "active");
+  $("tg-line").textContent = "The bridge is verifying ownership against chain state…";
+  const proofResult = await post(
+    `${trustedBridgeOrigin}/v1/bot/sessions/${encodeURIComponent(botSession)}/proof`,
+    {
+      gate_id: ch.gate_id,
+      challenge_nonce: ch.challenge_nonce,
+      // session_commitment is a required wire field but is not validated in the bot-session
+      // path: the session identity is carried by the session id, not by a per-challenge
+      // commitment. Any 64-char hex value satisfies the wire schema.
+      session_commitment: "00".repeat(32),
+      substate_id: substateId,
+      public_key: ownership.publicKey,
+      public_nonce: ownership.publicNonce,
+      signature: ownership.signature,
+    },
+  );
+  if (!proofResult.verified) {
+    throw new Error("the bridge did not verify this proof");
+  }
+  step("verify", "done");
+
+  // Step 5: THE CLAIM. The bot redeems a Verified session only when the page tells it to:
+  // redemption is the operation that returns the Telegram identity, so it is gated on the
+  // bot's own endpoint, not on the bridge's. Without this POST the session would sit
+  // Verified forever and nobody would be admitted — which is exactly the gap this step closes.
+  step("claim", "active");
+  $("tg-line").textContent = "Verified against chain state. Asking the bot to complete your admission…";
+  if (!claimUrl) {
+    return fail(
+      "Your proof was verified, but this page does not know the bot's admission endpoint, " +
+      "so the join could not be completed. Send /join again.",
+      "Configured claim origin (gg-trusted-claims) is missing or invalid.",
+    );
+  }
+  const claimResult = await post(claimUrl, { bot_session_id: botSession });
+  if (claimResult.state !== "granted") {
+    throw new Error(claimResult.error || "the bot could not complete this admission");
+  }
+  step("claim", "done");
+  $("tg-line").textContent =
+    "Verified and admitted — the bot has approved your join request. Check Telegram.";
 
   } catch (e) {
     const msg = e && e.message ? e.message : String(e);
+    const lc = msg.toLowerCase();
     if (e && e.code === 4001) {
       return fail("You declined the request in your wallet. Nothing was submitted.");
-    }
-    const lc = msg.toLowerCase();
-    if (lc.includes("insufficientfunds") || lc.includes("insufficient") || lc.includes("insufficient balance")) {
-      const humanThreshold = meta && formatAmount(meta.thresholdRaw, div)
-        ? `${formatAmount(meta.thresholdRaw, div)} ${meta.symbol || "tokens"}`.trim()
-        : "the required threshold";
-      return showRejection(
-        "Not enough funds.",
-        "Your wallet does not hold enough of the required token to pass this gate. " +
-        `Reveal at least ${humanThreshold} in a qualifying output and try again with /join.`,
-      );
     }
     if (lc.includes("the bridge did not verify") || lc.includes("refused the proof") || lc.includes("the bridge refused")) {
       return showRejection(

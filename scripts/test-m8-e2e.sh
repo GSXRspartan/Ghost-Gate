@@ -25,8 +25,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # The workspace has a custom target-dir in .cargo/config.toml pointing to the Linux filesystem.
 # Fall back to the conventional target/debug if the custom path is not present.
-if [ -d "/home/pdark/gg-ootle-target/debug" ]; then
-    BIN_DIR="/home/pdark/gg-ootle-target/debug"
+if [ -d "/home/darkp/gg-target/debug" ]; then
+    BIN_DIR="/home/darkp/gg-target/debug"
 elif [ -d "$REPO_ROOT/target/debug" ]; then
     BIN_DIR="$REPO_ROOT/target/debug"
 else
@@ -276,6 +276,7 @@ echo "--- Starting bridge on $BRIDGE_BASE ---"
 BRIDGE_GATE="$GATE_ID=:$RESOURCE:$THRESHOLD:6:tTARI"
 GG_BRIDGE_BIND="127.0.0.1:$BRIDGE_PORT" \
 GG_BRIDGE_ORIGINS="$BRIDGE_BASE" \
+GG_BRIDGE_RELYING_SITE="$BRIDGE_BASE" \
 GG_BRIDGE_GATES="$BRIDGE_GATE" \
 GG_TG_FIXTURE=1 \
 GG_FIXTURE_UTXO="$GG_FIXTURE_UTXO" \
