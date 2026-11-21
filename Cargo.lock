@@ -2922,6 +2922,7 @@ dependencies = [
  "blake2 0.10.6",
  "diesel",
  "ghost-gate-core",
+ "ghost-gate-ggbp1",
  "ghost-gate-registry",
  "ghost-gate-verifier",
  "hex",
@@ -2955,6 +2956,21 @@ dependencies = [
  "minicbor",
  "serde",
  "tari_template_lib_types",
+]
+
+[[package]]
+name = "ghost-gate-ggbp1"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "hex",
+ "rand 0.10.3",
+ "sha2 0.10.9",
+ "tari_crypto",
+ "tari_script",
+ "tari_utilities",
+ "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]
@@ -3107,6 +3123,7 @@ dependencies = [
  "ghost-gate-bridge",
  "ghost-gate-cbor",
  "ghost-gate-core",
+ "ghost-gate-ggbp1",
  "ghost-gate-minotari",
  "ghost-gate-registry",
  "hex",

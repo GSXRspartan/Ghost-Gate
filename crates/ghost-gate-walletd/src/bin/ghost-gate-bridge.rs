@@ -264,6 +264,26 @@ fn main() -> ExitCode {
         }
     }
 
+    // Experimental GGBP-1 v3 test gate. It verifies cryptography only: no chain view is wired,
+    // so every success is labelled `cryptographically_valid_chain_unverified`. It has no route
+    // that mints a session, an access grant, or a Telegram authorization.
+    let ggbp1_test_server = if std::env::var("GG_GGBP1_TEST")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        println!(
+            "  experimental GGBP-1 v3 test gate: enabled (cryptography only; chain evidence not configured; never grants access)"
+        );
+        Some(std::sync::Arc::new(
+            ghost_gate_ggbp1::Ggbp1TestServer::new_without_chain(
+                ghost_gate_ggbp1::ESMERALDA_NETWORK,
+                ghost_gate_ggbp1::ESMERALDA_GENESIS_HASH,
+            ),
+        ))
+    } else {
+        None
+    };
+
     // The credential mode needs chain reads. Optional by configuration: a bridge pointed only at
     // walletd runs without it, and its credential route says exactly that instead of verifying
     // against nothing.
@@ -320,6 +340,7 @@ fn main() -> ExitCode {
                             eprintln!("ghost-gate-bridge: {e}");
                             return ExitCode::FAILURE;
                         }
+                        bridge.ggbp1_test = ggbp1_test_server.clone();
                         let recovered = runtime.block_on(bridge.recover_pending_jobs());
                         if recovered > 0 { println!("  replay recovery: resumed {recovered} durable Ootle finality job(s)"); }
                         runtime.block_on(ghost_gate_bridge::server::serve(&config.bind, bridge))
@@ -344,6 +365,7 @@ fn main() -> ExitCode {
                             eprintln!("ghost-gate-bridge: {e}");
                             return ExitCode::FAILURE;
                         }
+                        bridge.ggbp1_test = ggbp1_test_server.clone();
                         let recovered = runtime.block_on(bridge.recover_pending_jobs());
                         if recovered > 0 { println!("  replay recovery: resumed {recovered} durable Ootle finality job(s)"); }
                         runtime.block_on(ghost_gate_bridge::server::serve(&config.bind, bridge))
@@ -382,6 +404,7 @@ fn main() -> ExitCode {
                             eprintln!("ghost-gate-bridge: {e}");
                             return ExitCode::FAILURE;
                         }
+                        bridge.ggbp1_test = ggbp1_test_server.clone();
                         let recovered = runtime.block_on(bridge.recover_pending_jobs());
                         if recovered > 0 { println!("  replay recovery: resumed {recovered} durable Ootle finality job(s)"); }
                         runtime.block_on(ghost_gate_bridge::server::serve(&config.bind, bridge))
@@ -407,6 +430,7 @@ fn main() -> ExitCode {
                     eprintln!("ghost-gate-bridge: {e}");
                     return ExitCode::FAILURE;
                 }
+                bridge.ggbp1_test = ggbp1_test_server.clone();
                 let recovered = runtime.block_on(bridge.recover_pending_jobs());
                 if recovered > 0 { println!("  replay recovery: resumed {recovered} durable Ootle finality job(s)"); }
                 runtime.block_on(ghost_gate_bridge::server::serve(&config.bind, bridge))

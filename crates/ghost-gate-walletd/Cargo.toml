@@ -13,6 +13,8 @@ ghost-gate-registry = { path = "../ghost-gate-registry" }
 ghost-gate-bridge = { path = "../ghost-gate-bridge" }
 # The native Minotari L1 channels (the proof wallet service client and the base node reader).
 ghost-gate-minotari = { path = "../ghost-gate-minotari" }
+# Experimental GGBP-1 v3 verifier, enabled only by GG_GGBP1_TEST=1 in the bridge binary.
+ghost-gate-ggbp1 = { workspace = true }
 # The cohort's own client, pinned in the workspace like every other cohort crate. This is the crate the
 # localnet scenario drives directly, so the adapter speaks the same JSON-RPC surface the evidence was
 # gathered against rather than a re-description of it.

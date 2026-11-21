@@ -362,6 +362,8 @@ details.explain p { color: var(--dim); font-size: 0.8rem; line-height: 1.5; marg
 .outcome { border-radius: var(--radius-sm); padding: 0.9rem 1rem; margin-top: 0.8rem; border: 1px solid var(--line); }
 .outcome.granted { border-color: var(--green-dim); background: rgba(41, 212, 124, 0.06); }
 .outcome.denied { border-color: #5a2a2a; background: rgba(224, 106, 106, 0.05); }
+.outcome.warn { border-color: rgba(224, 185, 106, 0.45); background: rgba(224, 185, 106, 0.05); }
+.outcome.warn .verdict { color: var(--warn); }
 .outcome .verdict { font: 700 1rem var(--mono); letter-spacing: 0.1em; }
 .outcome.granted .verdict { color: var(--green); }
 .outcome.denied .verdict { color: var(--bad); }

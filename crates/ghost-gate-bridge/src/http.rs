@@ -17,6 +17,8 @@
 //! POST /gate/:id/prove         ask for a proof; returns a job id immediately
 //! GET  /proof/:id/status       poll the job: accepted, refused, or still working
 //! POST /access/check           check a bearer session without placing it in the URL
+//! POST /gate/:id/ggbp1/challenge  experimental GGBP-1 v3 challenge (never a session)
+//! POST /gate/:id/ggbp1/verify     experimental GGBP-1 v3 response (never a session)
 //! ```
 //!
 //! # What the responses may contain
@@ -119,6 +121,10 @@ pub enum Route<'a> {
     Prove(&'a str),
     /// `POST /gate/:id/credential` — the credential proof mode (browser wallets).
     Credential(&'a str),
+    /// `POST /gate/:id/ggbp1/challenge` — experimental GGBP-1 v3 challenge. Never a session.
+    Ggbp1Challenge(&'a str),
+    /// `POST /gate/:id/ggbp1/verify` — experimental GGBP-1 v3 response. Never a session.
+    Ggbp1Verify(&'a str),
     /// `GET /proof/:id/status`
     ProofStatus(&'a str),
     /// Server-side verified-access check: token + gate. The decision is computed here, never in
@@ -177,6 +183,8 @@ impl<'a> Route<'a> {
             ("POST", ["gate", id, "challenge"]) => Route::Challenge(id),
             ("POST", ["gate", id, "prove"]) => Route::Prove(id),
             ("POST", ["gate", id, "credential"]) => Route::Credential(id),
+            ("POST", ["gate", id, "ggbp1", "challenge"]) => Route::Ggbp1Challenge(id),
+            ("POST", ["gate", id, "ggbp1", "verify"]) => Route::Ggbp1Verify(id),
             ("GET", ["proof", id, "status"]) => Route::ProofStatus(id),
             ("POST", ["access", "check"]) => Route::AccessCheck,
             ("GET", []) => Route::Asset("index.html"),

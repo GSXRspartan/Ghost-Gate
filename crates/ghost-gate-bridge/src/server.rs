@@ -12,10 +12,14 @@
 //!
 //! # Why there is no way to spend from here
 //!
-//! The server holds a [`GateRegistry`], a [`ChallengeBook`] and a [`WalletChannel`], and no route reads
-//! anything from a request body except a gate id, a hex challenge nonce and a hex session commitment.
-//! There is no field for an amount, a destination or a UTXO. The strongest thing a caller can do is ask
-//! for a proof against a gate it already holds a live challenge for, and the wallet picks the input.
+//! The server holds a [`GateRegistry`], a [`ChallengeBook`] and a [`WalletChannel`], and no
+//! authorizing route reads anything from a request body except a gate id, a hex challenge nonce and
+//! a hex session commitment. The experimental GGBP-1 routes are separate: they read a bounded
+//! subject/origin binding and a hex-encoded proof response, and they never mint a session, an
+//! access grant, or a Telegram authorization.
+//! There is no field for an amount, a destination or a UTXO. The strongest thing an authorizing
+//! caller can do is ask for a proof against a gate it already holds a live challenge for, and the
+//! wallet picks the input.
 //!
 //! A proof is not a transaction a caller can also do something else with: the bridge builds it, submits
 //! it with the wallet's own lock so the wallet derives the stealth signers itself, and returns the
@@ -25,9 +29,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rand::Rng;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+
+use ghost_gate_ggbp1::{ESMERALDA_NETWORK, Ggbp1ChallengeRequest, Ggbp1ServerError};
+use tari_crypto::ristretto::RistrettoPublicKey;
+use tari_crypto::tari_utilities::ByteArray;
 
 use crate::gate_registry::GateRegistry;
 use crate::http::{Request, Response, Route, parse_request, render};
@@ -37,8 +44,14 @@ use crate::replay_store::{PendingProofKind, ReplayRecord, ReplayStore, Reservati
 use crate::session::{ChallengeBook, IssuedChallenge, ProofJob, ProofStatus, PublicProof, random_nonce};
 use crate::wallet::{StatementRequest, WalletChannel};
 
-/// Largest request body accepted. A prove request is three short strings; anything larger is not one.
-pub const MAX_BODY: usize = 8 * 1024;
+/// Largest request body accepted. Most routes carry a few short strings. The experimental GGBP-1
+/// verify route carries one hex-encoded response; its maximum wire size is about 11.6 KiB, which is
+/// 23.2 KiB in hex, so the cap is set above that and remains a hard bound on every route.
+pub const MAX_BODY: usize = 32 * 1024;
+/// Most routes carry a few short strings. GGBP-1 is the only route that needs a larger body, so
+/// every other route keeps the original 8 KiB application-level limit even though the HTTP reader
+/// can buffer up to `MAX_BODY`.
+const LEGACY_MAX_BODY: usize = 8 * 1024;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -46,6 +59,21 @@ struct AccessCheckRequest {
     application: String,
     gate: String,
     token: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct Ggbp1ChallengeBody {
+    origin_hash: String,
+    subject_public_key: String,
+    #[serde(default)]
+    ttl_seconds: Option<u64>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct Ggbp1VerifyBody {
+    response_hex: String,
 }
 
 /// How long one status poll will wait on the wallet while reconciling a submitted job.
@@ -120,6 +148,12 @@ pub struct Bridge<
     /// The Minotari base node reader, for L1 evidence. `None` means no L1 verification is possible,
     /// and L1 challenges are then refused at issue time.
     pub xtm_chain: Option<XR>,
+    /// Experimental GGBP-1 v3 test gate. Present only when the operator opted in with
+    /// `GG_GGBP1_TEST=1`. It verifies a wallet's balance proof and (when a chain view is
+    /// configured) its chain evidence, but it has no route that mints a session, an access grant,
+    /// or a Telegram authorization. Its verdicts are labelled `verified_test_only` or
+    /// `cryptographically_valid_chain_unverified` and always carry `authorized: false`.
+    pub ggbp1_test: Option<Arc<ghost_gate_ggbp1::Ggbp1TestServer>>,
     /// The deployment-time session commitment shared between the bridge and its on-chain component.
     ///
     /// A component's `check_challenge` compares every challenge's `session_commitment` against the
@@ -243,6 +277,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             permitted_hosts: default_permitted_hosts(),
             xtm,
             xtm_chain,
+            ggbp1_test: None,
             component_session: None,
             trust_policy: ghost_gate_registry::TrustPolicy::default(),
             hosted_verifier_token: None,
@@ -281,6 +316,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             permitted_hosts: default_permitted_hosts(),
             xtm,
             xtm_chain,
+            ggbp1_test: None,
             component_session: None,
             trust_policy: ghost_gate_registry::TrustPolicy::default(),
             hosted_verifier_token: None,
@@ -354,6 +390,42 @@ fn proof_mode_label(
     }
 }
 
+fn decode_32_hex(value: &str, label: &str) -> Result<[u8; 32], String> {
+    let bytes = hex::decode(value.trim()).map_err(|_| format!("GG: GGBP-1 {label} must be hex"))?;
+    <[u8; 32]>::try_from(bytes.as_slice())
+        .map_err(|_| format!("GG: GGBP-1 {label} must be exactly 32 bytes"))
+}
+
+fn decode_public_key(value: &str) -> Result<RistrettoPublicKey, String> {
+    let bytes = hex::decode(value.trim())
+        .map_err(|_| "GG: GGBP-1 subject public key must be hex".to_string())?;
+    let bytes: [u8; 32] = <[u8; 32]>::try_from(bytes.as_slice())
+        .map_err(|_| "GG: GGBP-1 subject public key must be exactly 32 bytes".to_string())?;
+    RistrettoPublicKey::from_canonical_bytes(&bytes)
+        .map_err(|_| "GG: GGBP-1 subject public key is not a canonical Ristretto point".to_string())
+}
+
+fn ggbp1_server_error(error: Ggbp1ServerError) -> Response {
+    let status = match &error {
+        Ggbp1ServerError::ChallengeCapacity => 429,
+        Ggbp1ServerError::ChallengeNotFound
+        | Ggbp1ServerError::ChallengeMismatch
+        | Ggbp1ServerError::ChallengeExpired
+        | Ggbp1ServerError::ChallengeInProgress
+        | Ggbp1ServerError::ChallengeRedeemed
+        | Ggbp1ServerError::OutputAlreadyRegistered
+        | Ggbp1ServerError::Chain(_) => 409,
+        Ggbp1ServerError::ZeroThreshold
+        | Ggbp1ServerError::InvalidSubjectKey
+        | Ggbp1ServerError::InvalidChallengeTtl
+        | Ggbp1ServerError::ExpiryOverflow
+        | Ggbp1ServerError::ResponseTooLarge
+        | Ggbp1ServerError::ChallengeCodec(_)
+        | Ggbp1ServerError::Proof(_) => 400,
+    };
+    Response::error(status, error)
+}
+
 /// Lowercases a `Host` header value and drops its port, if any.
 ///
 /// Bracketed IPv6 (`[::1]:7799`) is handled by stripping after the last `:`, which is safe because
@@ -399,6 +471,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader> Bridge<W, R, crate::xt
             challenge_expires_epoch: DEFAULT_CHALLENGE_EXPIRES_EPOCH,
             xtm: crate::xtm::NoXtm,
             xtm_chain: None,
+            ggbp1_test: None,
             component_session: None,
             trust_policy: ghost_gate_registry::TrustPolicy::default(),
             hosted_verifier_token: None,
@@ -441,6 +514,7 @@ impl<W: WalletChannel, X: crate::xtm::XtmChannel, XR: crate::xtm::XtmChainReader
             challenge_expires_epoch: DEFAULT_CHALLENGE_EXPIRES_EPOCH,
             xtm,
             xtm_chain,
+            ggbp1_test: None,
             component_session: None,
             trust_policy: ghost_gate_registry::TrustPolicy::default(),
             hosted_verifier_token: None,
@@ -482,6 +556,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             challenge_expires_epoch: DEFAULT_CHALLENGE_EXPIRES_EPOCH,
             xtm,
             xtm_chain,
+            ggbp1_test: None,
             component_session: None,
             trust_policy: ghost_gate_registry::TrustPolicy::default(),
             hosted_verifier_token: None,
@@ -578,7 +653,14 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             return Response::error(403, rejection);
         }
 
-        match Route::resolve(request.method, &request.path) {
+        let route = Route::resolve(request.method, &request.path);
+        if !matches!(&route, Route::Ggbp1Challenge(_) | Route::Ggbp1Verify(_))
+            && request.body.len() > LEGACY_MAX_BODY
+        {
+            return Response::error(413, "GG: request body exceeds the limit for this route");
+        }
+
+        match route {
             Route::Health => Response::json(
                 200,
                 &serde_json::json!({
@@ -593,6 +675,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                     "registry_backed": self.access.is_some(),
                     "credential_configured": self.chain.is_some(),
                     "xtm_configured": self.xtm_chain.is_some(),
+                    "ggbp1_test_configured": self.ggbp1_test.is_some(),
                 }),
             ),
 
@@ -618,6 +701,8 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             Route::Challenge(id) => self.issue_challenge(id, request).await,
             Route::Prove(id) => self.prove(id, request).await,
             Route::Credential(id) => self.credential(id, request).await,
+            Route::Ggbp1Challenge(id) => self.ggbp1_challenge(id, request).await,
+            Route::Ggbp1Verify(id) => self.ggbp1_verify(id, request).await,
             Route::ProofStatus(id) => {
                 // Lazy reconciliation: a Submitted job is polled against the wallet here, because
                 // nothing else in the process ever does. The pre-audit design had a `reconcile`
@@ -835,6 +920,9 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             // Whether this gate is registry-backed decides whether a session is issued at all; the
             // page shows that honestly rather than promising a grant it cannot deliver.
             let access_plane = self.access.as_mut().and_then(|a| a.plane.current_policy_hash(id));
+            let ggbp1_test_available = self.ggbp1_test.is_some()
+                && matches!(meta.proof_kind, crate::gate_registry::ProofKind::MinotariXtm)
+                && meta.network == ESMERALDA_NETWORK;
             gates.push(serde_json::json!({
                 "gateId": meta.gate_id,
                 "symbol": meta.symbol,
@@ -844,6 +932,9 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                 "network": meta.network,
                 "proofMode": proof_mode,
                 "activatable": !matches!(meta.proof_kind, crate::gate_registry::ProofKind::MinotariXtm),
+                // Experimental GGBP-1 v3 is offered only on an Esmeralda XTM gate when the
+                // operator opted in. It never implies a session: the card says test-only.
+                "ggbp1TestAvailable": ggbp1_test_available,
                 "sessionsAvailable": access_plane.is_some(),
                 // The scope the administrator assigned: a website-only gate is not a Telegram gate.
                 "useMode": self.gates.use_mode_of(id).unwrap_or_else(|| "website".into()),
@@ -1248,6 +1339,18 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
             return Response::error(404, "GG: no such asset");
         }
         let path = self.asset_dir.join(name);
+        // The Lab is designed to be embedded by Tari Universe, whose top-level document is
+        // COEP-protected. A nested document must opt in as well; same-origin subresources are
+        // unaffected. This mirrors the hosted Worker's `/lab` headers and does not weaken the
+        // loopback bind or the origin allowlist.
+        let extra_headers = if name == "lab/index.html" {
+            vec![
+                ("Cross-Origin-Embedder-Policy".to_string(), "require-corp".to_string()),
+                ("Cross-Origin-Resource-Policy".to_string(), "cross-origin".to_string()),
+            ]
+        } else {
+            Vec::new()
+        };
         match std::fs::read(&path) {
             Ok(bytes) => Response {
                 status: 200,
@@ -1259,7 +1362,7 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                     _ => "text/javascript; charset=utf-8",
                 },
                 body: String::from_utf8_lossy(&bytes).to_string(),
-                extra_headers: Vec::new(),
+                extra_headers,
             },
             Err(_) => Response::error(
                 404,
@@ -1639,6 +1742,159 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                 )
             }
         }
+    }
+
+    /// Issues an experimental GGBP-1 v3 challenge for an Esmeralda L1 XTM gate.
+    ///
+    /// This lifecycle is separate from every authorizing path: it does not touch the challenge
+    /// book, the replay store, the access plane, or the wallet. The caller gets a challenge a Tari
+    /// Universe wallet can sign; [`Self::ggbp1_verify`] checks the response and reports a labelled
+    /// test verdict. Neither route can return a session or an access grant.
+    async fn ggbp1_challenge(&mut self, id: &str, request: &Request) -> Response {
+        let Some(server) = self.ggbp1_test.clone() else {
+            return Response::error(
+                503,
+                "GG: the experimental GGBP-1 test gate is not configured on this bridge. \
+                 Set GG_GGBP1_TEST=1 to enable it.",
+            );
+        };
+        let Some(meta) = self.gates.public_metadata(id) else {
+            return Response::error(404, "GG: no such gate");
+        };
+        if meta.proof_kind != crate::gate_registry::ProofKind::MinotariXtm {
+            return Response::error(409, "GG: GGBP-1 requires a Minotari XTM gate");
+        }
+        if meta.network != ESMERALDA_NETWORK {
+            return Response::error(409, "GG: GGBP-1 v3 is enabled only for Esmeralda (network 0x26)");
+        }
+        if self.gates.use_mode_of(id).as_deref() == Some("telegram") {
+            return Response::error(403, "GG: this gate is scoped to Telegram membership only");
+        }
+        let body: Ggbp1ChallengeBody = match serde_json::from_str(&request.body) {
+            Ok(body) => body,
+            Err(e) => {
+                return Response::error(400, format!("GG: malformed GGBP-1 challenge request: {e}"));
+            }
+        };
+        let origin_hash = match decode_32_hex(&body.origin_hash, "origin hash") {
+            Ok(hash) => hash,
+            Err(message) => return Response::error(400, message),
+        };
+        let subject_public_key = match decode_public_key(&body.subject_public_key) {
+            Ok(key) => key,
+            Err(message) => return Response::error(400, message),
+        };
+        let ttl = body.ttl_seconds.unwrap_or(120);
+        if !(30..=300).contains(&ttl) {
+            return Response::error(400, "GG: GGBP-1 challenge ttl must be between 30 and 300 seconds");
+        }
+        let subject_id: [u8; 16] = match crate::session::random_nonce()[..16].try_into() {
+            Ok(id) => id,
+            Err(_) => return Response::error(500, "GG: could not allocate a GGBP-1 subject id"),
+        };
+        let challenge_request = Ggbp1ChallengeRequest {
+            subject_id,
+            origin_hash,
+            subject_authentication_public_key: subject_public_key,
+            gate_id: ghost_gate_ggbp1::gate_id_bytes(id),
+            gate_configuration_version: ghost_gate_ggbp1::gate_configuration_version(
+                id,
+                meta.threshold,
+                meta.network,
+            ),
+            threshold_micro_xtm: meta.threshold,
+            requested_ttl_seconds: ttl,
+        };
+        let mut rng = rand::rng();
+        let issued = match server
+            .issue_challenge(challenge_request, crate::session::now_unix(), &mut rng)
+            .await
+        {
+            Ok(issued) => issued,
+            Err(error) => return ggbp1_server_error(error),
+        };
+        Response::json(
+            200,
+            &serde_json::json!({
+                "testOnly": true,
+                "authorized": false,
+                "session": serde_json::Value::Null,
+                "gateId": meta.gate_id,
+                "network": meta.network,
+                "genesisHash": hex::encode(server.genesis_hash()),
+                "thresholdRaw": meta.threshold.to_string(),
+                "subjectId": hex::encode(issued.challenge.subject_id),
+                "challengeHex": hex::encode(issued.bytes),
+                "expiresAtUnix": issued.challenge.expires_at_unix_seconds,
+                "commitmentGeneratorFingerprint": hex::encode(
+                    issued.challenge.commitment_generator_fingerprint,
+                ),
+                "note": "Experimental GGBP-1 v3 test gate. This challenge cannot produce a Ghost Gate session.",
+            }),
+        )
+    }
+
+    /// Verifies one experimental GGBP-1 v3 response.
+    ///
+    /// The success body is intentionally named and shaped so no client can mistake it for
+    /// authorization: `authorized` is always false, `session` is always null, and `status` is
+    /// either `verified_test_only` or `cryptographically_valid_chain_unverified`.
+    async fn ggbp1_verify(&mut self, id: &str, request: &Request) -> Response {
+        let Some(server) = self.ggbp1_test.clone() else {
+            return Response::error(
+                503,
+                "GG: the experimental GGBP-1 test gate is not configured on this bridge. \
+                 Set GG_GGBP1_TEST=1 to enable it.",
+            );
+        };
+        let Some(meta) = self.gates.public_metadata(id) else {
+            return Response::error(404, "GG: no such gate");
+        };
+        if meta.proof_kind != crate::gate_registry::ProofKind::MinotariXtm {
+            return Response::error(409, "GG: GGBP-1 requires a Minotari XTM gate");
+        }
+        if meta.network != ESMERALDA_NETWORK {
+            return Response::error(409, "GG: GGBP-1 v3 is enabled only for Esmeralda (network 0x26)");
+        }
+        if self.gates.use_mode_of(id).as_deref() == Some("telegram") {
+            return Response::error(403, "GG: this gate is scoped to Telegram membership only");
+        }
+        let body: Ggbp1VerifyBody = match serde_json::from_str(&request.body) {
+            Ok(body) => body,
+            Err(e) => {
+                return Response::error(400, format!("GG: malformed GGBP-1 verify request: {e}"));
+            }
+        };
+        if body.response_hex.len() > 24_000 {
+            return Response::error(400, "GG: GGBP-1 response exceeds the bounded test limit");
+        }
+        let response = match hex::decode(body.response_hex.trim()) {
+            Ok(response) => response,
+            Err(_) => return Response::error(400, "GG: GGBP-1 response must be hex"),
+        };
+        let verdict = match server
+            .submit_response(&response, crate::session::now_unix())
+            .await
+        {
+            Ok(verdict) => verdict,
+            Err(error) => return ggbp1_server_error(error),
+        };
+        Response::json(
+            200,
+            &serde_json::json!({
+                "testOnly": true,
+                "authorized": false,
+                "session": serde_json::Value::Null,
+                "status": verdict.status.as_str(),
+                "outputHashes": verdict.output_hashes.iter().map(hex::encode).collect::<Vec<_>>(),
+                "thresholdRaw": verdict.threshold_micro_xtm.to_string(),
+                "chainEvidence": verdict.chain_evidence.map(|source| source.as_str()),
+                "verifiedTipHash": verdict.verified_tip_hash.map(hex::encode),
+                "verifiedTipHeight": verdict.verified_tip_height,
+                "verifiedAtUnix": verdict.verified_at_unix_seconds,
+                "note": "Experimental GGBP-1 v3 test only. No Ghost Gate session, access grant, or Telegram authorization was issued.",
+            }),
+        )
     }
 
     /// Validates the request, then asks the wallet for a proof.
@@ -2566,6 +2822,83 @@ mod tests {
             wallet,
             OriginPolicy::new().allow("https://vip.example").allow("https://partner.example"),
         )
+    }
+
+    #[tokio::test]
+    async fn ggbp1_test_routes_issue_challenges_and_never_grant() {
+        let mut gates = GateRegistry::new();
+        gates
+            .register(
+                "xtm1",
+                GateBinding::minotari_xtm(
+                    1_000_000,
+                    ghost_gate_ggbp1::ESMERALDA_NETWORK,
+                    MaxBytes::new_checked(b"vip.example".to_vec()).unwrap(),
+                    "tXTM".into(),
+                ),
+            )
+            .unwrap();
+        let mut bridge = Bridge::new(
+            gates,
+            FakeWallet::new(),
+            OriginPolicy::new().allow("https://vip.example"),
+        );
+        bridge.ggbp1_test = Some(std::sync::Arc::new(
+            ghost_gate_ggbp1::Ggbp1TestServer::new_without_chain(
+                ghost_gate_ggbp1::ESMERALDA_NETWORK,
+                ghost_gate_ggbp1::ESMERALDA_GENESIS_HASH,
+            ),
+        ));
+
+        let subject = RistrettoPublicKey::from_secret_key(&RistrettoSecretKey::from(5u64));
+        let challenge = bridge
+            .handle(&post(
+                "/gate/xtm1/ggbp1/challenge",
+                serde_json::json!({
+                    "originHash": hex::encode([4u8; 32]),
+                    "subjectPublicKey": hex::encode(subject.as_bytes()),
+                }),
+            ))
+            .await;
+        assert_eq!(challenge.status, 200);
+        let value: serde_json::Value = serde_json::from_str(&challenge.body).unwrap();
+        assert_eq!(value["authorized"], false);
+        assert_eq!(value["session"], serde_json::Value::Null);
+        let challenge_hex = value["challengeHex"].as_str().unwrap();
+        assert_eq!(challenge_hex.len(), 223 * 2);
+
+        let refused = bridge
+            .handle(&post(
+                "/gate/xtm1/ggbp1/verify",
+                serde_json::json!({ "responseHex": "00" }),
+            ))
+            .await;
+        assert_eq!(refused.status, 400);
+
+        let wrong_gate = bridge
+            .handle(&post(
+                "/gate/missing/ggbp1/challenge",
+                serde_json::json!({
+                    "originHash": hex::encode([4u8; 32]),
+                    "subjectPublicKey": hex::encode(subject.as_bytes()),
+                }),
+            ))
+            .await;
+        assert_eq!(wrong_gate.status, 404);
+
+        // A non-GGBP-1 route keeps the original application-level body limit even though the
+        // HTTP reader can buffer the larger GGBP-1 maximum.
+        let mut large = post("/gate/xtm1/challenge", serde_json::json!({}));
+        large.body = "x".repeat(LEGACY_MAX_BODY + 1);
+        assert_eq!(bridge.handle(&large).await.status, 413);
+
+        // The GGBP-1 verify route is allowed above 8 KiB; a 9 KB hex body reaches the route and
+        // is refused by the proof parser, not by a generic body-limit rejection.
+        let padded = post(
+            "/gate/xtm1/ggbp1/verify",
+            serde_json::json!({ "responseHex": "00".repeat(4500) }),
+        );
+        assert_eq!(bridge.handle(&padded).await.status, 400);
     }
 
     #[test]

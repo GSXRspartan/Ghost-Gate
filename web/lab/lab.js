@@ -244,6 +244,7 @@ function renderTechnicalFacts() {
  *  The "minimum proven" is the visually dominant fact: it is the ONLY thing being proven,
  *  and the one number a judge should read in the first two seconds. */
 function renderGateFacts(gate) {
+    renderGgbp1Card(gate);
     $("gate-count-note").textContent = state.gates.length
         ? `${state.gates.length} configured gate${state.gates.length === 1 ? "" : "s"} — read from the administrator's published policy; this page cannot change a threshold.`
         : "Gates come from the administrator's published policy. This page cannot change a threshold.";
@@ -310,6 +311,227 @@ function renderGateFacts(gate) {
     }
     renderXray(gate);
     loadTelegramScope();
+}
+
+// ---------------------------------------------------------------- GGBP-1 v3 test
+const GGBP1_ESMERALDA = 0x26;
+
+function renderGgbp1Card(gate) {
+    const card = $("ggbp1-card");
+    if (!card) return;
+    const available = !!(gate && gate.proofMode === "xtm" && gate.network === GGBP1_ESMERALDA && gate.ggbp1TestAvailable === true);
+    card.hidden = !available;
+    if (!available) return;
+    $("ggbp1-note").textContent = `Gate ${gate.gateId}: prove at least ${formatAmount(gate.thresholdRaw, gate.divisibility)} ${gate.symbol || "tXTM"} on Esmeralda. This is a test gate: the bridge verifies the wallet's GGBP-1 v3 proof and returns a labelled verdict, never a session.`;
+}
+
+function tariGgbp1Provider() {
+    const provider = window.tari;
+    if (!provider || !provider.isTariWallet) {
+        throw new Error("No Tari wallet answered. Open this page in Tari Universe or install the wallet.");
+    }
+    return provider;
+}
+
+async function tariGgbp1Request(provider, method, params) {
+    if (typeof provider.request === "function") return provider.request({ method, params });
+    if (typeof provider[method] === "function") return provider[method](params);
+    throw new Error(`the wallet does not implement ${method}`);
+}
+
+function ggbp1BytesToHex(bytes) {
+    return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function ggbp1HexToBytes(hex) {
+    const clean = String(hex || "").trim();
+    if (clean.length % 2 || !/^[0-9a-fA-F]*$/.test(clean)) throw new Error("not a hex string");
+    const out = new Uint8Array(clean.length / 2);
+    for (let i = 0; i < out.length; i++) out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+    return out;
+}
+
+function ggbp1BytesToBase64Url(bytes) {
+    let binary = "";
+    for (const b of bytes) binary += String.fromCharCode(b);
+    return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function ggbp1Base64UrlToBytes(value) {
+    let s = String(value || "").replace(/-/g, "+").replace(/_/g, "/");
+    while (s.length % 4) s += "=";
+    const binary = atob(s);
+    const out = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+    return out;
+}
+
+function ggbp1ToHex(value) {
+    if (typeof value === "string") return value;
+    if (value instanceof Uint8Array) return ggbp1BytesToHex(value);
+    if (Array.isArray(value)) return ggbp1BytesToHex(Uint8Array.from(value));
+    if (value && typeof value === "object" && value.data) return ggbp1ToHex(value.data);
+    return String(value);
+}
+
+function ggbp1ExtractProof(result) {
+    if (typeof result === "string") return result;
+    if (result instanceof Uint8Array) return ggbp1BytesToBase64Url(result);
+    if (Array.isArray(result)) return ggbp1BytesToBase64Url(Uint8Array.from(result));
+    if (!result || typeof result !== "object") return null;
+    for (const key of ["proof", "response", "gbbp1Response", "challengeResponse", "result", "data"]) {
+        const value = result[key];
+        if (typeof value === "string" && value.length) return value;
+        if (value && typeof value === "object") {
+            const nested = ggbp1ExtractProof(value);
+            if (nested) return nested;
+        }
+    }
+    return null;
+}
+
+async function ggbp1Subject(provider) {
+    let subject;
+    if (typeof provider.getBalanceProofSubject === "function") {
+        subject = await provider.getBalanceProofSubject();
+    } else {
+        subject = await tariGgbp1Request(provider, "tari_getBalanceProofSubject");
+    }
+    if (!subject || typeof subject !== "object") throw new Error("the wallet returned no GGBP-1 subject");
+    if (subject.protocol !== "ggbp1" || Number(subject.version) !== 3) {
+        throw new Error("the wallet returned a non-GGBP-1 v3 subject");
+    }
+    const network = String(subject.network || "").toLowerCase();
+    if (!["esmeralda", "38", "0x26"].includes(network)) {
+        throw new Error("the wallet subject is not on Esmeralda");
+    }
+    const publicKey = ggbp1ToHex(subject.publicKey || subject.subjectPublicKey || subject.public_key || subject.key);
+    if (!publicKey || publicKey.length !== 64) throw new Error("the wallet returned no canonical 32-byte subject key");
+    let originHash = subject.originHash || subject.origin_hash;
+    if (!originHash) {
+        const data = new TextEncoder().encode(`GGBP1/origin${location.origin}`);
+        const digest = await crypto.subtle.digest("SHA-256", data);
+        originHash = ggbp1BytesToHex(new Uint8Array(digest));
+    }
+    const normalizedOrigin = ggbp1ToHex(originHash).toLowerCase();
+    if (normalizedOrigin.length !== 64) throw new Error("the wallet returned a malformed origin hash");
+    return {
+        publicKey: publicKey.toLowerCase(),
+        originHash: normalizedOrigin,
+        genesisHash: ggbp1ToHex(subject.genesisHash || subject.genesis_hash || "").toLowerCase(),
+        fingerprint: ggbp1ToHex(subject.commitmentGeneratorFingerprint || subject.commitment_generator_fingerprint || "").toLowerCase(),
+    };
+}
+
+function ggbp1ChallengeFields(challengeHex) {
+    const hex = String(challengeHex || "").toLowerCase();
+    if (hex.length !== 223 * 2) throw new Error("the bridge returned a malformed GGBP-1 challenge");
+    const field = (start, end) => hex.slice(start * 2, end * 2);
+    return {
+        version: parseInt(field(5, 6), 16),
+        network: parseInt(field(6, 7), 16),
+        genesisHash: field(7, 39),
+        originHash: field(39, 71),
+        subjectId: field(71, 87),
+        subjectPublicKey: field(87, 119),
+    };
+}
+
+async function ggbp1RequestProof(provider, challengeBase64Url) {
+    if (typeof provider.requestBalanceProof === "function") {
+        return provider.requestBalanceProof(challengeBase64Url);
+    }
+    if (typeof provider.request === "function") {
+        return provider.request({
+            method: "tari_requestBalanceProof",
+            params: { protocol: "ggbp1", version: 3, challenge: challengeBase64Url },
+        });
+    }
+    throw new Error("the wallet does not implement tari_requestBalanceProof");
+}
+
+function ggbp1ShowOutcome(kind, title, body, detail = "") {
+    const panel = $("ggbp1-outcome");
+    if (!panel) return;
+    panel.hidden = false;
+    panel.className = `outcome ${kind}`;
+    $("ggbp1-outcome-title").textContent = title;
+    $("ggbp1-outcome-body").textContent = body;
+    $("ggbp1-outcome-detail").textContent = detail;
+}
+
+async function runGgbp1Test() {
+    const gate = state.gate;
+    if (!gate) return;
+    const button = $("ggbp1-start");
+    if (button) button.disabled = true;
+    $("ggbp1-outcome").hidden = true;
+    try {
+        const provider = tariGgbp1Provider();
+        const caps = await tariGgbp1Request(provider, "tari_getCapabilities");
+        const ggbp1 = caps && caps.ggbp1BalanceProof;
+        if (!ggbp1 || Number(ggbp1.protocolVersion) !== 3) {
+            throw new Error("the wallet does not advertise the ggbp1BalanceProof capability (v3)");
+        }
+        const subject = await ggbp1Subject(provider);
+        const challengeRes = await api(`/gate/${gate.gateId}/ggbp1/challenge`, {
+            method: "POST",
+            body: JSON.stringify({ originHash: subject.originHash, subjectPublicKey: subject.publicKey }),
+        });
+        if (!challengeRes.ok) {
+            ggbp1ShowOutcome("denied", "NO CHALLENGE", challengeRes.body.error || "the bridge would not issue a GGBP-1 challenge.");
+            return;
+        }
+        const challenge = challengeRes.body;
+        const fields = ggbp1ChallengeFields(challenge.challengeHex);
+        if (fields.version !== 3) throw new Error("the bridge returned a non-v3 GGBP-1 challenge");
+        if (fields.network !== 0x26) throw new Error("the bridge challenge is not for Esmeralda (0x26)");
+        if (subject.genesisHash && fields.genesisHash !== subject.genesisHash) {
+            throw new Error("the wallet subject genesis does not match the challenge genesis");
+        }
+        if (fields.originHash !== subject.originHash) {
+            throw new Error("the challenge origin hash does not match the wallet subject");
+        }
+        if (fields.subjectPublicKey !== subject.publicKey) {
+            throw new Error("the challenge subject key does not match the wallet subject");
+        }
+        if (subject.fingerprint && challenge.commitmentGeneratorFingerprint &&
+            subject.fingerprint !== String(challenge.commitmentGeneratorFingerprint).toLowerCase()) {
+            throw new Error("the wallet subject commitment-generator fingerprint does not match the challenge");
+        }
+        const challengeBase64Url = ggbp1BytesToBase64Url(ggbp1HexToBytes(challenge.challengeHex));
+        const proofResult = await ggbp1RequestProof(provider, challengeBase64Url);
+        const proofString = ggbp1ExtractProof(proofResult);
+        if (!proofString) throw new Error("the wallet returned no GGBP-1 response string");
+        const responseHex = ggbp1BytesToHex(ggbp1Base64UrlToBytes(proofString));
+        const verifyRes = await api(`/gate/${gate.gateId}/ggbp1/verify`, {
+            method: "POST",
+            body: JSON.stringify({ responseHex }),
+        });
+        if (!verifyRes.ok) {
+            ggbp1ShowOutcome("denied", "VERIFICATION REFUSED", verifyRes.body.error || "the bridge refused the GGBP-1 response.");
+            return;
+        }
+        const verdict = verifyRes.body;
+        if (verdict.status === "verified_test_only") {
+            ggbp1ShowOutcome("granted", "TEST VERIFIED", "Cryptography and chain evidence passed.", "authorized=false; no session or access grant was issued.");
+        } else {
+            ggbp1ShowOutcome("warn", "CRYPTOGRAPHY VERIFIED", "The proof is cryptographically valid, but chain evidence was not trusted or not configured.", "authorized=false; no session or access grant was issued.");
+        }
+    } catch (e) {
+        const code = e && e.code;
+        if (code === 4001) {
+            ggbp1ShowOutcome("denied", "WALLET DECLINED OR BELOW THRESHOLD", "The wallet rejected the request or could not reach the threshold. No balance information is returned.");
+        } else if (code === 4200) {
+            ggbp1ShowOutcome("denied", "WALLET DOES NOT SUPPORT GGBP-1", "This wallet answered 4200 (unsupported here).");
+        } else if (code === -32603) {
+            ggbp1ShowOutcome("denied", "WALLET REFUSED THE CHALLENGE", "The wallet refused the challenge (wrong network, wrong origin, expired, or internal error).");
+        } else {
+            ggbp1ShowOutcome("denied", "GGBP-1 TEST FAILED", e && e.message ? e.message : String(e));
+        }
+    } finally {
+        if (button) button.disabled = false;
+    }
 }
 
 // ---------------------------------------------------------------- wallets
@@ -1384,7 +1606,8 @@ async function refreshStatus() {
     const modes = [];
     if (gates.some((g) => g.proofMode === "consensus")) modes.push("consensus");
     if (gates.some((g) => g.proofMode === "credential")) modes.push("credential");
-    modes.push("XTM blocked");
+    if (gates.some((g) => g.ggbp1TestAvailable)) modes.push("GGBP-1 test");
+    if (gates.some((g) => g.proofMode === "xtm" && !g.ggbp1TestAvailable)) modes.push("XTM blocked");
     setPill("pill-modes", "", modes.join(" · "));
     setPill("pill-gates", gates.length ? "ok" : "warn", gates.length ? `${gates.length} configured` : "none");
 
@@ -1485,6 +1708,7 @@ const wire = (id, ev, handler) => { const el = $(id); if (el) el.addEventListene
 wire("view-simple", "click", () => setView("simple"));
 wire("view-technical", "click", () => setView("technical"));
 wire("prove", "click", prove);
+wire("ggbp1-start", "click", runGgbp1Test);
 wire("resume-proof", "click", resumeProof);
 wire("simulate", "click", simulate);
 wire("term-filter", "input", renderTerminal);
