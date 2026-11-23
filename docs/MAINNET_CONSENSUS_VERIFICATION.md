@@ -164,6 +164,28 @@ That work is reusable as an architectural reference, not as a mainnet trust anch
 
 ## Decision
 
-**NO-GO for mainnet admission and Telegram admission with the current pinned dependencies.**
+## M13 update — isolated v0.55.0 evidence verifier
 
-**GO for further implementation only after a v0.55.0 cohort, an out-of-band validator-set anchor, and an independent freshness/liveness source are available.**
+`tools/m13-mainnet-verifier` is a standalone crate using the signed v0.55.0 source at commit
+`b7c964c45d0251c89270739ec1ceaffbfb983e59`. It does not join the Ghost Gate workspace.
+
+The mainnet validator set ships in the release configuration
+`applications/tari_ootle_app_utilities/src/mainnet_epoch_oracle.json`: 7 validators, shard group
+`1–256`, `registration_epoch 38362`. Recomputing the validator-set tree with upstream code yields
+`a434332a6f312f9d278fa614ed4f32cbe22cf6c08b17b58941bce832d3788e6a`, which both public indexers
+serve as the epoch-38362 committee hash. This is the first defensible out-of-band anchor found.
+
+Result:
+
+- walked 901 signed handovers from epoch 38362 to epoch 39263;
+- verified a real public substate inclusion proof at epoch 39263;
+- persisted and reloaded the trusted set;
+- rejected wrong anchor, wrong network, foreign-epoch committee, missing handover, withheld
+  checkpoints, unsupported version, wrong substate id, and up-as-down proof;
+- cross-checked two indexers for epoch and handover hashes (liveness check only, not consensus).
+
+Remaining before Ghost Gate integration: connect this verifier to `CredentialVerifier`/production
+evidence kind; add current-unspent down-proof verification for tTARI outputs; add base-layer epoch
+cross-check and stronger liveness; real Sapient session-bound proof; and all live admission approvals.
+
+**Status: verifier prototype GO; Ghost Gate mainnet connection NO-GO.**

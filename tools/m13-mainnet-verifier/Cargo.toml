@@ -1,0 +1,22 @@
+[package]
+name = "m13-mainnet-verifier"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Standalone: do not join the Ghost Gate workspace or change its dependency graph.
+[workspace]
+
+[dependencies]
+hex = "0.4"
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+ootle-network = { path = "../../../tari-ootle-v0.55.0-source/crates/ootle_network" }
+tari_ootle_common_types = { path = "../../../tari-ootle-v0.55.0-source/crates/common_types" }
+tari_ootle_light_client = { path = "../../../tari-ootle-v0.55.0-source/crates/wallet/light_client" }
+tari_indexer_client = { path = "../../../tari-ootle-v0.55.0-source/clients/tari_indexer_client" }
+tari_engine_types = { path = "../../../tari-ootle-v0.55.0-source/crates/engine_types" }
+tari_state_tree = { path = "../../../tari-ootle-v0.55.0-source/crates/state_tree" }
+tari_template_lib_types = { path = "../../../tari-ootle-v0.55.0-source/crates/template_lib_types" }
