@@ -1559,11 +1559,14 @@ checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 name = "m13-mainnet-verifier"
 version = "0.1.0"
 dependencies = [
+ "blake2 0.10.6",
  "hex",
  "ootle-network",
+ "rand 0.10.4",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "tari_crypto",
  "tari_engine_types",
  "tari_indexer_client",
  "tari_ootle_common_types",

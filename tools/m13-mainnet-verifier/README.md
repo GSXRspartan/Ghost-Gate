@@ -67,3 +67,17 @@ substate: verified up at epoch Epoch(39263) height NodeHeight(24)
 negative tests: wrong substate id and up-as-down both fail closed
 RESULT: authenticated checkpoint chain and public substate proof verified
 ```
+
+## M14 real output verification
+
+`src/bin/output.rs` extends the same anchor/walk with real native TARI output evidence:
+
+```powershell
+$env:CARGO_TARGET_DIR='D:\pb-target\m13'
+cargo run --manifest-path 'tools\m13-mainnet-verifier\Cargo.toml' --bin output -j 1
+```
+
+It verifies a real current-Up stealth output with `minimum_value_promise = 11_000_000 µTARI`, `is_frozen = false`, key-path spend authorization, and an authenticated fresh anchor. It rejects wrong resource, insufficient promise, frozen output, stale evidence, withheld checkpoints, wrong commitment, substituted challenge, and a spent output that lacks a down proof.
+
+See `docs/M14_REAL_MAINNET_OUTPUT.md`.
+
