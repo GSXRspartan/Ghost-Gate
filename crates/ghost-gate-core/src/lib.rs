@@ -79,6 +79,15 @@ pub mod network {
     /// The current public testnet cohort, and the SDK's `#[default]`.
     pub const ESMERALDA: u8 = 0x26;
 
+    /// Authoritative mainnet native TARI resource address, from
+    /// `STEALTH_TARI_RESOURCE_ADDRESS` in `template_lib_types/src/constants.rs` and the Tari
+    /// tokenomics documentation. It is the fixed resource whose key bytes are all `0x01`.
+    pub const MAINNET_TARI_RESOURCE: &str =
+        "resource_0101010101010101010101010101010101010101010101010101010101010101";
+
+    /// Native TARI divisibility: 1 TARI = 1_000_000 microtari, from the tokenomics documentation.
+    pub const MAINNET_TARI_DIVISIBILITY: u8 = 6;
+
     /// Every cohort byte Ghost Gate will accept as a plausible network binding.
     ///
     /// An unrecognised byte is still comparable -- the gate stores whatever the deploying site chose
@@ -795,6 +804,18 @@ mod tests {
     use tari_template_lib_types::ObjectKey;
 
     const RESOURCE: ResourceAddress = ResourceAddress::new(ObjectKey::from_array([7u8; ObjectKey::LENGTH]));
+
+    #[test]
+    fn mainnet_tari_resource_constant_is_the_canonical_native_resource() {
+        let parsed: ResourceAddress = network::MAINNET_TARI_RESOURCE.parse()
+            .expect("authoritative mainnet TARI resource must parse");
+        assert_eq!(
+            parsed,
+            ResourceAddress::new(ObjectKey::from_array([1u8; ObjectKey::LENGTH]))
+        );
+        assert_eq!(network::MAINNET_TARI_DIVISIBILITY, 6);
+        assert_eq!(network::MAINNET, 0x00);
+    }
 
     /// The cohort these tests pretend to run on. Any cohort works, because the point of the tests is
     /// that the gate compares the challenge against *its own* configured byte.
