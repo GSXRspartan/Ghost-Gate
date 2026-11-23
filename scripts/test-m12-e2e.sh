@@ -265,7 +265,7 @@ key = bytes.fromhex('$BOT_KEY')
 domain = b'ghost-gate/bot-session/v1\x00POST\x00/v1/bot/sessions\x00'
 print(hmac.new(key, domain + '''$T5_BODY'''.encode(), hashlib.sha256).hexdigest())")
 T5_STATUS=$(curl -s -o /tmp/t5.out -w "%{http_code}" -X POST "$BRIDGE_BASE/v1/bot/sessions" \
-    -H "Content-Type: application/json" -H "GG-Bot-HMAC: $T5_SIG" -d "$T5_BODY")
+    -H "Content-Type: application/json" -H "Authorization: GG-Bot-HMAC $T5_SIG" -d "$T5_BODY")
 if [ "$T5_STATUS" = "403" ]; then
     pass "T5: a session whose chat differs from policy is refused (HTTP $T5_STATUS)"
 else

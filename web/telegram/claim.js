@@ -3,11 +3,13 @@
  *
  * The bot creates a session on the bridge (HMAC-authenticated) and sends a
  * ?bot_session={id}&gate={gate} URL to this page. The flow:
- *   1. Build the credential output in the browser wallet (yields substateId);
- *   2. Obtain a signing challenge from the bridge, bound to that substateId;
- *   3. Sign the challenge in the wallet;
+ *   1. Resume an EXISTING qualifying output — pasted, or remembered from this browser's
+ *      last shield. This page never asks the wallet to shield or spend;
+ *   2. Obtain a signing challenge from the bridge, bound to that output;
+ *   3. Sign the challenge in the wallet (the only wallet prompt);
  *   4. Submit the proof to the bridge for on-chain verification;
- *   5. The bot polls the bridge and auto-redeems the Verified session.
+ *   5. POST the claim so the bot redeems the Verified session — the bot's simulated-API
+ *      label comes back and is shown as exactly that.
  *
  * Query params (all set by the bot):
  *   bot_session — the bridge-issued session id (HMAC-minted, server-side)
@@ -19,8 +21,7 @@
  */
 
 import { sapientProvider, universeProvider } from "/js/ghost/provider.js";
-import { formatAmount } from "/js/ghost/capabilities.js";
-import { configuredJoinEndpoints, resolvePublishedGate } from "/telegram/join-endpoints.js";
+import { configuredJoinEndpoints } from "/telegram/join-endpoints.js";
 
 const $ = (id) => document.getElementById(id);
 const step = (name, state) => {
@@ -123,77 +124,53 @@ async function main() {
     );
   }
 
-  $("tg-line").textContent = `${provider.label} found. Fetching the gate's terms…`;
-
+  // ---- the output: pasted first, then the remembered one. This page NEVER shields ----
   // A previously-shielded qualifying output STAYS qualifying: resuming signs over it and
-  // never moves funds. The id comes from the wallet's own shield response (persisted as
-  // "gg-last-output" when this browser last shielded) — never from a balance display,
-  // which proves nothing about any single output's existence. A malformed id is treated
-  // as absent: the fresh path below is the honest fallback.
+  // never moves funds. The id comes from the visitor's paste or from the wallet's own
+  // shield response (persisted as "gg-last-output" when this browser last shielded) —
+  // never from a balance display, which proves nothing about any single output. A first
+  // shield belongs in the Privacy Lab, where the full disclosure and technical
+  // inspector live; this page refuses to mint one.
   const remembered = (() => {
     try { return (localStorage.getItem("gg-last-output") || "").trim(); } catch { return ""; }
   })();
-  const resumeSubstate = /^utxo_[0-9a-f]{64}_[0-9a-f]{64}$/i.test(remembered) ? remembered : "";
+  const OUTPUT_SHAPE = /^utxo_[0-9a-f]{64}_[0-9a-f]{64}$/i;
+  const resumeRow = $("resume-row");
+  const resumeInput = $("resume-substate");
 
-  let substateId;
-  if (resumeSubstate) {
-    // RESUME path: no shield, no spend. The bridge binds the challenge to the EXISTING
-    // output and re-checks existence, unspent status, floor and ownership against chain
-    // state — so a stale or spent id fails here exactly as a fresh one would.
-    step("output", "done");
+  let substateId = null;
+  if (remembered && OUTPUT_SHAPE.test(remembered)) {
+    substateId = remembered;
     $("tg-line").textContent =
       "Using your existing verified output — nothing new is spent. Approve only the signature when the wallet asks.";
-    substateId = resumeSubstate;
-  } else {
-    // The bot's gate parameter selects one exact published gate. Policy (resource, threshold)
-    // comes from the same catalog the Privacy Lab uses — never from the query string.
-    let meta;
-    try {
-      meta = await resolvePublishedGate(gate);
-      if (!meta) throw new Error("not registered");
-    } catch (e) {
-      return fail("The requested gate is not available. Send /join again.", "Gate lookup did not return a published gate.");
-    }
-    const div = Number(meta.divisibility ?? 0);
+  } else if (resumeRow && resumeInput) {
+    // No remembered output this browser can vouch for. Show the paste field and WAIT —
+    // no wallet prompt fires until the visitor supplies an existing output.
+    resumeRow.hidden = false;
     $("tg-line").textContent =
-      `Gate ${meta.gateId}: needs at least ${meta.thresholdRaw} raw units` +
-      (formatAmount(meta.thresholdRaw, div) ? ` (${formatAmount(meta.thresholdRaw, div)})` : "") +
-      `. Approve the proof output in your wallet…`;
-
-    try {
-      // Step 1: build the credential output. The substateId is needed to bind the challenge.
-      step("output", "active");
-      $("tg-line").textContent = "Approve the proof output in your wallet — it is public and permanent.";
-      const built = await provider.approveAndBuildProof("credential", {
-        resourceAddress: meta.resourceAddress,
-        amount: String(BigInt(meta.thresholdRaw)),
-        minimumValuePromise: String(BigInt(meta.thresholdRaw)),
-        maxFee: "50000",
+      "Paste the utxo_… id of an existing qualifying output (from a previous shield — " +
+      "the wallet's own history has it). This page never shields or spends.";
+    await new Promise((resolve) => {
+      $("resume-proof").addEventListener("click", () => {
+        const value = (resumeInput.value || "").trim();
+        if (!OUTPUT_SHAPE.test(value)) {
+          $("tg-line").textContent =
+            "That does not look like a utxo_… output id — check the wallet's shield history and paste it again.";
+          return;
+        }
+        substateId = value;
+        resumeRow.hidden = true;
+        resolve();
       });
-      if (!built || !built.substateId) {
-        throw new Error("the wallet produced no proof artifact to verify");
-      }
-      substateId = built.substateId;
-      // Remember the output so the NEXT join can resume from it instead of shielding again:
-      // re-shielding spends funds for nothing.
-      try { localStorage.setItem("gg-last-output", substateId); } catch { /* private mode */ }
-      step("output", "done");
-    } catch (e) {
-      if (e && e.code === 4100) return fail("Wallet authorization ended. Send /join to start again.");
-      const lc = String(e && e.message ? e.message : e).toLowerCase();
-      if (lc.includes("insufficient")) {
-        const humanThreshold = meta && formatAmount(meta.thresholdRaw, Number(meta.divisibility ?? 0))
-          ? `${formatAmount(meta.thresholdRaw, Number(meta.divisibility ?? 0))} ${meta.symbol || "tokens"}`.trim()
-          : "the required threshold";
-        return showRejection(
-          "Not enough funds.",
-          "Your wallet does not hold enough of the required token to pass this gate. " +
-          `Reveal at least ${humanThreshold} in a qualifying output and try again with /join.`,
-        );
-      }
-      throw e;
-    }
+    });
+    $("tg-line").textContent =
+      "Using your existing verified output — nothing new is spent. Approve only the signature when the wallet asks.";
+  } else {
+    return fail(
+      "No existing output to resume. Shield once in the Privacy Lab, then send /join again.",
+    );
   }
+  step("output", "done");
 
   // Steps 2-5 are one transaction of progress: a failure in any of them is named by the
   // catch below, and the page never reports a success that did not happen.
@@ -258,8 +235,13 @@ async function main() {
     throw new Error(claimResult.error || "the bot could not complete this admission");
   }
   step("claim", "done");
-  $("tg-line").textContent =
-    "Verified and admitted — the bot has approved your join request. Check Telegram.";
+  // The bot labels every admission. A process talking to the simulated Telegram API reports
+  // "simulated-fixture" and the page must show exactly that: a fixture approval is evidence
+  // of a working pipeline, never of a live membership change.
+  const simulated = claimResult.admission && claimResult.admission !== "production";
+  $("tg-line").textContent = simulated
+    ? "SIMULATED ADMISSION — the fixture Telegram API recorded the approval. No real Telegram group membership was changed."
+    : "Verified and admitted — the bot has approved your join request. Check Telegram.";
 
   } catch (e) {
     const msg = e && e.message ? e.message : String(e);

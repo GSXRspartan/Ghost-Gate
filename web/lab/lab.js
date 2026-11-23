@@ -304,7 +304,9 @@ function renderGateFacts(gate) {
 
     if (!gate.activatable) {
         $("gt-availability").hidden = false;
-        $("gt-availability").textContent = "experimental — cannot activate";
+        $("gt-availability").textContent = gate.ggbp1TestAvailable
+            ? "GGBP-1 test below; not an access grant"
+            : "experimental — cannot activate";
         $("gt-availability").className = "badge bad";
     } else {
         $("gt-availability").hidden = true;
@@ -322,7 +324,7 @@ function renderGgbp1Card(gate) {
     const available = !!(gate && gate.proofMode === "xtm" && gate.network === GGBP1_ESMERALDA && gate.ggbp1TestAvailable === true);
     card.hidden = !available;
     if (!available) return;
-    $("ggbp1-note").textContent = `Gate ${gate.gateId}: prove at least ${formatAmount(gate.thresholdRaw, gate.divisibility)} ${gate.symbol || "tXTM"} on Esmeralda. This is a test gate: the bridge verifies the wallet's GGBP-1 v3 proof and returns a labelled verdict, never a session.`;
+    $("ggbp1-note").textContent = `Gate ${gate.gateId}: prove at least ${formatAmount(gate.thresholdRaw, gate.divisibility)} ${gate.symbol || "tXTM"} on Esmeralda. This is a test gate: the bridge verifies the wallet's GGBP-1 v3 proof and returns a labelled verdict, never a session. Privacy: disclosed L1 outputs are linkable even though exact balances remain hidden.`;
 }
 
 function tariGgbp1Provider() {
@@ -427,13 +429,22 @@ function ggbp1ChallengeFields(challengeHex) {
     const hex = String(challengeHex || "").toLowerCase();
     if (hex.length !== 223 * 2) throw new Error("the bridge returned a malformed GGBP-1 challenge");
     const field = (start, end) => hex.slice(start * 2, end * 2);
+    // Layout: "GGBP1"(5) | version(1) | network(1) | genesis(32) | origin(32) |
+    // gate_id(16) | config_version(8) | subject_id(16) | subject_key(32) |
+    // threshold(8) | nonce(32) | expiry(8) | fingerprint(32).
     return {
         version: parseInt(field(5, 6), 16),
         network: parseInt(field(6, 7), 16),
         genesisHash: field(7, 39),
         originHash: field(39, 71),
-        subjectId: field(71, 87),
-        subjectPublicKey: field(87, 119),
+        gateId: field(71, 87),
+        configVersion: field(87, 95),
+        subjectId: field(95, 111),
+        subjectPublicKey: field(111, 143),
+        threshold: field(143, 151),
+        nonce: field(151, 183),
+        expiresAt: field(183, 191),
+        fingerprint: field(191, 223),
     };
 }
 
@@ -473,6 +484,9 @@ async function runGgbp1Test() {
         if (!ggbp1 || Number(ggbp1.protocolVersion) !== 3) {
             throw new Error("the wallet does not advertise the ggbp1BalanceProof capability (v3)");
         }
+        if (String(ggbp1.network || "").toLowerCase() !== "esmeralda") {
+            throw new Error("the wallet GGBP-1 capability is not for Esmeralda");
+        }
         const subject = await ggbp1Subject(provider);
         const challengeRes = await api(`/gate/${gate.gateId}/ggbp1/challenge`, {
             method: "POST",
@@ -494,6 +508,13 @@ async function runGgbp1Test() {
         }
         if (fields.subjectPublicKey !== subject.publicKey) {
             throw new Error("the challenge subject key does not match the wallet subject");
+        }
+        if (challenge.subjectId && fields.subjectId !== String(challenge.subjectId).toLowerCase()) {
+            throw new Error("the challenge subject id does not match the server response");
+        }
+        if (challenge.commitmentGeneratorFingerprint &&
+            fields.fingerprint !== String(challenge.commitmentGeneratorFingerprint).toLowerCase()) {
+            throw new Error("the challenge generator fingerprint does not match the server response");
         }
         if (subject.fingerprint && challenge.commitmentGeneratorFingerprint &&
             subject.fingerprint !== String(challenge.commitmentGeneratorFingerprint).toLowerCase()) {
@@ -541,6 +562,19 @@ async function renderWallets() {
     state.mode = null;
     const gate = state.gate;
     if (!gate) { sel.innerHTML = '<option>—</option>'; return; }
+
+    const gate = state.gate;
+    if (!gate) { sel.innerHTML = '<option>—</option>'; return; }
+
+    if (gate.proofMode === "xtm") {
+        sel.innerHTML = '<option value="">GGBP-1 test card below</option>';
+        state.mode = null;
+        const note = $("wallet-note");
+        note.classList.remove("ok", "warn", "bad");
+        note.textContent = "For the GGBP-1 v3 tXTM test, use the dedicated card below.";
+        renderConnectIntro();
+        return;
+    }
 
     const options = [];
     // The consensus path needs a wallet daemon; the bridge knows whether one is there. A

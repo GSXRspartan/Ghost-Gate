@@ -739,6 +739,10 @@ pub struct Bot<T: TelegramApi, B: BridgeClient> {
     /// Bridge admissions whose `approve_join_request` has not yet returned success.
     /// Keyed by the opaque bridge session_id.  Retried on every `tick()`.
     pending_approvals: HashMap<String, PendingApproval>,
+    /// True only when this process talks to a SIMULATED Telegram API (the HTTP fixture), so the
+    /// claim endpoint can label every admission honestly: a fixture approval must never be
+    /// presentable as a live group membership change.
+    pub simulated_telegram: bool,
 }
 
 impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
@@ -758,12 +762,14 @@ impl<T: TelegramApi, B: BridgeClient> Bot<T, B> {
             bot_sessions: HashMap::new(),
             bot_store_dir: None,
             pending_approvals: HashMap::new(),
+            simulated_telegram: false,
         }
     }
 
     fn new_fixture(telegram: T, bridge: B, chat: i64, gate: String) -> Self {
         let mut bot = Self::new(telegram, bridge, chat, gate);
         bot.fixture_authorization = true;
+        bot.simulated_telegram = true;
         bot
     }
 
@@ -1669,6 +1675,7 @@ async fn run() -> i32 {
             );
             let telegram = TelegramBot::with_api_url(&token, api_base);
             let mut bot = Bot::new(telegram, HttpBridge::new(&bridge), test_chat, gate.clone());
+            bot.simulated_telegram = true;
             bot.admission_bridges.append(&mut bridges);
             bot.bot_store_dir = Some(dir);
             bot.load_stores();
@@ -1862,16 +1869,32 @@ fn configure_admission_bridges() -> Vec<BotAdmissionBridge> {
     ] {
         let key_hex  = std::env::var(format!("{prefix}_KEY")).unwrap_or_default();
         let endpoint = std::env::var(format!("{prefix}_BRIDGE")).unwrap_or_default();
+        let endpoint = endpoint.trim();
         let gate_id  = std::env::var(format!("{prefix}_GATE_ID")).unwrap_or_default();
         let ph       = std::env::var(format!("{prefix}_POLICY_HASH")).unwrap_or_default();
-        if [&key_hex, &endpoint, &gate_id, &ph].iter().any(|v| v.trim().is_empty()) {
+        if key_hex.trim().is_empty() || endpoint.is_empty()
+            || gate_id.trim().is_empty() || ph.trim().is_empty() {
+            continue;
+        }
+        // The HMAC key authenticates requests to this endpoint. Never allow it to cross a network
+        // boundary; the production bot and bridge live on the same loopback host.
+        if !(endpoint.starts_with("http://127.0.0.1:") || endpoint.starts_with("http://localhost:")) {
+            eprintln!("ghost-gate-telegram: {prefix}_BRIDGE must be a loopback http URL; skipping {label}");
+            continue;
+        }
+        if ph.trim().len() != 64 || !ph.trim().chars().all(|c| c.is_ascii_hexdigit()) {
+            eprintln!("ghost-gate-telegram: {prefix}_POLICY_HASH must be 64 hex characters; skipping {label}");
             continue;
         }
         let key_bytes = match hex::decode(key_hex.trim()) {
-            Ok(b) if b.len() == 32 => {
+            Ok(b) if b.len() == 32 && b.iter().any(|byte| *byte != 0) => {
                 let mut arr = [0u8; 32];
                 arr.copy_from_slice(&b);
                 arr
+            }
+            Ok(b) if b.len() == 32 => {
+                eprintln!("ghost-gate-telegram: {prefix}_KEY must not be all zeros; skipping {label}");
+                continue;
             }
             Ok(_) => {
                 eprintln!("ghost-gate-telegram: {prefix}_KEY must be 32 bytes (64 hex chars); skipping {label}");
@@ -2136,7 +2159,10 @@ async fn handle_claim_http_for_origin<T: TelegramApi, B: BridgeClient>(
         }
         return match bot.claim_bot_admission(session_id).await {
             Ok(_) => {
-                let payload = json!({ "state": "granted", "admission": "production", "at": now_unix() }).to_string();
+                // The admission label is the bot's own honesty marker: a process talking to the
+                // HTTP fixture must never be presentable as a live membership change.
+                let admission_label = if bot.simulated_telegram { "simulated-fixture" } else { "production" };
+                let payload = json!({ "state": "granted", "admission": admission_label, "at": now_unix() }).to_string();
                 claim_http_response("200 OK", &payload, allowed_origin)
             },
             Err(e) => {

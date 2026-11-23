@@ -22,10 +22,14 @@ tar czf "$TEMP_ARCHIVE" \
     data/replays
 chmod 0600 "$TEMP_ARCHIVE"
 mv -f -- "$TEMP_ARCHIVE" "$ARCHIVE"
+sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+chmod 0600 "$ARCHIVE.sha256"
 trap - EXIT
 
 # Keep only the last 14 daily backups
-ls -1t "$BACKUP_DIR"/ghost-gate-*.tar.gz 2>/dev/null | tail -n +15 | xargs -r rm --
+ls -1t "$BACKUP_DIR"/ghost-gate-*.tar.gz 2>/dev/null | tail -n +15 | while read -r old; do
+    rm -f -- "$old" "$old.sha256"
+done
 
 echo "Backup: $ARCHIVE ($(du -h "$ARCHIVE" | cut -f1))"
 echo "Backups retained: $(ls -1 "$BACKUP_DIR"/ghost-gate-*.tar.gz 2>/dev/null | wc -l)"

@@ -60,12 +60,28 @@
     <h2 style="letter-spacing:.2em">Telegram verification</h2>
     <p class="hint" id="tg-line">Reading your join link…</p>
     <ol class="proof-steps" id="tg-steps">
-      <li data-step="output">Your wallet creates the proof output — public and permanent (approval in your wallet)</li>
+      <li data-step="output">The qualifying output is named — an existing one is resumed; nothing new is spent</li>
       <li data-step="challenge">The bridge issues a signing challenge bound to your output</li>
       <li data-step="sign">Your wallet signs the gate's challenge</li>
       <li data-step="verify">The bridge verifies ownership and balance against chain state</li>
-      <li data-step="claim">The bot approves your Telegram join request</li>
+      <li data-step="claim">The bot completes the admission</li>
     </ol>
+    <!-- Existing-output resume: a previously-shielded qualifying output stays qualifying.
+         Pasting its substate id here signs a fresh challenge over it — no new shield, no
+         spend, no fee. The id is what the wallet returned when it shielded (it is also in
+         the wallet's own transaction history). This page never asks the wallet to shield. -->
+    <div class="resume-row" id="resume-row" hidden>
+      <input type="text" id="resume-substate" class="resume-input" placeholder="utxo_… — existing output id from a previous shield"
+             spellcheck="false" autocomplete="off" aria-label="Existing output substate id">
+      <button class="ghost" id="resume-proof" type="button">Use this existing output</button>
+    </div>
+    <style>
+      .resume-row { display: flex; gap: 0.6rem; margin: 0.7rem auto 0; max-width: 680px; flex-wrap: wrap; align-items: center; }
+      .resume-row[hidden] { display: none; }
+      .resume-row .resume-input { flex: 1 1 320px; min-width: 0; background: rgba(8, 20, 12, 0.85); color: var(--green, #b8ffcc); border: 1px solid rgba(184, 255, 204, 0.35); border-radius: 6px; padding: 0.55rem 0.7rem; font-family: ui-monospace, monospace; font-size: 0.82rem; }
+      .resume-row .resume-input:focus { outline: 2px solid var(--green, #b8ffcc); outline-offset: -1px; }
+      .resume-row .resume-input::placeholder { color: rgba(232, 255, 236, 0.35); }
+    </style>
     <section class="status-panel" id="tg-error" role="alert" hidden>
       <h3 id="tg-error-heading">Verification unavailable</h3>
       <p id="tg-error-message"></p>

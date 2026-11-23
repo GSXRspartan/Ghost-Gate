@@ -6,7 +6,8 @@ tunnel: TUNNEL_ID_HERE
 credentials-file: /opt/ghost-gate/etc/cloudflared-tunnel.json
 
 ingress:
-  # Only the hosted verifier and the Telegram credential routes are public.
+  # Only the hosted verifier and the browser-facing Telegram session challenge/proof routes
+  # are public. Bot-only session creation and redemption stay loopback-only behind HMAC.
   # The private administrator dashboard on 127.0.0.1:7811 is reached only over SSH forwarding;
   # never add /admin or its port to this Tunnel configuration.
   # Rules match paths, not methods; the bridge must still enforce its own authorization.
@@ -25,6 +26,13 @@ ingress:
     originRequest:
       noTLSVerify: false
       connectTimeout: 10s
+  - hostname: bridge.DOMAIN_HERE
+    path: '^/v1/bot/sessions/[A-Za-z0-9_-]+/(challenge|proof)$'
+    service: http://127.0.0.1:7799
+    originRequest:
+      noTLSVerify: false
+      connectTimeout: 10s
+
   - hostname: bridge.DOMAIN_HERE
     path: '^/lab/trace$'
     service: http://127.0.0.1:7799

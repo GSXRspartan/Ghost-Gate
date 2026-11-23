@@ -50,6 +50,20 @@ pub enum BotSessionError {
     Unavailable,
 }
 
+/// How long a Created session stays provable, in seconds.
+///
+/// Default 180. The operator may widen it (`GG_BOT_SESSION_TTL_SECS`) but never past 600 —
+/// the Telegram challenge itself refuses a window over 600 seconds
+/// (`TelegramProofContext::signing_challenge`), so a session whose TTL exceeded that could be
+/// created but never proved. Values below 60 are refused as misconfiguration rather than
+/// honoured, because a TTL that short turns a moment of clock skew into a dead link.
+fn session_ttl(raw: Option<&str>) -> u64 {
+    raw.map(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(None)
+        .unwrap_or(180)
+        .clamp(60, 600)
+}
+
 /// Scoped authenticated operation; the caller must pass the socket's actual peer, never a header.
 /// HMAC authenticates the raw body, fixed method and fixed route. Replays are rejected in SQLite.
 pub fn create_session(
@@ -78,7 +92,9 @@ pub fn create_session(
         || request.policy_hash != policy.policy_hash {
         return Err(BotSessionError::Refused);
     }
-    let expires = now.checked_add(180).ok_or(BotSessionError::Unavailable)?;
+    let expires = now
+        .checked_add(session_ttl(std::env::var("GG_BOT_SESSION_TTL_SECS").ok().as_deref()))
+        .ok_or(BotSessionError::Unavailable)?;
     let context = AuthorizationContext {
         telegram_user_id: request.telegram_user_id,
         telegram_chat_id: policy.telegram_chat_id,
@@ -126,6 +142,20 @@ mod tests {
         mac.update(DOMAIN); mac.update(body); hex::encode(mac.finalize().into_bytes())
     }
     fn local() -> SocketAddr { "127.0.0.1:1234".parse().unwrap() }
+
+    #[test]
+    fn session_ttl_is_default_180_and_clamped_to_the_challenge_bound() {
+        // Default, unset: the historical 180-second window.
+        assert_eq!(session_ttl(None), 180);
+        assert_eq!(session_ttl(Some("")), 180);
+        assert_eq!(session_ttl(Some("garbage")), 180);
+        // The operator may widen a local test session, but never past the 600-second bound
+        // the Telegram challenge itself enforces.
+        assert_eq!(session_ttl(Some("600")), 600);
+        assert_eq!(session_ttl(Some("1800")), 600, "the challenge window is the ceiling");
+        // And never so short that clock skew kills the link.
+        assert_eq!(session_ttl(Some("5")), 60);
+    }
 
     #[test]
     fn authenticated_event_creates_only_one_durable_server_policy_bound_session() {

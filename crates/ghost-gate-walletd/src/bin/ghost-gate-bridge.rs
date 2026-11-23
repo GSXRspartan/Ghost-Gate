@@ -1003,8 +1003,40 @@ where
         return Err("GG_BOT_CHAT_ID must be negative (Telegram group and supergroup IDs are negative)".into());
     }
     let policy_hash = policy_hash.trim().to_string();
-    if policy_hash.len() != 64 {
+    if policy_hash.len() != 64 || !policy_hash.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err("GG_BOT_POLICY_HASH must be exactly 64 hex characters".into());
+    }
+
+    // The gate must exist. When the bridge is registry-backed, do not trust a manually
+    // synchronised policy hash: derive it from the authoritative published snapshot and refuse
+    // startup on divergence. In fixture/env-gate mode there is no registry plane, so the env hash
+    // remains the only source (that mode is never a production authorization path).
+    let gate_network = bridge.gates.get(gate_id.trim())
+        .ok_or_else(|| format!("GG_BOT_GATE_ID {gate_id:?} is not a registered gate"))?
+        .network;
+    if bridge.access.is_some() {
+        let derived = bridge.access.as_mut().unwrap().plane.current_policy_hash(gate_id.trim())
+            .ok_or_else(|| format!(
+                "registry-backed bridge has no published policy hash for gate {gate_id:?}"
+            ))?;
+        if !derived.eq_ignore_ascii_case(&policy_hash) {
+            return Err(format!(
+                "GG_BOT_POLICY_HASH does not match the registry policy for {gate_id:?}: expected {derived}, got {policy_hash}"
+            ));
+        }
+        let use_mode = bridge.gates.use_mode_of(gate_id.trim())
+            .unwrap_or_else(|| "website".to_string());
+        if use_mode != "telegram" && use_mode != "both" {
+            return Err(format!(
+                "gate {gate_id:?} has use_mode {use_mode:?}; bot admission requires telegram or both"
+            ));
+        }
+        if gate_network != network {
+            return Err(format!(
+                "GG_BOT_NETWORK 0x{network:02x} does not match registered gate network 0x{gate_network:02x}"
+            ));
+        }
+        println!("  bot policy hash verified against registry for gate {gate_id}");
     }
 
     let policy = ghost_gate_bridge::bot_session_interface::BotGatePolicy {

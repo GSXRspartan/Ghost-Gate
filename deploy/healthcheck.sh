@@ -22,6 +22,15 @@ else
     STATUS=1
 fi
 
+# Private admin plane: loopback listener must exist but is never put behind the tunnel.
+if (exec 3<>/dev/tcp/127.0.0.1/7811) 2>/dev/null; then
+    exec 3<&- 3>&- || true
+    echo "admin: LOOPBACK LISTENING"
+else
+    echo "admin: NOT LISTENING"
+    STATUS=1
+fi
+
 # Cloudflared tunnel
 if systemctl is-active --quiet cloudflared 2>/dev/null; then
     echo "tunnel: ACTIVE"

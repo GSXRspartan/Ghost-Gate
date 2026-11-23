@@ -17,13 +17,16 @@ test("M6+ Telegram page verifies bot session and gate before any wallet proof is
   const source = readFileSync(new URL("../../web/telegram/claim.js", import.meta.url), "utf8");
   // No static kill-switch — server-side session creation is the authoritative admission gate.
   assert.doesNotMatch(source, /const telegramAdmissionAvailable = false/);
-  // bot_session guard must appear before the wallet call.
+  // The bot_session guard must appear before the FIRST wallet call of any kind (probe,
+  // sign, or build): a page without a session id never contacts the provider. Search for
+  // a call site, not the import path string ("/js/ghost/provider.js" also matches).
   const botSessionCheck = source.indexOf("if (!botSession)");
-  const wallet = source.indexOf("await provider.approveAndBuildProof");
-  assert.ok(botSessionCheck >= 0 && wallet > botSessionCheck,
-    "bot_session guard must come before wallet call");
+  const firstWalletCall = source.indexOf("await p.probe()");
+  assert.ok(firstWalletCall > 0, "the page must probe the wallet at all");
+  assert.ok(botSessionCheck >= 0 && firstWalletCall > botSessionCheck,
+    "bot_session guard must come before any wallet call");
   // Between the guard and the wallet call there must be a fail() return.
-  assert.match(source.slice(botSessionCheck, wallet), /return fail\(/);
+  assert.match(source.slice(botSessionCheck, firstWalletCall), /return fail\(/);
 });
 
 test("Telegram join uses only deployment-configured exact HTTPS bridge and claim endpoints", () => {
@@ -77,7 +80,6 @@ test("Telegram join uses M6+ bot-session bridge endpoints for all proof operatio
   // M6+: proof operations use /v1/bot/sessions/{id}/challenge and /v1/bot/sessions/{id}/proof,
   // not the old /gate/{id}/challenge or /gate/{id}/credential endpoints.
   const source = readFileSync(new URL("../../web/telegram/claim.js", import.meta.url), "utf8");
-  assert.match(source, /resolvePublishedGate\(gate\)/);
   assert.match(source, /\/v1\/bot\/sessions\//);
   // The gate path must not appear as a direct URL suffix — routing goes through bot-session ids.
   assert.doesNotMatch(source, /bridgeBase}\/gate/);
@@ -93,11 +95,22 @@ test("canonical and legacy Telegram join assets both expose a structured error p
   }
 });
 
-test("Telegram claim refusal derives human threshold wording from published gate metadata", () => {
+test("the join page resumes an existing output and never asks the wallet to shield", () => {
+  // M12: the page resumes a qualifying output the visitor already holds — pasted or
+  // remembered — and refuses to mint a new one. A first shield belongs in the Privacy
+  // Lab, where the full disclosure and the technical inspector live.
   const source = readFileSync(new URL("../../web/telegram/claim.js", import.meta.url), "utf8");
-  assert.match(source, /Reveal at least \$\{humanThreshold\} in a qualifying output and try again with \/join/);
-  assert.doesNotMatch(source, /Unshield more tTARI and try again with \/join/);
-  assert.match(source, /formatAmount\(meta\.thresholdRaw, div\)/);
+  assert.match(source, /gg-last-output/);
+  assert.match(source, /utxo_\$\{botSession\}|utxo_… id of an existing qualifying output/);
+  assert.match(source, /This page never shields or spends/);
+  assert.doesNotMatch(source, /approveAndBuildProof/);
+  assert.doesNotMatch(source, /tari_createTransactionRequest/);
+  // The admission label must distinguish a simulated Telegram API from a live one.
+  assert.match(source, /simulated-fixture|SIMULATED ADMISSION/);
+  // And the page itself carries the paste field so the resume never depends on localStorage.
+  const html = readFileSync(new URL("../../web/telegram/join.html", import.meta.url), "utf8");
+  assert.match(html, /id="resume-row"/);
+  assert.match(html, /id="resume-substate"/);
 });
 
 test("Telegram expiry tells the user to mint a new link without weakening token checks", () => {
