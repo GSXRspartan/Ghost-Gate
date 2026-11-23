@@ -15,7 +15,7 @@
 
 use ghost_gate_registry::{
     admin_session_for, append_audit, derive_bindings, expire_admin_sessions, load_bindings, load_registry,
-    load_sessions, new_token, save_bindings, save_registry, AdminCredential, AdminSession,
+    load_sessions, new_token, save_bindings, save_public_policy, save_registry, AdminCredential, AdminSession,
     AuditEntry, AuditOutcome, CredentialKind, Registry, StoreLock, StorePaths,
 };
 use crate::auth::{
@@ -263,6 +263,9 @@ impl AdminState {
                     }
                 };
                 save_registry(&self.paths, &reg)?;
+                // H-03: publish the sanitized view for the public bridge in the same locked
+                // mutation, so the bridge never sees administrator credentials or sessions.
+                save_public_policy(&self.paths, &reg.public_view())?;
                 if let Some(bindings) = bindings {
                     save_bindings(&self.paths, &bindings)?;
                 }

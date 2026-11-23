@@ -393,6 +393,9 @@ impl StorePaths {
         Self { dir: dir.as_ref().to_path_buf() }
     }
     pub fn registry(&self) -> PathBuf { self.dir.join("registry.json") }
+    /// Sanitized policy snapshot for the public bridge. Contains no administrator credentials,
+    /// administrator sessions, or audit tail.
+    pub fn public_policy(&self) -> PathBuf { self.dir.join("public-policy.json") }
     pub fn bindings(&self) -> PathBuf { self.dir.join("bindings.json") }
     pub fn sessions(&self) -> PathBuf { self.dir.join("sessions.json") }
     pub fn audit(&self) -> PathBuf { self.dir.join("audit.ndjson") }
@@ -628,11 +631,78 @@ pub fn save_registry(paths: &StorePaths, reg: &Registry) -> Result<(), String> {
     let json = serde_json::to_vec_pretty(reg).map_err(|e| format!("cannot serialise the registry: {e}"))?;
     {
         let mut f = fs::File::create(&tmp).map_err(|e| format!("cannot write the registry: {e}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))
+                .map_err(|e| format!("cannot protect the registry: {e}"))?;
+        }
         f.write_all(&json).and_then(|_| f.sync_all())
             .map_err(|e| format!("cannot write the registry: {e}"))?;
     }
     fs::rename(&tmp, &path).map_err(|e| format!("cannot install the registry: {e}"))?;
     Ok(())
+}
+
+impl Registry {
+    /// A policy-only view for the public bridge. Administrator credentials, administrator
+    /// sessions and the audit tail never leave the administrator trust domain.
+    pub fn public_view(&self) -> Self {
+        Self {
+            applications: self.applications.clone(),
+            credentials: Vec::new(),
+            versions: self.versions.clone(),
+            replacements: self.replacements.clone(),
+            revocations: self.revocations.clone(),
+            audit_tail: Vec::new(),
+            admin_sessions: Vec::new(),
+            sessions: self.sessions.clone(),
+            store_revision: self.store_revision,
+            generation_floor: BTreeMap::new(),
+        }
+    }
+}
+
+/// Persist the sanitized policy snapshot. The bridge reads this instead of `registry.json`.
+pub fn save_public_policy(paths: &StorePaths, reg: &Registry) -> Result<(), String> {
+    let _ = fs::create_dir_all(&paths.dir);
+    let tmp = paths.dir.join(format!("public-policy.json.tmp{}", std::process::id()));
+    let json = serde_json::to_vec_pretty(reg).map_err(|e| e.to_string())?;
+    fs::File::create(&tmp)
+        .and_then(|mut f| f.write_all(&json).and_then(|_| f.sync_all()))
+        .map_err(|e| format!("cannot write public policy: {e}"))?;
+    fs::rename(&tmp, paths.public_policy()).map_err(|e| format!("cannot install public policy: {e}"))
+}
+
+/// Load the sanitized snapshot. Validation skips the owner-credential cross-check because the
+/// credentials are intentionally absent; the version/hash/session checks still run.
+pub fn load_public_policy(paths: &StorePaths) -> Result<Option<Registry>, String> {
+    let path = paths.public_policy();
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = fs::read(&path).map_err(|e| format!("cannot read public policy: {e}"))?;
+    let mut reg: Registry = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("public policy file is corrupt: {e}"))?;
+    if !reg.credentials.is_empty() || !reg.admin_sessions.is_empty() || !reg.audit_tail.is_empty() {
+        return Err("public policy snapshot contains administrator state".into());
+    }
+    let mut check = reg.clone();
+    check.credentials = reg
+        .applications
+        .iter()
+        .map(|app| AdminCredential {
+            credential_id: app.owner_credential.clone(),
+            kind: CredentialKind::WalletKey,
+            label: "public-view-owner".to_string(),
+            registered_unix: 0,
+            es256_public_sec1: None,
+            ristretto_public_hex: Some("00".repeat(32)),
+        })
+        .collect();
+    check.validate_all().map_err(|e| format!("public policy failed validation: {e}"))?;
+    reg.generation_floor = load_generation_floor(paths)?;
+    Ok(Some(reg))
 }
 
 /// Append one audit line to the permanent ndjson log. Best-effort on I/O errors is NOT good
@@ -1109,6 +1179,35 @@ mod tests {
 
     fn hasher() -> Blake3Hasher {
         Blake3Hasher
+    }
+
+    #[test]
+    fn public_view_carries_no_administrator_state() {
+        let mut reg = Registry::default();
+        reg.credentials.push(AdminCredential {
+            credential_id: "owner".into(),
+            kind: CredentialKind::WalletKey,
+            label: "owner".into(),
+            registered_unix: 1,
+            es256_public_sec1: None,
+            ristretto_public_hex: Some("00".repeat(32)),
+        });
+        reg.admin_sessions.push(AdminSession {
+            token: "secret-bearer".into(),
+            credential_id: "owner".into(),
+            created_unix: 1,
+            expires_unix: 2,
+            csrf: "secret-csrf".into(),
+            stepup_until_unix: 0,
+            last_seen_unix: 1,
+        });
+        reg.applications.push(app("app", "owner"));
+        let view = reg.public_view();
+        assert!(view.credentials.is_empty());
+        assert!(view.admin_sessions.is_empty());
+        assert!(view.audit_tail.is_empty());
+        assert_eq!(view.applications.len(), 1);
+        assert_eq!(view.applications[0].application_id, "app");
     }
 
     /// The operator opt-in used by tests that exercise the testnet tier.
@@ -1897,16 +1996,24 @@ impl AccessPlane {
     /// Fresh registry, re-reading the file when it changed. A corrupt file is refused: the caller
     /// keeps its last-known-good state and logs — never half-trusts.
     pub fn registry(&mut self) -> Result<Registry, String> {
-        let path = self.paths.bindings(); // touch the pair, but the registry is the source
-        let _ = &path;
-        let reg_path = self.paths.registry();
+        // Prefer the sanitized policy snapshot. The fallback keeps older test/staging stores
+        // working, but a production bridge must publish public-policy.json before H-03 is closed.
+        let (reg_path, reg) = match load_public_policy(&self.paths)? {
+            Some(reg) => (self.paths.public_policy(), reg),
+            None => {
+                eprintln!(
+                    "ghost-gate-registry: public-policy.json missing; falling back to registry.json. \
+                     Publish the sanitized snapshot with the admin plane before production use."
+                );
+                (self.paths.registry(), load_registry(&self.paths)?)
+            }
+        };
         let mtime = fs::metadata(&reg_path).and_then(|m| m.modified()).ok();
         if let Some((_, cached_at)) = &self.cached_registry {
             if mtime == Some(*cached_at) {
                 return Ok(self.cached_registry.as_ref().unwrap().0.clone());
             }
         }
-        let reg = load_registry(&self.paths)?;
         if let Some(t) = mtime {
             self.cached_registry = Some((reg.clone(), t));
         }

@@ -81,6 +81,11 @@ mv -- "$TMP/data/registry" "$BASE/data/registry"
 mv -- "$TMP/data/replays" "$BASE/data/replays"
 chown -R ghostgate-registry:ghostgate-registry "$BASE/data/registry" "$BASE/data/replays"
 chmod -R go-rwx "$BASE/data/registry" "$BASE/data/replays"
+# H-03: registry.json belongs exclusively to the admin plane after restore.
+if [ -f "$BASE/data/registry/registry.json" ]; then
+  chown ghostgate-admin:ghostgate-admin "$BASE/data/registry/registry.json"
+  chmod 0600 "$BASE/data/registry/registry.json"
+fi
 
 echo "restore: starting services"
 systemctl start ghost-gate-bridge

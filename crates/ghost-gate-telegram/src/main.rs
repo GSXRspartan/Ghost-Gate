@@ -2172,32 +2172,15 @@ async fn handle_claim_http_for_origin<T: TelegramApi, B: BridgeClient>(
         };
     }
 
-    // Legacy / fixture claim: browser posts `{token, proof_id}`.
-    let token = body["token"].as_str().unwrap_or("").to_string();
-    let proof_id = body["proof_id"].as_str().unwrap_or("").to_string();
-    if token.is_empty() || proof_id.is_empty() {
-        return claim_http_response(
-            "400 Bad Request",
-            &json!({ "error": "token and proof_id required" }).to_string(),
-            allowed_origin,
-        );
-    }
-    match bot.claim(&token, &proof_id).await {
-        Ok(link) => {
-            let payload = json!({
-                "state": "granted",
-                "admission": bot.admission_label(),
-                "invite_link": link,
-                "at": now_unix(),
-            })
-            .to_string();
-            claim_http_response("200 OK", &payload, allowed_origin)
-        },
-        Err(e) => {
-            let payload = json!({ "state": "refused", "error": e }).to_string();
-            claim_http_response("403 Forbidden", &payload, allowed_origin)
-        },
-    }
+    // H-01: the legacy, unbound `{token, proof_id}` claim is permanently disabled at the HTTP
+    // boundary. Only the server-issued, identity-bound `bot_session_id` path above may redeem an
+    // admission. Fixture tests of the old state machine remain in the unit tests below, but the
+    // public claim endpoint never dispatches to them.
+    claim_http_response(
+        "403 Forbidden",
+        &json!({ "error": "legacy token/proof_id claims are disabled" }).to_string(),
+        allowed_origin,
+    )
 }
 
 #[cfg(test)]
@@ -2644,7 +2627,7 @@ mod tests {
         );
         let response = handle_claim_http_for_origin(&mut bot, &request, "http://127.0.0.1:7799").await;
         assert!(response.contains("403 Forbidden"), "{response}");
-        assert!(response.contains("join link expired"), "{response}");
+        assert!(response.contains("legacy token/proof_id claims are disabled"), "{response}");
     }
 
     #[tokio::test]
@@ -2792,19 +2775,34 @@ mod tests {
         let body = serde_json::json!({ "token": token, "proof_id": "proof7" }).to_string();
         let request = format!("POST /claim HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://127.0.0.1:7799\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len());
         let response = handle_claim_http_for_origin(&mut bot, &request, "http://127.0.0.1:7799").await;
-        assert!(response.contains("200 OK"), "{response}");
-        assert!(response.contains("granted"), "{response}");
-        assert!(response.contains("test_only"), "fixture responses are never production grants: {response}");
+        assert!(response.contains("403 Forbidden"), "{response}");
+        assert!(response.contains("legacy token/proof_id claims are disabled"), "{response}");
         assert!(
             response.contains("Access-Control-Allow-Origin: http://127.0.0.1:7799"),
             "the preflight names the join page's origin exactly: {response}"
         );
         assert!(response.contains("Cache-Control: no-store"), "claim responses are not cacheable: {response}");
         assert!(response.contains("X-Content-Type-Options: nosniff"), "claim responses disable sniffing: {response}");
+    }
 
-        // Replay with the same body: the token is consumed, so it refuses now.
-        let response2 = handle_claim_http_for_origin(&mut bot, &request, "http://127.0.0.1:7799").await;
-        assert!(response2.contains("403"), "{response2}");
+    #[tokio::test]
+    async fn legacy_token_proof_id_claim_is_refused_at_http_boundary() {
+        let bridge = FakeBridge {
+            answers: HashMap::from([("proof-legacy".to_string(), FakeBridge::accepted("crypt"))]),
+            access: None,
+        };
+        let (mut bot, tg) = bot_owned(bridge);
+        let (token, _) = mint_join(&mut bot, 77).await;
+        let body = serde_json::json!({ "token": token, "proof_id": "proof-legacy" }).to_string();
+        let request = format!(
+            "POST /claim HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://127.0.0.1:7799\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let response = handle_claim_http_for_origin(&mut bot, &request, "http://127.0.0.1:7799").await;
+        assert!(response.contains("403 Forbidden"), "{response}");
+        assert!(response.contains("legacy token/proof_id claims are disabled"), "{response}");
+        assert_eq!(bot.grant_count(), 0, "legacy claim never grants");
+        assert!(tg.lock().unwrap().approved.is_empty(), "legacy claim never approves a join request");
     }
 
     #[tokio::test]

@@ -1,0 +1,11 @@
+{
+  "_note": "ILLUSTRATIVE ONLY. There is no authoritative mainnet Crypt registry binding in this repository. Do not use this policy for live authorization.",
+  "gate_id": "Crypt",
+  "network": 0,
+  "policy_hash": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+  "resource_address": "resource_0101010101010101010101010101010101010101010101010101010101010101",
+  "threshold_raw": 100000000,
+  "relying_site": "https://ghostgate.boo",
+  "telegram_scope": true,
+  "challenge_hex": "0707070707070707070707070707070707070707070707070707070707070707"
+}

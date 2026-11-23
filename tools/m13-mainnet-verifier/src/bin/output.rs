@@ -38,7 +38,9 @@ const WALK_SHARD: u32 = 1;
 const MAX_TRUSTED_EPOCH_LAG: u64 = 2;
 const GATE_THRESHOLD_MICRO: u64 = 1_000_000;
 const GATE_ID: &str = "Crypt";
-const POLICY_HASH: &str = "13af3169aefb313f355368c5b9131d512d86048ab700d850024c79ddb680b74f";
+// Illustrative only: there is no authoritative mainnet Crypt registry binding in this repository.
+// The Esmeralda hash 13af…0b74f must never be presented as a mainnet policy.
+const POLICY_HASH: &str = "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1";
 const RELYING_ORIGIN: &str = "https://ghostgate.boo";
 
 #[derive(Debug, Deserialize)]
@@ -53,13 +55,16 @@ struct VerifiedEvidenceResult {
     network: u8,
     policy_hash: String,
     output_id: String,
+    resource_address: String,
     commitment_hex: String,
     minimum_value_promise: u64,
     frozen: bool,
     state: &'static str,
     anchor_epoch: u64,
     anchor_height: u64,
+    current_epoch: u64,
     evidence_age_epochs: u64,
+    challenge_hex: String,
     relying_origin: String,
 }
 
@@ -217,7 +222,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
     let checkpoints = fetch_checkpoints(&client, bases[0]).await?;
-    let (trusted, sets) = walk(&committee.committee, &checkpoints, health.current_epoch)?;
+    // Walk slightly past the health epoch so a proof anchor from a concurrently advancing
+    // indexer still has a trusted committee. Freshness is judged against health below.
+    let (trusted, sets) = walk(&committee.committee, &checkpoints, health.current_epoch + 2)?;
     println!(
         "checkpoint walk: {} handovers, trusted epoch {}",
         checkpoints.len(),
@@ -365,13 +372,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         network: 0,
         policy_hash: POLICY_HASH.to_string(),
         output_id: format!("{}…{}", &UP_OUTPUT[..24], &UP_OUTPUT[UP_OUTPUT.len()-8..]),
+        resource_address: resource.clone(),
         commitment_hex: format!("{}…{}", &commit[..8], &commit[commit.len()-8..]),
         minimum_value_promise: minimum,
         frozen,
         state: "Up",
         anchor_epoch: tip.epoch.as_u64(),
         anchor_height: tip.height.as_u64(),
+        current_epoch: health.current_epoch,
         evidence_age_epochs: age,
+        challenge_hex: hex::encode([7u8; 32]),
         relying_origin: RELYING_ORIGIN.to_string(),
     };
     println!("verified evidence: {}", serde_json::to_string(&result)?);

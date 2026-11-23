@@ -52,6 +52,12 @@ chown ghostgate-bridge:ghostgate-bridge /opt/ghost-gate/data/replays
 chmod 700 /opt/ghost-gate/data/replays
 chown ghostgate-admin:ghostgate-registry /opt/ghost-gate/data/registry
 chmod 2770 /opt/ghost-gate/data/registry
+# H-03: registry.json holds admin credentials and sessions. The public bridge reads the
+# sanitized public-policy.json snapshot instead, so only the admin account may read this file.
+if [ -f /opt/ghost-gate/data/registry/registry.json ]; then
+  chown ghostgate-admin:ghostgate-admin /opt/ghost-gate/data/registry/registry.json
+  chmod 0600 /opt/ghost-gate/data/registry/registry.json
+fi
 chown root:root /opt/ghost-gate/data/backups
 chmod 700 /opt/ghost-gate/data/backups
 usermod -a -G ghostgate-registry ghostgate-bridge
