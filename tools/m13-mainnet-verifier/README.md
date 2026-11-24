@@ -5,7 +5,7 @@ Standalone verifier for Tari Ootle mainnet evidence. It is **not** connected to 
 ## Source
 
 - Tari Ootle v0.55.0, signed tag commit `b7c964c45d0251c89270739ec1ceaffbfb983e59`.
-- Local source checkout: `C:\Users\pdark\Documents\Codex\tari-ootle-v0.55.0-source`.
+- Local source checkout: `D:\tari-ootle-v0.55.0-source` (sibling of the repository root on the D: drive; the Cargo.toml relative path resolves there).
 - This crate is standalone (`[workspace]` in its own Cargo.toml) and does not change the Ghost Gate workspace dependency graph.
 
 ## Bootstrap anchor
@@ -33,7 +33,7 @@ Both public mainnet indexers independently serve epoch-38362 committee hash `a43
 ## Run
 
 ```powershell
-$env:CARGO_TARGET_DIR='D:\pb-target\m13'
+$env:CARGO_TARGET_DIR='D:\GG-Target\m13'
 cargo run --manifest-path 'tools\m13-mainnet-verifier\Cargo.toml' --bin anchor -j 1
 cargo run --manifest-path 'tools\m13-mainnet-verifier\Cargo.toml' --bin verify -j 1
 ```
@@ -73,7 +73,7 @@ RESULT: authenticated checkpoint chain and public substate proof verified
 `src/bin/output.rs` extends the same anchor/walk with real native TARI output evidence:
 
 ```powershell
-$env:CARGO_TARGET_DIR='D:\pb-target\m13'
+$env:CARGO_TARGET_DIR='D:\GG-Target\m13'
 cargo run --manifest-path 'tools\m13-mainnet-verifier\Cargo.toml' --bin output -j 1
 ```
 

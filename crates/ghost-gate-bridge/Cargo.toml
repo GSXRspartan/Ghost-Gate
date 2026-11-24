@@ -26,6 +26,7 @@ tari_crypto = { workspace = true }
 tari_script = "6.0.1-pre.2"
 blake2 = "0.10.6"
 diesel = { version = "2.3.13", default-features = false, features = ["sqlite"] }
+libsqlite3-sys = { version = "0.30", features = ["bundled"] }
 hmac = "0.12"
 sha2 = "0.10"
 serde = { workspace = true }
