@@ -203,6 +203,10 @@ impl<'a> Route<'a> {
             // The Telegram join flow, served same-origin so the credential flow works.
             ("GET", ["telegram", "join"]) => Route::Asset("telegram/join.html"),
             ("GET", ["telegram", "claim.js"]) => Route::Asset("telegram/claim.js"),
+    // The two modules claim.js imports: without them the join page's module graph fails to
+    // load and the visitor sees a page that never leaves "Reading your join link.".
+    ("GET", ["telegram", "join-endpoints.js"]) => Route::Asset("telegram/join-endpoints.js"),
+    ("GET", ["telegram", "trusted-url.js"]) => Route::Asset("telegram/trusted-url.js"),
             ("POST", ["v1", "hosted", "verify"]) => Route::HostedVerify,
             // The Telegram admission path. The two bot-only routes carry no id in the path:
             // the session id travels inside the HMAC-signed body, so it cannot be swapped by

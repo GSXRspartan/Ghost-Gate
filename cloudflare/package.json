@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "test": "node --test test/*.test.js",
+    "test:web-assets": "node ../scripts/check-web-assets.mjs",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy"
   },

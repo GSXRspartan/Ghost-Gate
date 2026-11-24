@@ -16,6 +16,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
+<!-- An inline icon: without it every page load logs a 404 for /favicon.ico. -->
+<link rel="icon" href="data:,">
 <!-- The join page trusts exactly two origins, configured HERE (deployment-controlled HTML),
      never from the join link's query string. Loopback http is accepted only when the PAGE
      itself is served from http://127.0.0.1 or http://localhost (trusted-url.js), which is the

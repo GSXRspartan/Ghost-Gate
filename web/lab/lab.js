@@ -563,9 +563,6 @@ async function renderWallets() {
     const gate = state.gate;
     if (!gate) { sel.innerHTML = '<option>—</option>'; return; }
 
-    const gate = state.gate;
-    if (!gate) { sel.innerHTML = '<option>—</option>'; return; }
-
     if (gate.proofMode === "xtm") {
         sel.innerHTML = '<option value="">GGBP-1 test card below</option>';
         state.mode = null;

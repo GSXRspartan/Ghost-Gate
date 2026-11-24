@@ -1316,6 +1316,8 @@ impl<W: WalletChannel, R: crate::credential::ChainReader, X: crate::xtm::XtmChan
                 | "vendor/tari-dapp.d.ts"
                 | "telegram/join.html"
                 | "telegram/claim.js"
+                | "telegram/join-endpoints.js"
+                | "telegram/trusted-url.js"
                 // The Privacy Lab page and its assets. A fixed set, like every other asset:
                 // there is no dynamic path under /lab, only the files the Lab actually loads.
                 // The two state modules are imported by lab.js; without them the Lab's module
