@@ -1,0 +1,23 @@
+[package]
+name = "m16-fixture-bridge"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+ghost-gate-bridge = { path = "../../crates/ghost-gate-bridge" }
+ghost-gate-core = { path = "../../crates/ghost-gate-core" }
+ghost-gate-cbor = { path = "../../crates/ghost-gate-cbor" }
+ghost-gate-registry = { path = "../../crates/ghost-gate-registry" }
+ghost-gate-ggbp1 = { path = "../../crates/ghost-gate-ggbp1" }
+tari_template_lib_types = { path = "../../../_ootle-v042-ghost-gate/crates/template_lib_types" }
+tari_crypto = "=0.23.4"
+tari_hashing = "=6.0.1-pre.2"
+tari_script = "=6.0.1-pre.2"
+reqwest = { version = "0.12", features = ["json"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+anyhow = "1"
+hex = "0.4"
