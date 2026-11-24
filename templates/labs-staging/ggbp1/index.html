@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex,nofollow">
+<meta name="gg-lab" content="ggbp1-l1">
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/labs.css">
+<title>Ghost Gate — Esmeralda L1 tXTM GGBP-1 Lab (staging)</title>
+</head>
+<body>
+<main class="shell">
+<nav><a href="/">← Labs staging</a> · <span class="muted">isolated / non-authorizing</span></nav>
+<h1>B · Esmeralda L1 tXTM GGBP-1 Lab</h1>
+<p class="banner">EXPERIMENTAL · NON-AUTHORIZING · NO CHAIN-AUTHORIZED ACCESS GRANTS</p>
+
+<section class="card">
+<h2>GGBP-1 v3 test gate</h2>
+<dl>
+<dt>L1 network</dt><dd>Esmeralda <code>0x26</code> · genesis pin enforced by the test verifier</dd>
+<dt>dApp environment</dt><dd>Ootle L2 dApp frame with embedded L1 balance-proof methods</dd>
+<dt>Methods</dt><dd><code>tari_getBalanceProofSubject</code> · <code>tari_requestBalanceProof</code></dd>
+<dt>Protocol</dt><dd>GGBP-1 v3 — subject/origin hash binding, 223-byte challenge encoding</dd>
+<dt>Threshold</dt><dd>illustrative <code>1000000</code> micro-tXTM</dd>
+</dl>
+<p class="warn"><strong>Limitation:</strong> no authenticated L1 chain checker is configured, so cryptographic verification alone produces a labelled test result. It can never become a chain-authorized access grant.</p>
+</section>
+
+<section class="card">
+<h2>Wallet provider diagnostics</h2>
+<p id="wallet-state" role="status">Checking wallet provider…</p>
+<div class="controls">
+<button id="discover" type="button">Re-check wallet capability</button>
+<button id="challenge" type="button" disabled>Start GGBP-1 test — disabled on staging</button>
+</div>
+<p class="muted">An actual wallet provider is required. This page does not weaken iframe sandboxing, origin checks, CORS or CSP to make a provider appear. A missing provider produces an explicit diagnostic below.</p>
+<pre id="output" aria-live="polite"></pre>
+</section>
+
+<footer><a href="/_edge/health">Health</a> · <a href="/lab/gates">Static gate metadata</a></footer>
+</main>
+<script src="/labs.js"></script>
+</body>
+</html>

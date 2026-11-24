@@ -34,6 +34,7 @@ browser-profile*/
 *.backup
 staging-web/
 staging-web.pre-*/
+labs-staging-web/
 artifacts/
 temp/
 /tmp/

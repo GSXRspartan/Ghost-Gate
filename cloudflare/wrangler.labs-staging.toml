@@ -1,0 +1,13 @@
+name = "ghost-gate-labs-staging"
+main = "src/labs-staging-worker.js"
+compatibility_date = "2026-10-23"
+
+[assets]
+directory = "../labs-staging-web"
+binding = "ASSETS"
+run_worker_first = true
+
+# Deliberately isolated: a NEW Worker name, no [[routes]], no custom domain, no
+# Durable Object binding, no secrets and no production vars. It can never share
+# replay state, registry state, Telegram sessions or the production Worker's
+# deployment history. Public HTTPS is provided by the workers.dev origin.

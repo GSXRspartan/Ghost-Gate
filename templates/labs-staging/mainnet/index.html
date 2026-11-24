@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex,nofollow">
+<meta name="gg-lab" content="mainnet-l2">
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/labs.css">
+<title>Ghost Gate — Mainnet L2 TARI Privacy Lab (staging)</title>
+</head>
+<body>
+<main class="shell">
+<nav><a href="/">← Labs staging</a> · <span class="muted">isolated / non-authorizing</span></nav>
+<h1>A · Mainnet L2 TARI Privacy Lab</h1>
+<p class="banner">DRAFT · ADMISSIONS DISABLED · NO TELEGRAM · NO SESSION ISSUANCE</p>
+
+<section class="card">
+<h2>Gate configuration (draft, published as static metadata)</h2>
+<dl>
+<dt>Network</dt><dd>mainnet <code>0x00</code></dd>
+<dt>Gate</dt><dd>Crypt</dd>
+<dt>Resource</dt><dd><code>resource_0101…0101</code> — native L2 TARI</dd>
+<dt>Threshold</dt><dd><code>100000000</code> raw = <strong>100 TARI</strong> (illustrative draft, divisibility 6)</dd>
+<dt>Policy flags</dt><dd><code>enabled=false</code>, <code>test_lane=true</code>, <code>chain_generation=0</code></dd>
+<dt>Telegram scope</dt><dd>false — no admission or authorization session is possible</dd>
+</dl>
+<p class="warn"><strong>Limitation:</strong> the authenticated consensus verifier is <em>not</em> integrated into this hosted Lab's positive verdict. Any wallet-side observation here is evidence for testing, not an authorization.</p>
+</section>
+
+<section class="card">
+<h2>Wallet discovery and ownership challenge</h2>
+<p id="wallet-state" role="status">Checking wallet provider…</p>
+<div class="controls">
+<button id="discover" type="button">Re-check wallet capability</button>
+<button id="challenge" type="button" disabled>Request challenge — disabled on staging</button>
+</div>
+<p class="muted">Ownership-proof observation uses the real mainnet indexer for chain evidence. The hosted staging edge has no proof-submission, session or admission route; all such requests are refused with HTTP 404.</p>
+<pre id="output" aria-live="polite"></pre>
+</section>
+
+<footer><a href="/_edge/health">Health</a> · <a href="/lab/gates">Static gate metadata</a></footer>
+</main>
+<script src="/labs.js"></script>
+</body>
+</html>
