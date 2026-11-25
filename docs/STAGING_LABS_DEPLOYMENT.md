@@ -33,24 +33,20 @@ Local health after start:
 - Both healthy; both configured with path-only ingress allowlists ending in `http_status:404`. Allowed paths are only `/health`, `/wallet/status`, `/lab(/gates|/trace|/lab.css|/lab.js|/technical-state.js|/wallet-connection-state.js|/gate-list.js)`, `/gate/<id>/(challenge|prove|credential)`, `/proof/<id>/status` (plus `/gate/<id>/ggbp1/(challenge|verify)` on the GGBP-1 tunnel), the Lab's shared JS/vendor assets and the mainnet assets. No bot, claim, admin, session or fixture path is routed.
 - Production tunnel `50f00269-40fc-4b60-86ff-da2da9371eb3` was not modified.
 
-## Remaining blocker: DNS Write permission
-
-The wrangler OAuth token has `zone:read` and `connectivity:admin` but **no DNS Write scope**, so `POST /zones/{zone}/dns_records` returns authentication error 10000 and `cloudflared tunnel route dns` cannot obtain an origin certificate. The two new tunnels therefore have no public hostnames yet; `<tunnel-id>.cfargotunnel.com` returns 530/1016, as verified from both the Worker and the VPS.
-
-Exact changes required (new records only; no existing record is touched):
+## Public hostnames (created by the operator, verified 2026-11-24)
 
 | Type | Name | Target | Proxied |
 | --- | --- | --- | --- |
 | CNAME | `labs-mainnet.ghostgate.boo` | `30f709ca-6936-4927-9931-c4e88f06687f.cfargotunnel.com` | yes |
 | CNAME | `labs-ggbp1.ghostgate.boo` | `37946028-c85e-499a-b2cf-e87133c8502d.cfargotunnel.com` | yes |
 
-Zone id `06d6832a76933976f5cfca35401e7ecc`. Once a token with DNS Write is available, run:
+No production DNS record was modified. The earlier DNS-write blocker was resolved by the operator creating these two new records manually; `scripts/create-labs-dns.ps1` remains as an idempotent helper that refuses to overwrite existing records.
 
-```powershell
-powershell -File scripts/create-labs-dns.ps1 -ApiToken '<DNS-write token>'
-```
+### Fix applied to the new tunnels only
 
-The script refuses to overwrite any existing record and never writes the token to disk or Git. After those records exist, update `GG_BRIDGE_ORIGINS`/`GG_BRIDGE_RELYING_SITE` if different hostnames are chosen, and verify public `/lab`, `/lab/gates`, `/health` plus negative routes.
+Initially every public request returned 403 from the bridge's DNS-rebinding Host check: the tunnel forwarded `Host: labs-*.ghostgate.boo`, while the loopback bridge accepts only 127.0.0.1/localhost. `originRequest.httpHostHeader = "127.0.0.1"` was added to every allowlisted ingress rule on **both new tunnels** (the same pattern the production tunnel uses for `/claim`). The production tunnel `50f00269-…` was not changed. After the fix all six public endpoints returned 200.
+
+The staging-only Worker templates were also updated to link to the two hosted Labs; the static pages remain capability-discovery previews and issue no proof request.
 
 ## Production inventory and health (2026-11-24)
 
